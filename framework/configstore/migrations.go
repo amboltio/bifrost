@@ -495,6 +495,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_use_openai_endpoints_column"}, run: migrationAddUseOpenAIEndpointsColumn},
 	{IDs: []string{"add_time_of_day_pricing_columns"}, run: migrationAddTimeOfDayPricingColumns},
 	{IDs: []string{"add_identity_tables"}, run: migrationAddIdentityTables},
+	{IDs: []string{"add_identity_audit_tables"}, run: migrationAddIdentityAuditTables},
 }
 
 // migrationAddIdentityTables creates the canonical identity boundary. It is
@@ -534,6 +535,39 @@ func migrationAddIdentityTables(ctx context.Context, db *gorm.DB, logger schemas
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: deleting canonical user and credential records would permanently invalidate identities", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityAuditTables creates the durable audit journal and
+// transactional outbox after canonical identities are available. It is
+// additive and deliberately non-rollbackable because removing audit evidence
+// or pending invalidations would create a silent security gap.
+func migrationAddIdentityAuditTables(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_audit_tables"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			for _, model := range []any{&tables.TableAuditEvent{}, &tables.TableOutboxEvent{}} {
+				if !mg.HasTable(model) {
+					if err := mg.CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: deleting security journal records or pending invalidations is unsafe", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {
