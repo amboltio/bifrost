@@ -6,7 +6,11 @@ const (
 	ConfigAdminUsernameKey = "admin_username"
 	ConfigAdminPasswordKey = "admin_password"
 	ConfigIsAuthEnabledKey = "is_auth_enabled"
-	ConfigProxyKey         = "proxy_config"
+	// ConfigIdentityLegacyBootstrapKey records the canonical user created from
+	// the pre-identity admin configuration. It contains only a user ID and
+	// timestamp, never a username, password, or verifier.
+	ConfigIdentityLegacyBootstrapKey = "identity_legacy_bootstrap_v1"
+	ConfigProxyKey                   = "proxy_config"
 	// ConfigComplexityAnalyzerConfigKey stores the persisted analyzer config JSON.
 	//
 	// This row is also the rollback-compatibility surface: it is written in a
@@ -59,8 +63,8 @@ const (
 	//
 	// Written under a distributed lock because every node updates the same row.
 	ConfigComplexitySemanticGenerationsKey = "complexity_semantic_generations"
-	ConfigRestartRequiredKey              = "restart_required"
-	ConfigHeaderFilterKey                 = "header_filter_config"
+	ConfigRestartRequiredKey               = "restart_required"
+	ConfigHeaderFilterKey                  = "header_filter_config"
 )
 
 // Keys for the ClientConfig.MetadataJSON blob.

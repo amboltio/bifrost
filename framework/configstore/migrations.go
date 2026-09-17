@@ -496,6 +496,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_time_of_day_pricing_columns"}, run: migrationAddTimeOfDayPricingColumns},
 	{IDs: []string{"add_identity_tables"}, run: migrationAddIdentityTables},
 	{IDs: []string{"add_identity_audit_tables"}, run: migrationAddIdentityAuditTables},
+	{IDs: []string{"add_identity_session_fields"}, run: migrationAddIdentitySessionFields},
 }
 
 // migrationAddIdentityTables creates the canonical identity boundary. It is
@@ -568,6 +569,50 @@ func migrationAddIdentityAuditTables(ctx context.Context, db *gorm.DB, logger sc
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: deleting security journal records or pending invalidations is unsafe", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentitySessionFields extends the legacy dashboard-session row
+// in place. Existing token and expires_at columns remain readable for one
+// release while the bootstrap binds their unambiguous owner after importing
+// the legacy admin account.
+func migrationAddIdentitySessionFields(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_session_fields"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if !mg.HasTable(&tables.SessionsTable{}) {
+				return fmt.Errorf("sessions table is missing: run add_sessions_table before %s", migrationName)
+			}
+			for _, field := range []string{
+				"UserID", "AuthMethod", "ProviderID", "LastSeenAt",
+				"AbsoluteExpiresAt", "IdleExpiresAt", "RevokedAt", "AuthVersion",
+			} {
+				if err := addColumnIfNotExists(tx, logger, &tables.SessionsTable{}, field); err != nil {
+					return fmt.Errorf("add sessions.%s: %w", field, err)
+				}
+			}
+			for _, field := range []string{"UserID", "AuthMethod", "ProviderID", "LastSeenAt", "AbsoluteExpiresAt", "IdleExpiresAt", "RevokedAt"} {
+				if !mg.HasIndex(&tables.SessionsTable{}, field) {
+					if err := mg.CreateIndex(&tables.SessionsTable{}, field); err != nil {
+						return fmt.Errorf("create sessions index for %s: %w", field, err)
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing identity ownership can reactivate revoked sessions", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {

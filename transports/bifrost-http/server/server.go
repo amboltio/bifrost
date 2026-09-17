@@ -24,6 +24,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	dynamicPlugins "github.com/maximhq/bifrost/framework/plugins"
@@ -2848,6 +2849,15 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if s.Config.ConfigStore == nil {
 		logger.Error("auth middleware requires config store, skipping auth middleware initialization")
 	} else {
+		if bootstrapStore, ok := s.Config.ConfigStore.(configstore.LegacyAdminBootstrapStore); ok {
+			bootstrapResult, bootstrapErr := identity.BootstrapLegacyAdmin(s.Ctx, bootstrapStore)
+			if bootstrapErr != nil {
+				return fmt.Errorf("legacy admin identity bootstrap failed: %w", bootstrapErr)
+			}
+			if bootstrapResult.Imported {
+				logger.Info("imported legacy dashboard administrator into canonical identity storage")
+			}
+		}
 		// Use a signed (stateless) ticket store when an encryption key is configured
 		// so tickets are verifiable across nodes; otherwise fall back to in-memory.
 		// NewSignedWSTicketStore handles empty key by degrading to in-memory mode.

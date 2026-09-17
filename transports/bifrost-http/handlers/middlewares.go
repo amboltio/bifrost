@@ -847,10 +847,7 @@ func validateSession(_ *fasthttp.RequestCtx, store configstore.ConfigStore, toke
 	if err != nil || session == nil {
 		return false
 	}
-	if session.ExpiresAt.Before(time.Now()) {
-		return false
-	}
-	return true
+	return session.IsActiveAt(time.Now())
 }
 
 // isInferenceWSEndpoint returns true for WebSocket endpoints that should use
