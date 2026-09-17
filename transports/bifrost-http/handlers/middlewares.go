@@ -19,6 +19,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/temptoken"
 	"github.com/maximhq/bifrost/framework/tracing"
 	"github.com/maximhq/bifrost/plugins/governance"
@@ -846,6 +847,14 @@ func validateSession(_ *fasthttp.RequestCtx, store configstore.ConfigStore, toke
 	session, err := store.GetSession(context.Background(), token)
 	if err != nil || session == nil {
 		return false
+	}
+	if session.UserID != nil {
+		canonicalStore, ok := store.(identity.IdentitySessionStore)
+		if !ok {
+			return false
+		}
+		_, err := identity.NewSessionService(canonicalStore, identity.SessionPolicy{}, nil).AuthenticateSession(context.Background(), token)
+		return err == nil
 	}
 	return session.IsActiveAt(time.Now())
 }

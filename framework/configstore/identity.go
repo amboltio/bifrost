@@ -63,6 +63,23 @@ func (s *RDBConfigStore) GetUserByNormalizedEmail(ctx context.Context, email str
 	return &user, nil
 }
 
+// GetUserByLegacyUsername supports the transitional administrator mapping for
+// deployments whose original dashboard username was not an email address.
+func (s *RDBConfigStore) GetUserByLegacyUsername(ctx context.Context, username string) (*tables.TableUser, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, nil
+	}
+	var user tables.TableUser
+	if err := s.DB().WithContext(ctx).First(&user, "legacy_username = ?", username).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &user, nil
+}
+
 // UpdateUser persists profile fields through the model hook so email lookup
 // normalization remains identical for creates and updates.
 func (s *RDBConfigStore) UpdateUser(ctx context.Context, user *tables.TableUser, tx ...*gorm.DB) error {

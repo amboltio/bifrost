@@ -13,6 +13,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -142,18 +143,48 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Creating a new session
-	token := uuid.New().String()
-	session := &tables.SessionsTable{
-		Token:     token,
-		ExpiresAt: time.Now().Add(time.Hour * 24 * 30), // 30 days
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-	err = h.configStore.CreateSession(ctx, session)
-	if err != nil {
-		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create session: %v", err))
-		return
+	// Prefer the canonical identity session after the startup bootstrap has
+	// imported the old admin. The fallback remains only for a pre-migration
+	// config-store implementation during the one-release compatibility bridge.
+	var token string
+	var expiresAt time.Time
+	if canonicalStore, ok := h.configStore.(identity.CanonicalUserLookupStore); ok {
+		user, lookupErr := canonicalStore.GetUserByNormalizedEmail(ctx, payload.Username)
+		if lookupErr != nil {
+			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to load authenticated user")
+			return
+		}
+		if user == nil {
+			user, lookupErr = canonicalStore.GetUserByLegacyUsername(ctx, payload.Username)
+			if lookupErr != nil {
+				SendError(ctx, fasthttp.StatusInternalServerError, "Failed to load authenticated user")
+				return
+			}
+		}
+		if user == nil {
+			SendError(ctx, fasthttp.StatusUnauthorized, "Invalid username or password")
+			return
+		}
+		normalized := authConfig.Normalized()
+		policy := identity.SessionPolicy{}
+		if normalized.LocalLogin != nil {
+			policy.AbsoluteTTL = time.Duration(normalized.LocalLogin.SessionTTLSeconds) * time.Second
+			policy.IdleTimeout = time.Duration(normalized.LocalLogin.IdleTimeoutSeconds) * time.Second
+		}
+		service := identity.NewSessionService(canonicalStore, policy, nil)
+		token, expiresAt, err = service.IssueSession(ctx, user.ID, "legacy", "")
+		if err != nil {
+			SendError(ctx, fasthttp.StatusUnauthorized, "Invalid username or password")
+			return
+		}
+	} else {
+		token = uuid.New().String()
+		expiresAt = time.Now().Add(time.Hour * 24 * 30)
+		session := &tables.SessionsTable{Token: token, ExpiresAt: expiresAt, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		if err = h.configStore.CreateSession(ctx, session); err != nil {
+			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create session: %v", err))
+			return
+		}
 	}
 
 	// Setting cookies
@@ -161,7 +192,7 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 	defer fasthttp.ReleaseCookie(cookie)
 	cookie.SetKey("token")
 	cookie.SetValue(token)
-	cookie.SetExpire(time.Now().Add(time.Hour * 24 * 30))
+	cookie.SetExpire(expiresAt)
 	cookie.SetPath("/")
 	cookie.SetHTTPOnly(true)
 	cookie.SetSameSite(fasthttp.CookieSameSiteLaxMode)

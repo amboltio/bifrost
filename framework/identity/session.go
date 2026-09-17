@@ -33,6 +33,14 @@ type IdentitySessionStore interface {
 	RevokeIdentitySession(ctx context.Context, id int, revokedAt time.Time) error
 }
 
+// CanonicalUserLookupStore adds the transitional lookup keys needed by the
+// existing legacy login form while local-user endpoints are introduced.
+type CanonicalUserLookupStore interface {
+	IdentitySessionStore
+	GetUserByNormalizedEmail(ctx context.Context, email string) (*tables.TableUser, error)
+	GetUserByLegacyUsername(ctx context.Context, username string) (*tables.TableUser, error)
+}
+
 // SessionService creates and authenticates identity-bound dashboard sessions.
 type SessionService struct {
 	store  IdentitySessionStore
