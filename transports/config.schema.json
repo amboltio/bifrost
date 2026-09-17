@@ -4187,7 +4187,7 @@
     },
     "auth_config": {
       "type": "object",
-      "description": "Authentication configuration. Deprecated: Use governance.auth_config instead.",
+      "description": "Dashboard authentication configuration. At the top level this block is deprecated; use governance.auth_config as the canonical location.",
       "properties": {
         "admin_username": {
           "type": "string",
@@ -4201,13 +4201,137 @@
           "type": "boolean",
           "description": "Whether authentication is enabled"
         },
+        "local_login": {
+          "type": "object",
+          "description": "Local email/password login. Public registration is intentionally unsupported.",
+          "properties": {
+            "is_enabled": {
+              "type": "boolean",
+              "description": "Whether local email/password sign-in is available"
+            },
+            "session_ttl_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 43200,
+              "description": "Absolute local-login session lifetime in seconds. Defaults to 12 hours."
+            },
+            "idle_timeout_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1800,
+              "description": "Idle local-login session timeout in seconds. Defaults to 30 minutes and cannot exceed session_ttl_seconds."
+            },
+            "allow_registration": {
+              "type": "boolean",
+              "const": false,
+              "default": false,
+              "description": "Must remain false. Users are created by authorized administrators."
+            }
+          },
+          "required": ["is_enabled", "allow_registration"],
+          "additionalProperties": false
+        },
+        "oidc_providers": {
+          "type": "array",
+          "description": "OpenID Connect providers. Each stable ID is used by callback and directory lifecycle records.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                "description": "Stable provider identifier"
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Login-page label for this provider"
+              },
+              "issuer_url": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://",
+                "description": "HTTPS OpenID Connect issuer URL"
+              },
+              "client_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "OIDC client ID. Supports env. and vault. secret references."
+              },
+              "client_secret": {
+                "type": "string",
+                "minLength": 1,
+                "description": "OIDC client secret. Supports env. and vault. secret references and is never returned in management responses."
+              },
+              "scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true,
+                "description": "Additional OIDC scopes requested with the required openid scope"
+              },
+              "is_enabled": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether this provider is offered for sign-in"
+              }
+            },
+            "required": ["id", "display_name", "issuer_url", "client_id", "client_secret"],
+            "additionalProperties": false
+          }
+        },
         "disable_auth_on_inference": {
           "type": "boolean",
           "deprecated": true,
           "description": "Deprecated and ignored. Use client_config.enforce_auth_on_inference instead."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_enabled": {
+                "const": true
+              }
+            },
+            "required": ["is_enabled"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": ["admin_username", "admin_password"]
+              },
+              {
+                "required": ["local_login"],
+                "properties": {
+                  "local_login": {
+                    "required": ["is_enabled"],
+                    "properties": {
+                      "is_enabled": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["oidc_providers"],
+                "properties": {
+                  "oidc_providers": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
     },
     "pricing_config": {
       "type": "object",

@@ -1941,13 +1941,6 @@ func GenerateFrameworkConfigHash(pricingURL *string, modelParametersURL *string,
 	return hex.EncodeToString(h[:]), nil
 }
 
-// AuthConfig represents configured auth config for Bifrost dashboard
-type AuthConfig struct {
-	AdminUserName *schemas.SecretVar `json:"admin_username"`
-	AdminPassword *schemas.SecretVar `json:"admin_password"`
-	IsEnabled     bool               `json:"is_enabled"`
-}
-
 // ConfigMap maps provider names to their configurations.
 type ConfigMap map[schemas.ModelProvider]ProviderConfig
 

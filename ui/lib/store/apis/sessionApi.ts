@@ -11,10 +11,21 @@ export interface LoginResponse {
 	message: string;
 }
 
+export interface IdentityFeatureCapabilities {
+	local_users: boolean;
+	oidc_login: boolean;
+	organizations: boolean;
+	roles: boolean;
+	access_profiles: boolean;
+	projects: boolean;
+	user_analytics: boolean;
+}
+
 export interface IsAuthEnabledResponse {
 	is_auth_enabled: boolean;
 	has_valid_token: boolean;
 	auth_type?: "sso" | "password" | "none";
+	identity_capabilities?: IdentityFeatureCapabilities;
 }
 
 export interface LogoutResponse {

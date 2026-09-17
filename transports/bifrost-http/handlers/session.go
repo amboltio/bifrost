@@ -23,6 +23,25 @@ type SessionHandler struct {
 	wsTicketStore *WSTicketStore
 }
 
+// AuthStatusResponse is the public login bootstrap contract. auth_type remains
+// for older dashboard clients; identity_capabilities gates newer management
+// views until the corresponding protected backend slice is implemented.
+type AuthStatusResponse struct {
+	IsAuthEnabled        bool                                    `json:"is_auth_enabled"`
+	HasValidToken        bool                                    `json:"has_valid_token"`
+	AuthType             string                                  `json:"auth_type"`
+	IdentityCapabilities configstore.IdentityFeatureCapabilities `json:"identity_capabilities"`
+}
+
+func newAuthStatusResponse(isEnabled bool, hasValidToken bool) AuthStatusResponse {
+	return AuthStatusResponse{
+		IsAuthEnabled:        isEnabled,
+		HasValidToken:        hasValidToken,
+		AuthType:             dashboardAuthType(isEnabled),
+		IdentityCapabilities: configstore.ImplementedIdentityFeatureCapabilities(),
+	}
+}
+
 // NewSessionHandler creates a new session handler instance
 func NewSessionHandler(configStore configstore.ConfigStore, wsTicketStore *WSTicketStore) *SessionHandler {
 	return &SessionHandler{
@@ -42,11 +61,7 @@ func (h *SessionHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 // isAuthEnabled handles GET /api/session/is-auth-enabled - Check if auth is enabled
 func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 	if h.configStore == nil {
-		SendJSON(ctx, map[string]any{
-			"is_auth_enabled": false,
-			"has_valid_token": false,
-			"auth_type":       "none",
-		})
+		SendJSON(ctx, newAuthStatusResponse(false, false))
 		return
 	}
 	authConfig, err := h.configStore.GetAuthConfig(ctx)
@@ -55,11 +70,7 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if authConfig == nil {
-		SendJSON(ctx, map[string]any{
-			"is_auth_enabled": false,
-			"has_valid_token": false,
-			"auth_type":       "none",
-		})
+		SendJSON(ctx, newAuthStatusResponse(false, false))
 		return
 	}
 	// Check if the header has a token and is valid (Authorization header or cookie)
@@ -77,11 +88,7 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 			hasValidToken = true
 		}
 	}
-	SendJSON(ctx, map[string]any{
-		"is_auth_enabled": authConfig.IsEnabled,
-		"has_valid_token": hasValidToken,
-		"auth_type":       dashboardAuthType(authConfig.IsEnabled),
-	})
+	SendJSON(ctx, newAuthStatusResponse(authConfig.IsEnabled, hasValidToken))
 }
 
 // dashboardAuthType reports the dashboard session auth mode for frontend flows.

@@ -1818,12 +1818,68 @@ func TestSchemaGovernanceProjectsValidation(t *testing.T) {
 		{name: "a negative token cap is rejected", project: `{"name": "p", "access_rule": "union", "rate_limit": {"token_max_limit": -1, "token_reset_duration": "1h"}}`, wantError: true},
 		{name: "a negative request cap is rejected", project: `{"name": "p", "access_rule": "union", "rate_limit": {"request_max_limit": -1, "request_reset_duration": "1m"}}`, wantError: true},
 		{name: "a members list cannot be declared", project: `{"name": "p", "access_rule": "union", "members": [{"user_id": "u-1"}]}`, wantError: true},
+		{name: "an unknown access rule is rejected", project: `{"name": "p", "access_rule": "restrict"}`, wantError: true},
+		{name: "an unknown accounting mode is rejected", project: `{"name": "p", "access_rule": "union", "accounting_mode": "user_only"}`, wantError: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := fmt.Sprintf(`{"governance": {"projects": [%s]}}`, tt.project)
 			err := validateConfig(t, compiled, config)
+			if tt.wantError && err == nil {
+				t.Fatal("config should be invalid")
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("config should be valid, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestSchemaAuthenticationConfigurationModes(t *testing.T) {
+	compiled := compileSchema(t)
+
+	tests := []struct {
+		name      string
+		config    string
+		wantError bool
+	}{
+		{
+			name:   "legacy admin configuration remains valid",
+			config: `{"governance":{"auth_config":{"is_enabled":true,"admin_username":"admin","admin_password":"env.BIFROST_ADMIN_PASSWORD"}}}`,
+		},
+		{
+			name:   "local login configuration is valid",
+			config: `{"governance":{"auth_config":{"is_enabled":true,"local_login":{"is_enabled":true,"session_ttl_seconds":7200,"idle_timeout_seconds":900,"allow_registration":false}}}}`,
+		},
+		{
+			name:   "OIDC only configuration is valid",
+			config: `{"governance":{"auth_config":{"is_enabled":true,"oidc_providers":[{"id":"entra","display_name":"Microsoft Entra ID","issuer_url":"https://login.microsoftonline.com/tenant/v2.0","client_id":"env.ENTRA_CLIENT_ID","client_secret":"env.ENTRA_CLIENT_SECRET"}]}}}`,
+		},
+		{
+			name:   "mixed configuration is valid",
+			config: `{"governance":{"auth_config":{"is_enabled":true,"local_login":{"is_enabled":true,"allow_registration":false},"oidc_providers":[{"id":"okta","display_name":"Okta","issuer_url":"https://example.okta.com","client_id":"client","client_secret":"secret"}]}}}`,
+		},
+		{
+			name:      "enabled auth requires a usable method",
+			config:    `{"governance":{"auth_config":{"is_enabled":true,"local_login":{"is_enabled":false,"allow_registration":false}}}}`,
+			wantError: true,
+		},
+		{
+			name:      "public registration is rejected",
+			config:    `{"governance":{"auth_config":{"is_enabled":true,"local_login":{"is_enabled":true,"allow_registration":true}}}}`,
+			wantError: true,
+		},
+		{
+			name:      "unknown local login settings are rejected",
+			config:    `{"governance":{"auth_config":{"is_enabled":true,"local_login":{"is_enabled":true,"allow_registration":false,"unexpected":true}}}}`,
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateConfig(t, compiled, tt.config)
 			if tt.wantError && err == nil {
 				t.Fatal("config should be invalid")
 			}

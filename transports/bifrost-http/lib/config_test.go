@@ -18737,6 +18737,8 @@ func getSchemaTypeMappings() []schemaTypeMapping {
 
 		// Auth config (top-level)
 		{"auth_config", reflect.TypeOf(configstore.AuthConfig{}), false},
+		{"auth_config.local_login", reflect.TypeOf(configstore.LocalLoginConfig{}), false},
+		{"auth_config.oidc_providers", reflect.TypeOf(configstore.OIDCProviderConfig{}), true},
 
 		// Framework config
 		{"framework", reflect.TypeOf(framework.FrameworkConfig{}), false},
@@ -18762,6 +18764,8 @@ func getSchemaTypeMappings() []schemaTypeMapping {
 		{"governance.virtual_keys.provider_configs", reflect.TypeOf(tables.TableVirtualKeyProviderConfig{}), true},
 		{"governance.virtual_keys.mcp_configs", reflect.TypeOf(tables.TableVirtualKeyMCPConfig{}), true},
 		{"governance.auth_config", reflect.TypeOf(configstore.AuthConfig{}), false},
+		{"governance.auth_config.local_login", reflect.TypeOf(configstore.LocalLoginConfig{}), false},
+		{"governance.auth_config.oidc_providers", reflect.TypeOf(configstore.OIDCProviderConfig{}), true},
 		{"governance.complexity_analyzer_config", reflect.TypeOf(configstore.ComplexityAnalyzerConfig{}), false},
 		{"governance.complexity_analyzer_config.tier_boundaries", reflect.TypeOf(configstore.ComplexityTierBoundaries{}), false},
 		{"governance.complexity_analyzer_config.keywords", reflect.TypeOf(configstore.ComplexityEditableKeywordConfig{}), false},
@@ -20346,6 +20350,55 @@ func TestLoadAuthConfigFromFile_PasswordHashing(t *testing.T) {
 		// Verify sessions were NOT flushed because password did not change
 		require.False(t, mockStore.flushSessionsCalled, "sessions should not be flushed when password matches")
 	})
+}
+
+func TestLoadAuthConfigFromFile_OIDCOnlyConfiguresRuntimeWithoutLegacyAdminCredentials(t *testing.T) {
+	initTestLogger()
+	ctx := context.Background()
+	mockStore := NewMockConfigStore()
+	config := &Config{ConfigStore: mockStore}
+	configData := &ConfigData{
+		Governance: &configstore.GovernanceConfig{
+			AuthConfig: &configstore.AuthConfig{
+				IsEnabled: true,
+				OIDCProviders: []configstore.OIDCProviderConfig{{
+					ID:           "entra",
+					DisplayName:  "Microsoft Entra ID",
+					IssuerURL:    "https://login.microsoftonline.com/tenant/v2.0",
+					ClientID:     schemas.NewSecretVar("env.ENTRA_CLIENT_ID"),
+					ClientSecret: schemas.NewSecretVar("env.ENTRA_CLIENT_SECRET"),
+					IsEnabled:    true,
+				}},
+			},
+		},
+	}
+
+	loadAuthConfig(ctx, config, configData)
+
+	require.NotNil(t, config.GovernanceConfig)
+	require.NotNil(t, config.GovernanceConfig.AuthConfig)
+	require.Len(t, config.GovernanceConfig.AuthConfig.OIDCProviders, 1)
+	assert.Equal(t, "entra", config.GovernanceConfig.AuthConfig.OIDCProviders[0].ID)
+	assert.Equal(t, []string{"oidc"}, config.GovernanceConfig.AuthConfig.AuthenticationMethods())
+	assert.Nil(t, mockStore.authConfig, "OIDC client secrets must not be persisted through legacy auth config rows")
+}
+
+func TestConfigDataUnmarshalRejectsConflictingAuthConfigAliases(t *testing.T) {
+	var configData ConfigData
+	err := json.Unmarshal([]byte(`{
+		"auth_config": {
+			"is_enabled": true,
+			"admin_username": "legacy-admin",
+			"admin_password": "legacy-password"
+		},
+		"governance": {
+			"auth_config": {
+				"is_enabled": true,
+				"local_login": {"is_enabled": true, "allow_registration": false}
+			}
+		}
+	}`), &configData)
+	require.ErrorContains(t, err, "conflicting auth_config definitions")
 }
 
 func TestLoadConfig_GovernanceAuthConfig_PersistsFromFirstImport(t *testing.T) {
