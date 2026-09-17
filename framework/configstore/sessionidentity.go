@@ -205,3 +205,39 @@ func revokeUnownedLegacySessions(tx *gorm.DB, now time.Time) (int64, error) {
 		Updates(map[string]any{"revoked_at": now, "auth_method": SessionAuthMethodLegacy})
 	return result.RowsAffected, result.Error
 }
+
+// TouchIdentitySession advances the idle deadline only for an unrevoked
+// session. A stale concurrent request cannot resurrect a session after logout.
+func (s *RDBConfigStore) TouchIdentitySession(ctx context.Context, id int, lastSeenAt, idleExpiresAt time.Time) error {
+	result := s.DB().WithContext(ctx).Model(&tables.SessionsTable{}).
+		Where("id = ? AND revoked_at IS NULL", id).
+		Updates(map[string]any{"last_seen_at": lastSeenAt.UTC(), "idle_expires_at": idleExpiresAt.UTC()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RevokeIdentitySession marks one identity session unusable. It is idempotent
+// so concurrent logout and auth-version invalidation produce the same state.
+func (s *RDBConfigStore) RevokeIdentitySession(ctx context.Context, id int, revokedAt time.Time) error {
+	result := s.DB().WithContext(ctx).Model(&tables.SessionsTable{}).
+		Where("id = ? AND revoked_at IS NULL", id).
+		Update("revoked_at", revokedAt.UTC())
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var session tables.SessionsTable
+		if err := s.DB().WithContext(ctx).First(&session, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+	}
+	return nil
+}

@@ -156,3 +156,22 @@ func TestIdentitySessionActivityHonorsLegacyAndIdentityExpiries(t *testing.T) {
 	session.RevokedAt = &revokedAt
 	assert.False(t, session.IsActiveAt(now))
 }
+
+func TestRDBIdentitySessionTouchAndRevocationAreFailClosed(t *testing.T) {
+	store := setupLegacyBootstrapStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 17, 16, 0, 0, 0, time.UTC)
+	user := &tables.TableUser{Email: ptr("session@example.test")}
+	require.NoError(t, store.CreateUser(ctx, user))
+	require.NoError(t, store.CreateSession(ctx, &tables.SessionsTable{
+		Token: "identity-session", ExpiresAt: now.Add(time.Hour), UserID: &user.ID,
+		AuthMethod: "local", AuthVersion: user.AuthVersion, CreatedAt: now, UpdatedAt: now,
+	}))
+	session, err := store.GetSession(ctx, "identity-session")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	require.NoError(t, store.TouchIdentitySession(ctx, session.ID, now, now.Add(time.Minute)))
+	require.NoError(t, store.RevokeIdentitySession(ctx, session.ID, now))
+	require.NoError(t, store.RevokeIdentitySession(ctx, session.ID, now.Add(time.Minute)))
+	require.ErrorIs(t, store.TouchIdentitySession(ctx, session.ID, now, now.Add(time.Minute)), ErrNotFound)
+}
