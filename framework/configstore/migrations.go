@@ -494,6 +494,52 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_hidden_request_types_json_column"}, run: migrationAddHiddenRequestTypesJSONColumn},
 	{IDs: []string{"add_use_openai_endpoints_column"}, run: migrationAddUseOpenAIEndpointsColumn},
 	{IDs: []string{"add_time_of_day_pricing_columns"}, run: migrationAddTimeOfDayPricingColumns},
+	{IDs: []string{"add_identity_tables"}, run: migrationAddIdentityTables},
+}
+
+// migrationAddIdentityTables creates the canonical identity boundary. It is
+// additive: old admin configuration and sessions remain readable until their
+// dedicated migration imports them into these tables.
+func migrationAddIdentityTables(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_tables"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			for _, model := range []any{
+				&tables.TableUser{},
+				&tables.TableCredential{},
+				&tables.TableExternalIdentity{},
+				&tables.TableRole{},
+				&tables.TableRoleAssignment{},
+			} {
+				if !mg.HasTable(model) {
+					if err := mg.CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+
+			return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&tables.TableRole{
+				ID:          tables.RoleIDSuperAdmin,
+				Name:        tables.RoleNameSuperAdmin,
+				DisplayName: "Super administrator",
+				IsSystem:    true,
+				IsImmutable: true,
+			}).Error
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: deleting canonical user and credential records would permanently invalidate identities", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
 }
 
 // videoResolutionPricingColumns are the resolution-banded video output rate columns.
