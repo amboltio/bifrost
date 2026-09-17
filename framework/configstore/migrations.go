@@ -497,6 +497,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_identity_tables"}, run: migrationAddIdentityTables},
 	{IDs: []string{"add_identity_audit_tables"}, run: migrationAddIdentityAuditTables},
 	{IDs: []string{"add_identity_session_fields"}, run: migrationAddIdentitySessionFields},
+	{IDs: []string{"add_identity_recovery_tokens"}, run: migrationAddRecoveryTokens},
 }
 
 // migrationAddIdentityTables creates the canonical identity boundary. It is
@@ -613,6 +614,30 @@ func migrationAddIdentitySessionFields(ctx context.Context, db *gorm.DB, logger 
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: removing identity ownership can reactivate revoked sessions", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddRecoveryTokens adds digest-only enrollment and reset credentials.
+func migrationAddRecoveryTokens(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_recovery_tokens"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if tx.Migrator().HasTable(&tables.TableRecoveryToken{}) {
+				return nil
+			}
+			return tx.Migrator().CreateTable(&tables.TableRecoveryToken{})
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: deleting recovery-token consumption history weakens account forensics", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {
