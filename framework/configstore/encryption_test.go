@@ -52,6 +52,7 @@ func setupEncryptionTestStore(t *testing.T) (*RDBConfigStore, *gorm.DB) {
 		&tables.TableVirtualKeyMCPConfig{},
 		&tables.TableModel{},
 		&tables.TempToken{},
+		&tables.TableOIDCTransaction{},
 	)
 	require.NoError(t, err)
 
@@ -127,6 +128,11 @@ func TestEncryptPlaintextRows_EncryptsAllTables(t *testing.T) {
 		 VALUES (?, ?, ?, 'plain_text', ?, ?)`,
 		"test-plugin", true, `{"api_key":"plugin-secret"}`, now, now)
 
+	insertPlaintextRow(t, db,
+		`INSERT INTO identity_oidc_transactions (id, state_hash, nonce_hash, provider_id, code_verifier, redirect_path, expires_at, encryption_status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
+		"oidc-1", "state-digest", "nonce-digest", "example", "plaintext-pkce-verifier", "/", future, now, now)
+
 	// Run the startup encryption pass
 	err := store.EncryptPlaintextRows(ctx)
 	require.NoError(t, err)
@@ -172,6 +178,11 @@ func TestEncryptPlaintextRows_EncryptsAllTables(t *testing.T) {
 	var pluginRow map[string]any
 	db.Table("config_plugins").Where("name = ?", "test-plugin").Take(&pluginRow)
 	assert.Equal(t, "encrypted", pluginRow["encryption_status"])
+
+	var oidcRow map[string]any
+	db.Table("identity_oidc_transactions").Where("id = ?", "oidc-1").Take(&oidcRow)
+	assert.Equal(t, "encrypted", oidcRow["encryption_status"])
+	assert.NotEqual(t, "plaintext-pkce-verifier", oidcRow["code_verifier"])
 }
 
 func TestEncryptPlaintextRows_SkipsAlreadyEncrypted(t *testing.T) {

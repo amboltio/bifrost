@@ -500,6 +500,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_identity_session_fields"}, run: migrationAddIdentitySessionFields},
 	{IDs: []string{"add_identity_recovery_tokens"}, run: migrationAddRecoveryTokens},
 	{IDs: []string{"add_identity_role_permissions"}, run: migrationAddIdentityRolePermissions},
+	{IDs: []string{"add_identity_oidc_transactions"}, run: migrationAddOIDCTransactions},
 }
 
 // migrationAddIdentityTables creates the canonical identity boundary. It is
@@ -685,6 +686,33 @@ func migrationAddIdentityRolePermissions(ctx context.Context, db *gorm.DB, logge
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: removing permission policy could expose management routes", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddOIDCTransactions creates durable, one-time callback state for
+// dashboard OIDC authentication. Deleting this table would make outstanding
+// logins ambiguous, so it is intentionally non-rollbackable.
+func migrationAddOIDCTransactions(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_oidc_transactions"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if tx.Migrator().HasTable(&tables.TableOIDCTransaction{}) {
+				return nil
+			}
+			return tx.Migrator().CreateTable(&tables.TableOIDCTransaction{})
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing durable callback replay protection is unsafe", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {

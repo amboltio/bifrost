@@ -26,6 +26,7 @@ func setupIdentityTestStore(t *testing.T, dsn string) *RDBConfigStore {
 		&tables.TableUser{},
 		&tables.TableCredential{},
 		&tables.TableExternalIdentity{},
+		&tables.TableOIDCTransaction{},
 		&tables.TableRole{},
 		&tables.TableRoleAssignment{},
 		&tables.SessionsTable{},
@@ -60,6 +61,7 @@ func TestIdentityMigrationCreatesCanonicalTablesAndSuperAdminRole(t *testing.T) 
 		"identity_users",
 		"identity_credentials",
 		"identity_external_identities",
+		"identity_oidc_transactions",
 		"identity_roles",
 		"identity_role_assignments",
 	} {

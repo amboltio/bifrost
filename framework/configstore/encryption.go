@@ -172,6 +172,13 @@ func (s *RDBConfigStore) EncryptPlaintextRows(ctx context.Context) error {
 	}
 	totalEncrypted += count
 
+	// identity_oidc_transactions
+	count, err = s.encryptPlaintextOIDCTransactions(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt OIDC transactions: %w", err)
+	}
+	totalEncrypted += count
+
 	if totalEncrypted > 0 && s.logger != nil {
 		s.logger.Info(fmt.Sprintf("encrypted %d plaintext rows across all tables", totalEncrypted))
 	}
@@ -498,6 +505,36 @@ func (s *RDBConfigStore) encryptPlaintextPlugins(ctx context.Context) (int, erro
 		cursor = ids[len(ids)-1]
 		n, err := encryptClaimedRows(ctx, s, ids, "(encryption_status = ? OR encryption_status IS NULL OR encryption_status = '') AND config_json != '' AND config_json != '{}' AND id = ?",
 			func(r *tables.TablePlugin) string { return r.EncryptionStatus })
+		count += n
+		if err != nil {
+			return count, err
+		}
+	}
+	return count, nil
+}
+
+// encryptPlaintextOIDCTransactions protects PKCE verifiers left by an older
+// process before row encryption was configured. State and nonce are already
+// digests, so CodeVerifier is the only sensitive field in this table.
+func (s *RDBConfigStore) encryptPlaintextOIDCTransactions(ctx context.Context) (int, error) {
+	var count int
+	var cursor string
+	for {
+		var ids []string
+		if err := s.DB().WithContext(ctx).
+			Model(&tables.TableOIDCTransaction{}).
+			Where("(encryption_status = ? OR encryption_status IS NULL OR encryption_status = '') AND code_verifier != '' AND id > ?", encryptionStatusPlainText, cursor).
+			Order("id").
+			Limit(encryptionBatchSize).
+			Pluck("id", &ids).Error; err != nil {
+			return count, err
+		}
+		if len(ids) == 0 {
+			break
+		}
+		cursor = ids[len(ids)-1]
+		n, err := encryptClaimedRows(ctx, s, ids, "(encryption_status = ? OR encryption_status IS NULL OR encryption_status = '') AND code_verifier != '' AND id = ?",
+			func(r *tables.TableOIDCTransaction) string { return r.EncryptionStatus })
 		count += n
 		if err != nil {
 			return count, err
