@@ -42,3 +42,16 @@ func TestPasswordServiceUpgradesLegacyBcryptAndRejectsUnboundedHashes(t *testing
 	_, err = service.Hash(strings.Repeat("x", MaxPasswordInputBytes+1))
 	require.Error(t, err)
 }
+
+func TestPasswordServiceRejectsShortNewPasswordsButVerifiesExistingLegacyPasswords(t *testing.T) {
+	service := NewPasswordService()
+	_, err := service.Hash("too-short")
+	require.Error(t, err)
+
+	legacy, err := bcrypt.GenerateFromPassword([]byte("short"), bcrypt.MinCost)
+	require.NoError(t, err)
+	verified, upgrade, err := service.VerifyAndUpgrade(string(legacy), "short")
+	require.NoError(t, err)
+	assert.True(t, verified)
+	assert.Empty(t, upgrade, "a short legacy password must authenticate but cannot be rehashed under the new policy")
+}

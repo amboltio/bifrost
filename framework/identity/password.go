@@ -16,6 +16,7 @@ import (
 const (
 	// MaxPasswordInputBytes stops a client from turning password hashing into
 	// an unbounded allocation or CPU request.
+	MinimumPasswordInputBytes   = 12
 	MaxPasswordInputBytes       = 4096
 	maxEncodedPasswordHashBytes = 1024
 	maxArgonMemoryKiB           = 128 * 1024
@@ -53,7 +54,7 @@ func NewPasswordService() *PasswordService {
 // process-wide so concurrent login and reset requests cannot multiply the
 // memory budget beyond the configured maximum.
 func (s *PasswordService) Hash(password string) (string, error) {
-	if err := validatePasswordInput(password); err != nil {
+	if err := validateNewPasswordInput(password); err != nil {
 		return "", err
 	}
 	params := s.parameters
@@ -88,6 +89,12 @@ func (s *PasswordService) VerifyAndUpgrade(encodedHash, password string) (bool, 
 		if err != nil {
 			return false, "", fmt.Errorf("verify legacy bcrypt password: %w", err)
 		}
+		// Existing legacy credentials may predate the current minimum. They
+		// remain usable so an upgrade does not lock an operator out, but only
+		// passwords meeting the new policy are rehashed automatically.
+		if err := validateNewPasswordInput(password); err != nil {
+			return true, "", nil
+		}
 		upgrade, err := s.Hash(password)
 		return err == nil, upgrade, err
 	}
@@ -113,6 +120,13 @@ func (s *PasswordService) DummyVerify(password string) {
 func validatePasswordInput(password string) error {
 	if len(password) == 0 || len(password) > MaxPasswordInputBytes {
 		return fmt.Errorf("password must contain between 1 and %d bytes", MaxPasswordInputBytes)
+	}
+	return nil
+}
+
+func validateNewPasswordInput(password string) error {
+	if len(password) < MinimumPasswordInputBytes || len(password) > MaxPasswordInputBytes {
+		return fmt.Errorf("password must contain between %d and %d bytes", MinimumPasswordInputBytes, MaxPasswordInputBytes)
 	}
 	return nil
 }
