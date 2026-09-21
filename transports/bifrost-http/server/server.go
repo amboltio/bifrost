@@ -2906,6 +2906,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		}
 		if ctx.Value(schemas.BifrostContextKeyIsEnterprise) == nil {
 			apiMiddlewares = append(apiMiddlewares, s.AuthMiddleware.APIMiddleware())
+			if roleResolver, ok := s.Config.ConfigStore.(configstore.UserManagementStore); ok {
+				apiMiddlewares = append(apiMiddlewares, handlers.NewIdentityAuthorizationMiddleware(roleResolver))
+			} else {
+				logger.Warn("canonical identity authorization is unavailable because the config store does not implement user management")
+			}
 		}
 	}
 	// Add semantic cache plugin embedding request executor if it exists

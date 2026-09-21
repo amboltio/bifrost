@@ -92,8 +92,11 @@ func (s *RDBConfigStore) UpdateUser(ctx context.Context, user *tables.TableUser,
 	return nil
 }
 
-// DisableUser is idempotent and increments AuthVersion exactly once. Existing
-// sessions compare that counter on their next authenticated request.
+// DisableUser is idempotent and increments AuthVersion exactly once. It
+// serializes active super-admin removal on the durable role row, so concurrent
+// disable requests cannot leave the deployment without an active operator.
+// Existing sessions are revoked in the same transaction instead of waiting for
+// their next request to notice the auth-version change.
 func (s *RDBConfigStore) DisableUser(ctx context.Context, id string, disabledAt time.Time) error {
 	if id == "" {
 		return ErrNotFound
@@ -102,6 +105,29 @@ func (s *RDBConfigStore) DisableUser(ctx context.Context, id string, disabledAt 
 		disabledAt = time.Now().UTC()
 	}
 	return s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		user, err := lockedUser(tx, id)
+		if err != nil {
+			return err
+		}
+		if user.Status == tables.UserStatusDisabled {
+			return nil
+		}
+
+		var superAdminAssignments int64
+		if err := tx.Model(&tables.TableRoleAssignment{}).
+			Where("user_id = ? AND role_id = ?", id, tables.RoleIDSuperAdmin).
+			Count(&superAdminAssignments).Error; err != nil {
+			return err
+		}
+		if user.Status == tables.UserStatusActive && superAdminAssignments > 0 {
+			if err := lockSuperAdminRole(tx); err != nil {
+				return err
+			}
+			if err := requireAnotherActiveSuperAdmin(tx); err != nil {
+				return err
+			}
+		}
+
 		result := tx.Model(&tables.TableUser{}).
 			Where("id = ? AND status <> ?", id, tables.UserStatusDisabled).
 			Updates(map[string]any{
@@ -111,17 +137,13 @@ func (s *RDBConfigStore) DisableUser(ctx context.Context, id string, disabledAt 
 		if result.Error != nil {
 			return s.parseGormError(result.Error)
 		}
-		if result.RowsAffected > 0 {
-			return nil
-		}
-		var count int64
-		if err := tx.Model(&tables.TableUser{}).Where("id = ?", id).Count(&count).Error; err != nil {
-			return err
-		}
-		if count == 0 {
+		if result.RowsAffected != 1 {
 			return ErrNotFound
 		}
-		return nil
+		result = tx.Model(&tables.SessionsTable{}).
+			Where("user_id = ? AND revoked_at IS NULL", id).
+			Update("revoked_at", disabledAt.UTC())
+		return result.Error
 	})
 }
 

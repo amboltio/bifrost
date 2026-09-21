@@ -9,13 +9,14 @@ const (
 	RoleNameSuperAdmin = "super_admin"
 )
 
-// TableRole is the minimal role catalog needed while identity bootstrap ships.
-// The detailed permission payload arrives with the authorization vertical
-// slice; this row is intentionally not a policy store.
+// TableRole is the durable permission-bearing role catalog. System roles are
+// seeded by migration, while regular role grants are evaluated at the HTTP
+// authorization boundary.
 type TableRole struct {
 	ID          string    `gorm:"primaryKey;type:varchar(255)" json:"id"`
 	Name        string    `gorm:"type:varchar(255);not null;uniqueIndex:idx_identity_roles_name" json:"name"`
 	DisplayName string    `gorm:"type:varchar(255);not null;default:''" json:"display_name"`
+	Permissions []string  `gorm:"serializer:json;type:text;not null;default:'[]'" json:"permissions"`
 	IsSystem    bool      `gorm:"not null;default:false" json:"is_system"`
 	IsImmutable bool      `gorm:"not null;default:false" json:"is_immutable"`
 	CreatedAt   time.Time `gorm:"index;not null" json:"created_at"`
