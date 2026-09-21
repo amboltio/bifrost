@@ -20,6 +20,13 @@ type RecoveryTokenStore interface {
 	RedeemRecoveryToken(ctx context.Context, tokenDigest, passwordHash string, now time.Time) (*tables.TableRecoveryToken, error)
 }
 
+// AuditedRecoveryTokenStore keeps an administrator-issued recovery token and
+// its security evidence in the same transaction.
+type AuditedRecoveryTokenStore interface {
+	RecoveryTokenStore
+	CreateRecoveryTokenAudited(ctx context.Context, token *tables.TableRecoveryToken, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
+}
+
 // CreateRecoveryToken persists a digest-only one-time credential.
 func (s *RDBConfigStore) CreateRecoveryToken(ctx context.Context, token *tables.TableRecoveryToken, tx ...*gorm.DB) error {
 	if token == nil || strings.TrimSpace(token.UserID) == "" || !isRecoveryPurpose(token.Purpose) || len(token.TokenDigest) != 64 || token.ExpiresAt.IsZero() {
@@ -34,6 +41,15 @@ func (s *RDBConfigStore) CreateRecoveryToken(ctx context.Context, token *tables.
 		return s.parseGormError(err)
 	}
 	return nil
+}
+
+// CreateRecoveryTokenAudited persists only a token digest together with the
+// operator action that issued it. The plaintext token never crosses this
+// storage boundary.
+func (s *RDBConfigStore) CreateRecoveryTokenAudited(ctx context.Context, token *tables.TableRecoveryToken, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {
+	return s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		return s.CreateRecoveryToken(ctx, token, tx)
+	})
 }
 
 // RedeemRecoveryToken burns a valid token and installs a new current password

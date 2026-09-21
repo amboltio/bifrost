@@ -105,46 +105,64 @@ func (s *RDBConfigStore) DisableUser(ctx context.Context, id string, disabledAt 
 		disabledAt = time.Now().UTC()
 	}
 	return s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		user, err := lockedUser(tx, id)
-		if err != nil {
-			return err
-		}
-		if user.Status == tables.UserStatusDisabled {
-			return nil
-		}
-
-		var superAdminAssignments int64
-		if err := tx.Model(&tables.TableRoleAssignment{}).
-			Where("user_id = ? AND role_id = ?", id, tables.RoleIDSuperAdmin).
-			Count(&superAdminAssignments).Error; err != nil {
-			return err
-		}
-		if user.Status == tables.UserStatusActive && superAdminAssignments > 0 {
-			if err := lockSuperAdminRole(tx); err != nil {
-				return err
-			}
-			if err := requireAnotherActiveSuperAdmin(tx); err != nil {
-				return err
-			}
-		}
-
-		result := tx.Model(&tables.TableUser{}).
-			Where("id = ? AND status <> ?", id, tables.UserStatusDisabled).
-			Updates(map[string]any{
-				"status": tables.UserStatusDisabled, "disabled_at": disabledAt,
-				"auth_version": gorm.Expr("auth_version + ?", 1),
-			})
-		if result.Error != nil {
-			return s.parseGormError(result.Error)
-		}
-		if result.RowsAffected != 1 {
-			return ErrNotFound
-		}
-		result = tx.Model(&tables.SessionsTable{}).
-			Where("user_id = ? AND revoked_at IS NULL", id).
-			Update("revoked_at", disabledAt.UTC())
-		return result.Error
+		return s.disableUser(ctx, tx, id, disabledAt)
 	})
+}
+
+// DisableUserAudited keeps a soft-disable, its audit event, and the durable
+// downstream invalidation signal indivisible.
+func (s *RDBConfigStore) DisableUserAudited(ctx context.Context, id string, disabledAt time.Time, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {
+	if id == "" {
+		return ErrNotFound
+	}
+	if disabledAt.IsZero() {
+		disabledAt = time.Now().UTC()
+	}
+	return s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		return s.disableUser(ctx, tx, id, disabledAt)
+	})
+}
+
+func (s *RDBConfigStore) disableUser(ctx context.Context, tx *gorm.DB, id string, disabledAt time.Time) error {
+	user, err := lockedUser(tx, id)
+	if err != nil {
+		return err
+	}
+	if user.Status == tables.UserStatusDisabled {
+		return nil
+	}
+
+	var superAdminAssignments int64
+	if err := tx.Model(&tables.TableRoleAssignment{}).
+		Where("user_id = ? AND role_id = ?", id, tables.RoleIDSuperAdmin).
+		Count(&superAdminAssignments).Error; err != nil {
+		return err
+	}
+	if user.Status == tables.UserStatusActive && superAdminAssignments > 0 {
+		if err := lockSuperAdminRole(tx); err != nil {
+			return err
+		}
+		if err := requireAnotherActiveSuperAdmin(tx); err != nil {
+			return err
+		}
+	}
+
+	result := tx.Model(&tables.TableUser{}).
+		Where("id = ? AND status <> ?", id, tables.UserStatusDisabled).
+		Updates(map[string]any{
+			"status": tables.UserStatusDisabled, "disabled_at": disabledAt,
+			"auth_version": gorm.Expr("auth_version + ?", 1),
+		})
+	if result.Error != nil {
+		return s.parseGormError(result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return ErrNotFound
+	}
+	result = tx.Model(&tables.SessionsTable{}).
+		Where("user_id = ? AND revoked_at IS NULL", id).
+		Update("revoked_at", disabledAt.UTC())
+	return result.Error
 }
 
 // CreateInitialSuperAdmin serializes first-user creation by locking the seeded

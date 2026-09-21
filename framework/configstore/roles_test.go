@@ -83,3 +83,30 @@ func TestUserManagementStoreCreatesUsersWithKnownRolesOnly(t *testing.T) {
 	assert.Zero(t, count)
 	assert.False(t, errors.Is(err, ErrLastSuperAdmin))
 }
+
+func TestAuditedUserManagementCreateWritesStateJournalAndOutboxTogether(t *testing.T) {
+	store := setupIdentityTestStore(t, ":memory:")
+	ctx := context.Background()
+	seedUserManagementRoles(t, store)
+
+	userID := uuid.NewString()
+	created, err := store.CreateManagedUserAudited(ctx,
+		&tables.TableUser{ID: userID, Email: ptr("audited@example.test"), DisplayName: "Audited"},
+		&tables.TableCredential{SecretHash: "argon2id$test"},
+		[]string{authorization.RoleIDViewer},
+		&tables.TableAuditEvent{ActorPrincipal: "user:admin", TargetType: "user", TargetID: &userID, Action: "identity.user.created", ChangedFields: map[string]any{"role_ids": []string{authorization.RoleIDViewer}}},
+		&tables.TableOutboxEvent{Topic: "identity.user.changed", DeduplicationKey: "audit-create-" + userID, Payload: map[string]any{"user_id": userID, "action": "identity.user.created"}},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, userID, created.ID)
+
+	var users, credentials, audits, outbox int64
+	require.NoError(t, store.DB().Model(&tables.TableUser{}).Count(&users).Error)
+	require.NoError(t, store.DB().Model(&tables.TableCredential{}).Count(&credentials).Error)
+	require.NoError(t, store.DB().Model(&tables.TableAuditEvent{}).Count(&audits).Error)
+	require.NoError(t, store.DB().Model(&tables.TableOutboxEvent{}).Count(&outbox).Error)
+	assert.Equal(t, int64(1), users)
+	assert.Equal(t, int64(1), credentials)
+	assert.Equal(t, int64(1), audits)
+	assert.Equal(t, int64(1), outbox)
+}

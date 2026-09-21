@@ -39,8 +39,31 @@ func NewRecoveryService(store configstore.RecoveryTokenStore, passwords *Passwor
 // Issue returns the raw recovery token exactly once. The store receives only
 // its digest, so audit events and database backups cannot replay the URL.
 func (s *RecoveryService) Issue(ctx context.Context, userID, purpose string, createdByUserID *string) (string, time.Time, error) {
+	return s.issue(ctx, userID, purpose, createdByUserID, func(token *tables.TableRecoveryToken) error {
+		return s.store.CreateRecoveryToken(ctx, token)
+	})
+}
+
+// IssueAudited issues a raw recovery token once while atomically persisting
+// its digest, the administrator audit event, and an invalidation outbox event.
+// It refuses to downgrade to unaudited persistence when the store lacks the
+// audited contract.
+func (s *RecoveryService) IssueAudited(ctx context.Context, userID, purpose string, createdByUserID *string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (string, time.Time, error) {
+	auditedStore, ok := s.store.(configstore.AuditedRecoveryTokenStore)
+	if !ok {
+		return "", time.Time{}, fmt.Errorf("audited recovery token store is required")
+	}
+	return s.issue(ctx, userID, purpose, createdByUserID, func(token *tables.TableRecoveryToken) error {
+		return auditedStore.CreateRecoveryTokenAudited(ctx, token, auditEvent, outboxEvent)
+	})
+}
+
+func (s *RecoveryService) issue(ctx context.Context, userID, purpose string, createdByUserID *string, persist func(*tables.TableRecoveryToken) error) (string, time.Time, error) {
 	if s.store == nil {
 		return "", time.Time{}, fmt.Errorf("recovery token store is required")
+	}
+	if persist == nil {
+		return "", time.Time{}, fmt.Errorf("recovery token persistence is required")
 	}
 	if strings.TrimSpace(userID) == "" || !validRecoveryPurpose(purpose) {
 		return "", time.Time{}, fmt.Errorf("recovery token user ID and purpose are required")
@@ -52,7 +75,7 @@ func (s *RecoveryService) Issue(ctx context.Context, userID, purpose string, cre
 	raw := base64.RawURLEncoding.EncodeToString(rawBytes)
 	now := s.now().UTC()
 	expiresAt := now.Add(s.ttl)
-	if err := s.store.CreateRecoveryToken(ctx, &tables.TableRecoveryToken{
+	if err := persist(&tables.TableRecoveryToken{
 		UserID: userID, Purpose: purpose, TokenDigest: encrypt.HashSHA256(raw),
 		ExpiresAt: expiresAt, CreatedByUserID: createdByUserID,
 	}); err != nil {

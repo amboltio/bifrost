@@ -28,6 +28,9 @@ func setupIdentityTestStore(t *testing.T, dsn string) *RDBConfigStore {
 		&tables.TableExternalIdentity{},
 		&tables.TableRole{},
 		&tables.TableRoleAssignment{},
+		&tables.SessionsTable{},
+		&tables.TableAuditEvent{},
+		&tables.TableOutboxEvent{},
 	))
 	require.NoError(t, db.Create(&tables.TableRole{
 		ID: tables.RoleIDSuperAdmin, Name: tables.RoleNameSuperAdmin,

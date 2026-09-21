@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fasthttp/router"
+	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
@@ -24,8 +25,8 @@ import (
 // broad ConfigStore interface and keeps transport tests independent of its
 // unrelated persistence methods.
 type userManagementHandlerStore interface {
-	configstore.UserManagementStore
-	configstore.RecoveryTokenStore
+	configstore.AuditedUserManagementStore
+	configstore.AuditedRecoveryTokenStore
 	GetUser(ctx context.Context, id string) (*tables.TableUser, error)
 	DisableUser(ctx context.Context, id string, disabledAt time.Time) error
 	RevokeAllUserSessions(ctx context.Context, userID string, revokedAt time.Time) (int64, error)
@@ -164,10 +165,12 @@ func (h *UsersHandler) createUser(ctx *fasthttp.RequestCtx) {
 	}
 	actorID := canonicalActorUserID(ctx)
 	user := &tables.TableUser{
+		ID:    uuid.NewString(),
 		Email: &email, DisplayName: strings.TrimSpace(request.DisplayName), Status: tables.UserStatusActive,
 		CreatedByUserID: actorID,
 	}
-	created, err := h.store.CreateManagedUser(ctx, user, &tables.TableCredential{SecretHash: passwordHash}, request.RoleIDs)
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.created", map[string]any{"role_ids": request.RoleIDs})
+	created, err := h.store.CreateManagedUserAudited(ctx, user, &tables.TableCredential{SecretHash: passwordHash}, request.RoleIDs, auditEvent, outboxEvent)
 	if h.writeStoreError(ctx, err) {
 		return
 	}
@@ -195,10 +198,12 @@ func (h *UsersHandler) updateUser(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "display_name is required")
 		return
 	}
-	if err := h.store.UpdateUserDisplayName(ctx, user.ID, strings.TrimSpace(*request.DisplayName)); h.writeStoreError(ctx, err) {
+	displayName := strings.TrimSpace(*request.DisplayName)
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.updated", map[string]any{"fields": []string{"display_name"}})
+	if err := h.store.UpdateUserDisplayNameAudited(ctx, user.ID, displayName, auditEvent, outboxEvent); h.writeStoreError(ctx, err) {
 		return
 	}
-	user.DisplayName = strings.TrimSpace(*request.DisplayName)
+	user.DisplayName = displayName
 	response, err := h.userResponse(ctx, *user)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to resolve user roles")
@@ -216,7 +221,9 @@ func (h *UsersHandler) disableUser(ctx *fasthttp.RequestCtx) {
 	if !ok {
 		return
 	}
-	if err := h.store.DisableUser(ctx, user.ID, h.now().UTC()); h.writeStoreError(ctx, err) {
+	disabledAt := h.now().UTC()
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.disabled", map[string]any{"status": tables.UserStatusDisabled})
+	if err := h.store.DisableUserAudited(ctx, user.ID, disabledAt, auditEvent, outboxEvent); h.writeStoreError(ctx, err) {
 		return
 	}
 	ctx.SetStatusCode(fasthttp.StatusNoContent)
@@ -235,7 +242,8 @@ func (h *UsersHandler) resetPassword(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusConflict, "Password reset requires an active user")
 		return
 	}
-	rawToken, expiresAt, err := h.recovery.Issue(ctx, user.ID, tables.RecoveryTokenPurposeReset, canonicalActorUserID(ctx))
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.password_reset_issued", map[string]any{"purpose": tables.RecoveryTokenPurposeReset})
+	rawToken, expiresAt, err := h.recovery.IssueAudited(ctx, user.ID, tables.RecoveryTokenPurposeReset, canonicalActorUserID(ctx), auditEvent, outboxEvent)
 	if h.writeStoreError(ctx, err) {
 		return
 	}
@@ -253,7 +261,8 @@ func (h *UsersHandler) revokeSessions(ctx *fasthttp.RequestCtx) {
 	if !ok {
 		return
 	}
-	revoked, err := h.store.RevokeAllUserSessions(ctx, user.ID, h.now().UTC())
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.sessions_revoked", nil)
+	revoked, err := h.store.RevokeAllUserSessionsAudited(ctx, user.ID, h.now().UTC(), auditEvent, outboxEvent)
 	if h.writeStoreError(ctx, err) {
 		return
 	}
@@ -276,7 +285,8 @@ func (h *UsersHandler) replaceRoles(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "role_ids is required")
 		return
 	}
-	if err := h.store.ReplaceUserRoleAssignments(ctx, user.ID, request.RoleIDs, canonicalActorUserID(ctx)); h.writeStoreError(ctx, err) {
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.roles_updated", map[string]any{"role_ids": request.RoleIDs})
+	if err := h.store.ReplaceUserRoleAssignmentsAudited(ctx, user.ID, request.RoleIDs, canonicalActorUserID(ctx), auditEvent, outboxEvent); h.writeStoreError(ctx, err) {
 		return
 	}
 	response, err := h.userResponse(ctx, *user)
@@ -357,6 +367,26 @@ func canonicalActorUserID(ctx *fasthttp.RequestCtx) *string {
 		return nil
 	}
 	return &actor
+}
+
+func (h *UsersHandler) userAudit(ctx *fasthttp.RequestCtx, targetUserID, action string, changedFields map[string]any) (*tables.TableAuditEvent, *tables.TableOutboxEvent) {
+	eventID := uuid.NewString()
+	actorPrincipal := "legacy:local_admin"
+	if actor := canonicalActorUserID(ctx); actor != nil {
+		actorPrincipal = "user:" + *actor
+	}
+	var requestID *string
+	if value, ok := ctx.UserValue(schemas.BifrostContextKeyRequestID).(string); ok && strings.TrimSpace(value) != "" {
+		value = strings.TrimSpace(value)
+		requestID = &value
+	}
+	return &tables.TableAuditEvent{
+		ID: eventID, ActorPrincipal: actorPrincipal, TargetType: "user", TargetID: &targetUserID,
+		Action: action, RequestID: requestID, OccurredAt: h.now().UTC(), ChangedFields: changedFields,
+	}, &tables.TableOutboxEvent{
+		Topic: "identity.user.changed", DeduplicationKey: "identity.user:" + eventID,
+		Payload: map[string]any{"user_id": targetUserID, "action": action},
+	}
 }
 
 func (h *UsersHandler) writeStoreError(ctx *fasthttp.RequestCtx, err error) bool {

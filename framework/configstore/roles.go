@@ -33,6 +33,19 @@ type UserManagementStore interface {
 	ReplaceUserRoleAssignments(ctx context.Context, userID string, roleIDs []string, assignedByUserID *string) error
 }
 
+// AuditedUserManagementStore makes privileged identity mutations durable
+// together with their immutable journal and invalidation event. The handler
+// uses this stricter contract rather than accepting a successful user change
+// that cannot be audited.
+type AuditedUserManagementStore interface {
+	UserManagementStore
+	CreateManagedUserAudited(ctx context.Context, user *tables.TableUser, credential *tables.TableCredential, roleIDs []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableUser, error)
+	UpdateUserDisplayNameAudited(ctx context.Context, userID, displayName string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
+	ReplaceUserRoleAssignmentsAudited(ctx context.Context, userID string, roleIDs []string, assignedByUserID *string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
+	DisableUserAudited(ctx context.Context, userID string, disabledAt time.Time, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
+	RevokeAllUserSessionsAudited(ctx context.Context, userID string, revokedAt time.Time, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (int64, error)
+}
+
 // ListUsers returns a bounded administration page. Identity rows have no
 // credentials joined, so callers cannot accidentally return verifier data.
 func (s *RDBConfigStore) ListUsers(ctx context.Context, params UsersQueryParams) ([]tables.TableUser, int64, error) {
@@ -100,31 +113,57 @@ func (s *RDBConfigStore) CreateManagedUser(ctx context.Context, user *tables.Tab
 		user.ID = uuid.NewString()
 	}
 	err := s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := requireKnownRoles(tx, roleIDs); err != nil {
-			return err
-		}
-		if err := s.CreateUser(ctx, user, tx); err != nil {
-			return err
-		}
-		credential.ID = uuid.NewString()
-		credential.UserID = user.ID
-		credential.Kind = tables.CredentialKindPassword
-		credential.Version = 1
-		credential.IsActive = true
-		if err := s.CreateCredential(ctx, credential, tx); err != nil {
-			return err
-		}
-		for _, roleID := range roleIDs {
-			if err := s.AssignRole(ctx, &tables.TableRoleAssignment{ID: uuid.NewString(), UserID: user.ID, RoleID: roleID, AssignedByUserID: user.CreatedByUserID}, tx); err != nil {
-				return err
-			}
-		}
-		return nil
+		return s.createManagedUser(ctx, tx, user, credential, roleIDs)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return user, nil
+}
+
+// CreateManagedUserAudited applies creation, the security journal entry, and
+// cache/session invalidation notification in one transaction.
+func (s *RDBConfigStore) CreateManagedUserAudited(ctx context.Context, user *tables.TableUser, credential *tables.TableCredential, roleIDs []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableUser, error) {
+	if user == nil || credential == nil || strings.TrimSpace(credential.SecretHash) == "" {
+		return nil, fmt.Errorf("user and password credential are required")
+	}
+	roleIDs = normalizedRoleIDs(roleIDs)
+	if len(roleIDs) == 0 {
+		return nil, fmt.Errorf("at least one role is required")
+	}
+	if user.ID == "" {
+		user.ID = uuid.NewString()
+	}
+	err := s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		return s.createManagedUser(ctx, tx, user, credential, roleIDs)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (s *RDBConfigStore) createManagedUser(ctx context.Context, tx *gorm.DB, user *tables.TableUser, credential *tables.TableCredential, roleIDs []string) error {
+	if err := requireKnownRoles(tx, roleIDs); err != nil {
+		return err
+	}
+	if err := s.CreateUser(ctx, user, tx); err != nil {
+		return err
+	}
+	credential.ID = uuid.NewString()
+	credential.UserID = user.ID
+	credential.Kind = tables.CredentialKindPassword
+	credential.Version = 1
+	credential.IsActive = true
+	if err := s.CreateCredential(ctx, credential, tx); err != nil {
+		return err
+	}
+	for _, roleID := range roleIDs {
+		if err := s.AssignRole(ctx, &tables.TableRoleAssignment{ID: uuid.NewString(), UserID: user.ID, RoleID: roleID, AssignedByUserID: user.CreatedByUserID}, tx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // UpdateUserDisplayName changes only a non-sensitive profile field. Email
@@ -134,7 +173,22 @@ func (s *RDBConfigStore) UpdateUserDisplayName(ctx context.Context, userID, disp
 	if strings.TrimSpace(userID) == "" {
 		return ErrNotFound
 	}
-	result := s.DB().WithContext(ctx).Model(&tables.TableUser{}).Where("id = ?", userID).Update("display_name", strings.TrimSpace(displayName))
+	return s.updateUserDisplayName(ctx, s.DB(), userID, displayName)
+}
+
+// UpdateUserDisplayNameAudited changes a profile field together with its
+// journal entry so later investigations can distinguish administrative edits.
+func (s *RDBConfigStore) UpdateUserDisplayNameAudited(ctx context.Context, userID, displayName string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {
+	if strings.TrimSpace(userID) == "" {
+		return ErrNotFound
+	}
+	return s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		return s.updateUserDisplayName(ctx, tx, userID, displayName)
+	})
+}
+
+func (s *RDBConfigStore) updateUserDisplayName(ctx context.Context, db *gorm.DB, userID, displayName string) error {
+	result := db.WithContext(ctx).Model(&tables.TableUser{}).Where("id = ?", userID).Update("display_name", strings.TrimSpace(displayName))
 	if result.Error != nil {
 		return s.parseGormError(result.Error)
 	}
@@ -156,37 +210,56 @@ func (s *RDBConfigStore) ReplaceUserRoleAssignments(ctx context.Context, userID 
 		return fmt.Errorf("at least one role is required")
 	}
 	return s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		user, err := lockedUser(tx, userID)
-		if err != nil {
-			return err
-		}
-		if err := lockSuperAdminRole(tx); err != nil {
-			return err
-		}
-		if err := requireKnownRoles(tx, roleIDs); err != nil {
-			return err
-		}
-		var current []tables.TableRoleAssignment
-		if err := tx.Where("user_id = ?", userID).Find(&current).Error; err != nil {
-			return err
-		}
-		currentHasSuperAdmin := slices.ContainsFunc(current, func(assignment tables.TableRoleAssignment) bool { return assignment.RoleID == tables.RoleIDSuperAdmin })
-		wantedSuperAdmin := slices.Contains(roleIDs, tables.RoleIDSuperAdmin)
-		if user.Status == tables.UserStatusActive && currentHasSuperAdmin && !wantedSuperAdmin {
-			if err := requireAnotherActiveSuperAdmin(tx); err != nil {
-				return err
-			}
-		}
-		if err := tx.Where("user_id = ?", userID).Delete(&tables.TableRoleAssignment{}).Error; err != nil {
-			return err
-		}
-		for _, roleID := range roleIDs {
-			if err := tx.Create(&tables.TableRoleAssignment{ID: uuid.NewString(), UserID: userID, RoleID: roleID, AssignedByUserID: assignedByUserID}).Error; err != nil {
-				return s.parseGormError(err)
-			}
-		}
-		return nil
+		return s.replaceUserRoleAssignments(tx, userID, roleIDs, assignedByUserID)
 	})
+}
+
+// ReplaceUserRoleAssignmentsAudited atomically records a complete role-set
+// replacement beside the protected super-admin invariant check.
+func (s *RDBConfigStore) ReplaceUserRoleAssignmentsAudited(ctx context.Context, userID string, roleIDs []string, assignedByUserID *string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {
+	if strings.TrimSpace(userID) == "" {
+		return ErrNotFound
+	}
+	roleIDs = normalizedRoleIDs(roleIDs)
+	if len(roleIDs) == 0 {
+		return fmt.Errorf("at least one role is required")
+	}
+	return s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		return s.replaceUserRoleAssignments(tx, userID, roleIDs, assignedByUserID)
+	})
+}
+
+func (s *RDBConfigStore) replaceUserRoleAssignments(tx *gorm.DB, userID string, roleIDs []string, assignedByUserID *string) error {
+	user, err := lockedUser(tx, userID)
+	if err != nil {
+		return err
+	}
+	if err := lockSuperAdminRole(tx); err != nil {
+		return err
+	}
+	if err := requireKnownRoles(tx, roleIDs); err != nil {
+		return err
+	}
+	var current []tables.TableRoleAssignment
+	if err := tx.Where("user_id = ?", userID).Find(&current).Error; err != nil {
+		return err
+	}
+	currentHasSuperAdmin := slices.ContainsFunc(current, func(assignment tables.TableRoleAssignment) bool { return assignment.RoleID == tables.RoleIDSuperAdmin })
+	wantedSuperAdmin := slices.Contains(roleIDs, tables.RoleIDSuperAdmin)
+	if user.Status == tables.UserStatusActive && currentHasSuperAdmin && !wantedSuperAdmin {
+		if err := requireAnotherActiveSuperAdmin(tx); err != nil {
+			return err
+		}
+	}
+	if err := tx.Where("user_id = ?", userID).Delete(&tables.TableRoleAssignment{}).Error; err != nil {
+		return err
+	}
+	for _, roleID := range roleIDs {
+		if err := tx.Create(&tables.TableRoleAssignment{ID: uuid.NewString(), UserID: userID, RoleID: roleID, AssignedByUserID: assignedByUserID}).Error; err != nil {
+			return s.parseGormError(err)
+		}
+	}
+	return nil
 }
 
 func normalizedRoleIDs(roleIDs []string) []string {
@@ -257,5 +330,27 @@ func requireAnotherActiveSuperAdmin(tx *gorm.DB) error {
 // RevokeAllUserSessions is available to privileged management endpoints and
 // retains session history for audit instead of deleting credential rows.
 func (s *RDBConfigStore) RevokeAllUserSessions(ctx context.Context, userID string, revokedAt time.Time) (int64, error) {
-	return s.RevokeUserIdentitySessions(ctx, userID, revokedAt)
+	return s.revokeAllUserSessions(ctx, s.DB(), userID, revokedAt)
+}
+
+// RevokeAllUserSessionsAudited records an operator-directed global logout in
+// the same transaction as session revocation.
+func (s *RDBConfigStore) RevokeAllUserSessionsAudited(ctx context.Context, userID string, revokedAt time.Time, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (int64, error) {
+	var revoked int64
+	err := s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		var err error
+		revoked, err = s.revokeAllUserSessions(ctx, tx, userID, revokedAt)
+		return err
+	})
+	return revoked, err
+}
+
+func (s *RDBConfigStore) revokeAllUserSessions(ctx context.Context, db *gorm.DB, userID string, revokedAt time.Time) (int64, error) {
+	if strings.TrimSpace(userID) == "" {
+		return 0, ErrNotFound
+	}
+	result := db.WithContext(ctx).Model(&tables.SessionsTable{}).
+		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Update("revoked_at", revokedAt.UTC())
+	return result.RowsAffected, result.Error
 }

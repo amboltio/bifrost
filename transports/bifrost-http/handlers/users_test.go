@@ -23,7 +23,10 @@ type userManagementHandlerStoreStub struct {
 	assignments    map[string][]string
 	recoveryTokens []*tables.TableRecoveryToken
 	revokedUsers   []string
+	auditActions   []string
 }
+
+var _ userManagementHandlerStore = (*userManagementHandlerStoreStub)(nil)
 
 func newUserManagementHandlerStoreStub() *userManagementHandlerStoreStub {
 	viewer := tables.TableRole{ID: authorization.RoleIDViewer, Name: authorization.RoleIDViewer, DisplayName: "Viewer", Permissions: []string{string(authorization.PermissionUsersRead)}}
@@ -71,6 +74,11 @@ func (s *userManagementHandlerStoreStub) CreateManagedUser(_ context.Context, us
 	return &copy, nil
 }
 
+func (s *userManagementHandlerStoreStub) CreateManagedUserAudited(ctx context.Context, user *tables.TableUser, credential *tables.TableCredential, roleIDs []string, auditEvent *tables.TableAuditEvent, _ *tables.TableOutboxEvent) (*tables.TableUser, error) {
+	s.auditActions = append(s.auditActions, auditEvent.Action)
+	return s.CreateManagedUser(ctx, user, credential, roleIDs)
+}
+
 func (s *userManagementHandlerStoreStub) UpdateUserDisplayName(_ context.Context, userID, displayName string) error {
 	user, exists := s.users[userID]
 	if !exists {
@@ -80,12 +88,22 @@ func (s *userManagementHandlerStoreStub) UpdateUserDisplayName(_ context.Context
 	return nil
 }
 
+func (s *userManagementHandlerStoreStub) UpdateUserDisplayNameAudited(ctx context.Context, userID, displayName string, auditEvent *tables.TableAuditEvent, _ *tables.TableOutboxEvent) error {
+	s.auditActions = append(s.auditActions, auditEvent.Action)
+	return s.UpdateUserDisplayName(ctx, userID, displayName)
+}
+
 func (s *userManagementHandlerStoreStub) ReplaceUserRoleAssignments(_ context.Context, userID string, roleIDs []string, _ *string) error {
 	if _, exists := s.users[userID]; !exists {
 		return configstore.ErrNotFound
 	}
 	s.assignments[userID] = append([]string(nil), roleIDs...)
 	return nil
+}
+
+func (s *userManagementHandlerStoreStub) ReplaceUserRoleAssignmentsAudited(ctx context.Context, userID string, roleIDs []string, assignedByUserID *string, auditEvent *tables.TableAuditEvent, _ *tables.TableOutboxEvent) error {
+	s.auditActions = append(s.auditActions, auditEvent.Action)
+	return s.ReplaceUserRoleAssignments(ctx, userID, roleIDs, assignedByUserID)
 }
 
 func (s *userManagementHandlerStoreStub) GetUser(_ context.Context, userID string) (*tables.TableUser, error) {
@@ -108,6 +126,11 @@ func (s *userManagementHandlerStoreStub) DisableUser(_ context.Context, userID s
 	return nil
 }
 
+func (s *userManagementHandlerStoreStub) DisableUserAudited(ctx context.Context, userID string, disabledAt time.Time, auditEvent *tables.TableAuditEvent, _ *tables.TableOutboxEvent) error {
+	s.auditActions = append(s.auditActions, auditEvent.Action)
+	return s.DisableUser(ctx, userID, disabledAt)
+}
+
 func (s *userManagementHandlerStoreStub) RevokeAllUserSessions(_ context.Context, userID string, _ time.Time) (int64, error) {
 	if s.users[userID] == nil {
 		return 0, configstore.ErrNotFound
@@ -116,10 +139,20 @@ func (s *userManagementHandlerStoreStub) RevokeAllUserSessions(_ context.Context
 	return 2, nil
 }
 
+func (s *userManagementHandlerStoreStub) RevokeAllUserSessionsAudited(ctx context.Context, userID string, revokedAt time.Time, auditEvent *tables.TableAuditEvent, _ *tables.TableOutboxEvent) (int64, error) {
+	s.auditActions = append(s.auditActions, auditEvent.Action)
+	return s.RevokeAllUserSessions(ctx, userID, revokedAt)
+}
+
 func (s *userManagementHandlerStoreStub) CreateRecoveryToken(_ context.Context, token *tables.TableRecoveryToken, _ ...*gorm.DB) error {
 	copy := *token
 	s.recoveryTokens = append(s.recoveryTokens, &copy)
 	return nil
+}
+
+func (s *userManagementHandlerStoreStub) CreateRecoveryTokenAudited(ctx context.Context, token *tables.TableRecoveryToken, auditEvent *tables.TableAuditEvent, _ *tables.TableOutboxEvent) error {
+	s.auditActions = append(s.auditActions, auditEvent.Action)
+	return s.CreateRecoveryToken(ctx, token)
 }
 
 func (s *userManagementHandlerStoreStub) RedeemRecoveryToken(context.Context, string, string, time.Time) (*tables.TableRecoveryToken, error) {
@@ -139,7 +172,11 @@ func TestUsersHandlerCreatesListsAndResetsManagedUsers(t *testing.T) {
 	handler.createUser(createCtx)
 	require.Equal(t, fasthttp.StatusCreated, createCtx.Response.StatusCode(), string(createCtx.Response.Body()))
 	assert.NotContains(t, string(createCtx.Response.Body()), "a sufficiently long password")
-	created := store.users["new-user"]
+	require.Len(t, store.users, 1)
+	var created *tables.TableUser
+	for _, user := range store.users {
+		created = user
+	}
 	require.NotNil(t, created)
 	assert.Equal(t, "admin", *created.CreatedByUserID)
 
@@ -150,8 +187,8 @@ func TestUsersHandlerCreatesListsAndResetsManagedUsers(t *testing.T) {
 	assert.NotContains(t, string(listCtx.Response.Body()), "secret_hash")
 
 	resetCtx := &fasthttp.RequestCtx{}
-	resetCtx.Request.SetRequestURI("/api/governance/users/new-user/reset-password")
-	resetCtx.SetUserValue("id", "new-user")
+	resetCtx.Request.SetRequestURI("/api/governance/users/" + created.ID + "/reset-password")
+	resetCtx.SetUserValue("id", created.ID)
 	resetCtx.SetUserValue(schemas.BifrostContextKeyUserID, "admin")
 	handler.resetPassword(resetCtx)
 	require.Equal(t, fasthttp.StatusCreated, resetCtx.Response.StatusCode(), string(resetCtx.Response.Body()))
@@ -162,6 +199,7 @@ func TestUsersHandlerCreatesListsAndResetsManagedUsers(t *testing.T) {
 	require.NotEmpty(t, resetResponse.Token)
 	require.Len(t, store.recoveryTokens, 1)
 	assert.NotEqual(t, resetResponse.Token, store.recoveryTokens[0].TokenDigest)
+	assert.Equal(t, []string{"identity.user.created", "identity.user.password_reset_issued"}, store.auditActions)
 }
 
 func TestUsersHandlerRejectsShortPasswords(t *testing.T) {
