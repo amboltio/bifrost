@@ -18,7 +18,9 @@ import (
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/grant"
 	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/temptoken"
 	"github.com/maximhq/bifrost/framework/tracing"
@@ -842,21 +844,82 @@ func fasthttpResponseToHTTPResponse(ctx *fasthttp.RequestCtx, resp *schemas.HTTP
 	}
 }
 
-// validateSession checks if a session token is valid
-func validateSession(_ *fasthttp.RequestCtx, store configstore.ConfigStore, token string) bool {
+// validateDashboardSession authenticates a canonical identity session when
+// ownership fields are present. Legacy ownerless rows remain valid only for
+// the bounded compatibility bridge; they deliberately produce no principal.
+func validateDashboardSession(store configstore.ConfigStore, token string, policy identity.SessionPolicy) (identity.Principal, bool, bool) {
 	session, err := store.GetSession(context.Background(), token)
 	if err != nil || session == nil {
-		return false
+		return identity.Principal{}, false, false
 	}
 	if session.UserID != nil {
 		canonicalStore, ok := store.(identity.IdentitySessionStore)
 		if !ok {
-			return false
+			return identity.Principal{}, true, false
 		}
-		_, err := identity.NewSessionService(canonicalStore, identity.SessionPolicy{}, nil).AuthenticateSession(context.Background(), token)
-		return err == nil
+		principal, err := identity.NewSessionService(canonicalStore, policy, nil).AuthenticateSession(context.Background(), token)
+		if err != nil {
+			return identity.Principal{}, true, false
+		}
+		return principal, true, true
 	}
-	return session.IsActiveAt(time.Now())
+	return identity.Principal{}, false, session.IsActiveAt(time.Now())
+}
+
+func sessionPolicyForAuthConfig(authConfig *configstore.AuthConfig) identity.SessionPolicy {
+	if authConfig == nil {
+		return identity.SessionPolicy{}
+	}
+	normalized := authConfig.Normalized()
+	if normalized.LocalLogin == nil {
+		return identity.SessionPolicy{}
+	}
+	return identity.SessionPolicy{
+		AbsoluteTTL: time.Duration(normalized.LocalLogin.SessionTTLSeconds) * time.Second,
+		IdleTimeout: time.Duration(normalized.LocalLogin.IdleTimeoutSeconds) * time.Second,
+	}
+}
+
+// authenticateDashboardSession stamps only trusted identity fields after a
+// successful session lookup. The raw bearer token remains confined to its
+// dedicated context key; grants receive the opaque server-side session ID.
+func (m *AuthMiddleware) authenticateDashboardSession(ctx *fasthttp.RequestCtx, token string, authConfig *configstore.AuthConfig) bool {
+	principal, canonical, valid := validateDashboardSession(m.store, token, sessionPolicyForAuthConfig(authConfig))
+	if !valid {
+		return false
+	}
+	ctx.SetUserValue(schemas.BifrostContextKeySessionToken, token)
+	if !canonical {
+		// Ownerless legacy sessions predate canonical users. They remain an
+		// administrator-only compatibility path until the transition reader is
+		// removed in a later release.
+		ctx.SetUserValue(schemas.IsLocalAdminContextKey, true)
+		return true
+	}
+
+	ctx.SetUserValue(schemas.BifrostContextKeyUserID, principal.UserID)
+	ctx.SetUserValue(schemas.BifrostContextKeyAuthCredential,
+		grant.NewCredential(grant.CredentialSessionToken, fmt.Sprintf("session:%d", principal.SessionID)))
+	if m.userIsSuperAdmin(principal.UserID) {
+		ctx.SetUserValue(schemas.IsLocalAdminContextKey, true)
+	}
+	return true
+}
+
+// userIsSuperAdmin preserves the existing local-admin bypass only for the
+// immutable bootstrap role. Regular canonical users never inherit it merely
+// by presenting a valid session.
+func (m *AuthMiddleware) userIsSuperAdmin(userID string) bool {
+	assignments, err := m.store.GetUserRoleAssignments(context.Background(), userID)
+	if err != nil {
+		return false
+	}
+	for _, assignment := range assignments {
+		if assignment.RoleID == tables.RoleIDSuperAdmin {
+			return true
+		}
+	}
+	return false
 }
 
 // isInferenceWSEndpoint returns true for WebSocket endpoints that should use
@@ -1098,8 +1161,8 @@ func (m *AuthMiddleware) InferenceMiddleware() schemas.BifrostHTTPMiddleware {
 // APIMiddleware is for API requests if authConfig is set, it will verify authentication based on the request type.
 // Three authentication methods are supported:
 //   - Basic auth: Uses username + password validation (no session tracking). Used for inference API calls.
-//   - Bearer token: Uses session validation via validateSession(). Used for dashboard calls.
-//   - WebSocket: Uses session validation via validateSession() with token from query parameters.
+//   - Bearer token: Uses canonical session validation. Used for dashboard calls.
+//   - WebSocket: Uses canonical session validation with token from query parameters.
 //
 // Basic auth may be acceptable for limited use cases, while Bearer and WebSocket flows provide
 // session-based authentication suitable for production environments.
@@ -1224,8 +1287,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						ticket := string(ctx.Request.URI().QueryArgs().Peek("ticket"))
 						if ticket != "" && m.wsTicketStore != nil {
 							sessionToken := m.wsTicketStore.Consume(ticket)
-							if sessionToken != "" && validateSession(ctx, m.store, sessionToken) {
-								ctx.SetUserValue(schemas.BifrostContextKeySessionToken, sessionToken)
+							if sessionToken != "" && m.authenticateDashboardSession(ctx, sessionToken, authConfig) {
 								next(ctx)
 								return
 							}
@@ -1235,8 +1297,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						// Fallback: legacy ?token= param (for backward compatibility)
 						token := string(ctx.Request.URI().QueryArgs().Peek("token"))
 						if token != "" {
-							if validateSession(ctx, m.store, token) {
-								ctx.SetUserValue(schemas.BifrostContextKeySessionToken, token)
+							if m.authenticateDashboardSession(ctx, token, authConfig) {
 								next(ctx)
 								return
 							}
@@ -1245,8 +1306,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						}
 						// Fallback: cookie-based WS auth
 						cookieToken := string(ctx.Request.Header.Cookie("token"))
-						if cookieToken != "" && validateSession(ctx, m.store, cookieToken) {
-							ctx.SetUserValue(schemas.BifrostContextKeySessionToken, cookieToken)
+						if cookieToken != "" && m.authenticateDashboardSession(ctx, cookieToken, authConfig) {
 							next(ctx)
 							return
 						}
@@ -1257,9 +1317,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 				// Cookie-based auth fallback: if no Authorization header, check for the HTTPOnly session cookie.
 				// This supports the dashboard which relies on cookies instead of localStorage tokens.
 				cookieToken := string(ctx.Request.Header.Cookie("token"))
-				if cookieToken != "" && validateSession(ctx, m.store, cookieToken) {
-					ctx.SetUserValue(schemas.BifrostContextKeySessionToken, cookieToken)
-					ctx.SetUserValue(schemas.IsLocalAdminContextKey, true)
+				if cookieToken != "" && m.authenticateDashboardSession(ctx, cookieToken, authConfig) {
 					next(ctx)
 					return
 				}
@@ -1316,7 +1374,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 				// We are checking for API keys first; it it seems like a valid Bifrost API key
 
 				// Verify the session
-				if !validateSession(ctx, m.store, token) {
+				if !m.authenticateDashboardSession(ctx, token, authConfig) {
 					// Here we will check if its the base64 of username:password
 					// This is for backward compatibility with the old auth system
 					decodedBytes, err := base64.StdEncoding.DecodeString(token)
@@ -1353,9 +1411,6 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 					next(ctx)
 					return
 				}
-				// setting up session in the request
-				ctx.SetUserValue(schemas.BifrostContextKeySessionToken, token)
-				ctx.SetUserValue(schemas.IsLocalAdminContextKey, true)
 				// Continue with the next handler
 				next(ctx)
 				return

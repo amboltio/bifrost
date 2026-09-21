@@ -16,6 +16,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/tracing"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
@@ -24,10 +25,140 @@ import (
 // mockLogger is a mock implementation of schemas.Logger for testing
 type mockLogger struct{}
 
-func (m *mockLogger) Debug(format string, args ...any)                  {}
-func (m *mockLogger) Info(format string, args ...any)                   {}
-func (m *mockLogger) Warn(format string, args ...any)                   {}
-func (m *mockLogger) Error(format string, args ...any)                  {}
+func (m *mockLogger) Debug(format string, args ...any) {}
+func (m *mockLogger) Info(format string, args ...any)  {}
+func (m *mockLogger) Warn(format string, args ...any)  {}
+func (m *mockLogger) Error(format string, args ...any) {}
+
+type canonicalSessionAuthStoreStub struct {
+	configstore.ConfigStore
+	user        *tables.TableUser
+	session     *tables.SessionsTable
+	assignments []tables.TableRoleAssignment
+	authConfig  *configstore.AuthConfig
+	credentials map[string]*tables.TableCredential
+}
+
+func (s *canonicalSessionAuthStoreStub) GetAuthConfig(context.Context) (*configstore.AuthConfig, error) {
+	if s.authConfig != nil {
+		return s.authConfig, nil
+	}
+	return &configstore.AuthConfig{IsEnabled: true, LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true}}, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) GetSession(_ context.Context, token string) (*tables.SessionsTable, error) {
+	if s.session == nil || s.session.Token != token {
+		return nil, nil
+	}
+	return s.session, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) GetUser(_ context.Context, id string) (*tables.TableUser, error) {
+	if s.user == nil || s.user.ID != id {
+		return nil, nil
+	}
+	return s.user, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) GetUserByNormalizedEmail(_ context.Context, email string) (*tables.TableUser, error) {
+	if s.user == nil || s.user.NormalizedEmail == nil || *s.user.NormalizedEmail != tables.NormalizeEmail(email) {
+		return nil, nil
+	}
+	return s.user, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) GetUserByLegacyUsername(_ context.Context, username string) (*tables.TableUser, error) {
+	if s.user == nil || s.user.LegacyUsername == nil || *s.user.LegacyUsername != username {
+		return nil, nil
+	}
+	return s.user, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) GetCredentialByUserIDAndKind(_ context.Context, userID, kind string) (*tables.TableCredential, error) {
+	credential := s.credentials[kind]
+	if credential == nil || credential.UserID != userID {
+		return nil, nil
+	}
+	return credential, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) UpgradeLocalPasswordCredential(_ context.Context, userID, credentialID string, expectedVersion uint64, newHash string) error {
+	credential := s.credentials[tables.CredentialKindLegacyPassword]
+	if credential == nil || credential.UserID != userID || credential.ID != credentialID || credential.Version != expectedVersion {
+		return configstore.ErrNotFound
+	}
+	delete(s.credentials, tables.CredentialKindLegacyPassword)
+	credential.Kind = tables.CredentialKindPassword
+	credential.SecretHash = newHash
+	credential.Version++
+	s.credentials[tables.CredentialKindPassword] = credential
+	return nil
+}
+
+func (s *canonicalSessionAuthStoreStub) ChangeLocalPasswordCredential(_ context.Context, userID, credentialID string, expectedVersion uint64, newHash string, _ time.Time) error {
+	credential := s.credentials[tables.CredentialKindPassword]
+	if credential == nil || credential.UserID != userID || credential.ID != credentialID || credential.Version != expectedVersion {
+		return configstore.ErrNotFound
+	}
+	credential.SecretHash = newHash
+	credential.Version++
+	return nil
+}
+
+func (s *canonicalSessionAuthStoreStub) CreateSession(_ context.Context, session *tables.SessionsTable) error {
+	if session.ID == 0 {
+		session.ID = 1
+	}
+	s.session = session
+	return nil
+}
+
+func (s *canonicalSessionAuthStoreStub) TouchIdentitySession(_ context.Context, id int, lastSeenAt, idleExpiresAt time.Time) error {
+	if s.session == nil || s.session.ID != id {
+		return configstore.ErrNotFound
+	}
+	s.session.LastSeenAt = &lastSeenAt
+	s.session.IdleExpiresAt = &idleExpiresAt
+	return nil
+}
+
+func (s *canonicalSessionAuthStoreStub) RevokeIdentitySession(_ context.Context, id int, revokedAt time.Time) error {
+	if s.session == nil || s.session.ID != id {
+		return configstore.ErrNotFound
+	}
+	s.session.RevokedAt = &revokedAt
+	return nil
+}
+
+func (s *canonicalSessionAuthStoreStub) RevokeUserIdentitySession(_ context.Context, userID string, id int, revokedAt time.Time) error {
+	if s.session == nil || s.session.ID != id || s.session.UserID == nil || *s.session.UserID != userID || s.session.RevokedAt != nil {
+		return configstore.ErrNotFound
+	}
+	s.session.RevokedAt = &revokedAt
+	return nil
+}
+
+func (s *canonicalSessionAuthStoreStub) ListUserIdentitySessions(_ context.Context, userID string) ([]tables.SessionsTable, error) {
+	if s.session == nil || s.session.UserID == nil || *s.session.UserID != userID {
+		return []tables.SessionsTable{}, nil
+	}
+	return []tables.SessionsTable{*s.session}, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) RevokeUserIdentitySessions(_ context.Context, userID string, revokedAt time.Time) (int64, error) {
+	if s.session == nil || s.session.UserID == nil || *s.session.UserID != userID || s.session.RevokedAt != nil {
+		return 0, nil
+	}
+	s.session.RevokedAt = &revokedAt
+	return 1, nil
+}
+
+func (s *canonicalSessionAuthStoreStub) GetUserRoleAssignments(_ context.Context, userID string) ([]tables.TableRoleAssignment, error) {
+	if s.user == nil || s.user.ID != userID {
+		return []tables.TableRoleAssignment{}, nil
+	}
+	return s.assignments, nil
+}
 func (m *mockLogger) Fatal(format string, args ...any)                  {}
 func (m *mockLogger) SetLevel(level schemas.LogLevel)                   {}
 func (m *mockLogger) SetOutputType(outputType schemas.LoggerOutputType) {}
@@ -931,6 +1062,58 @@ func TestAuthMiddleware_APIMiddleware_VirtualKeyDoesNotBypass(t *testing.T) {
 	}
 	if ctx.Response.StatusCode() != fasthttp.StatusUnauthorized {
 		t.Fatalf("expected %d for admin route with VK, got %d", fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
+	}
+}
+
+func TestAuthMiddlewareCanonicalSessionStampsPrincipalAndLimitsAdminBypass(t *testing.T) {
+	now := time.Now().UTC()
+	userID := "canonical-user"
+	newStore := func(assignments []tables.TableRoleAssignment) *canonicalSessionAuthStoreStub {
+		return &canonicalSessionAuthStoreStub{
+			user: &tables.TableUser{ID: userID, Status: tables.UserStatusActive, AuthVersion: 3},
+			session: &tables.SessionsTable{
+				ID: 12, Token: "canonical-session", ExpiresAt: now.Add(time.Hour),
+				UserID: &userID, AuthMethod: "local", AuthVersion: 3,
+			},
+			assignments: assignments,
+		}
+	}
+
+	for _, test := range []struct {
+		name           string
+		assignments    []tables.TableRoleAssignment
+		wantLocalAdmin bool
+	}{
+		{name: "regular user is not local admin"},
+		{name: "super admin retains compatibility bypass", assignments: []tables.TableRoleAssignment{{UserID: userID, RoleID: tables.RoleIDSuperAdmin}}, wantLocalAdmin: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newStore(test.assignments)
+			am := &AuthMiddleware{store: store}
+			am.UpdateAuthConfig(&configstore.AuthConfig{IsEnabled: true, LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true}})
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.SetRequestURI("/api/config")
+			ctx.Request.Header.Set("Authorization", "Bearer canonical-session")
+
+			nextCalled := false
+			am.APIMiddleware()(func(ctx *fasthttp.RequestCtx) {
+				nextCalled = true
+				if got, _ := ctx.UserValue(schemas.BifrostContextKeyUserID).(string); got != userID {
+					t.Errorf("user ID = %q, want %q", got, userID)
+				}
+				credential, ok := ctx.UserValue(schemas.BifrostContextKeyAuthCredential).(schemas.Credential)
+				if !ok || credential.Kind != "session_token" || credential.Value != "session:12" {
+					t.Errorf("unexpected authenticated credential: %#v", credential)
+				}
+				localAdmin, _ := ctx.UserValue(schemas.IsLocalAdminContextKey).(bool)
+				if localAdmin != test.wantLocalAdmin {
+					t.Errorf("local admin = %v, want %v", localAdmin, test.wantLocalAdmin)
+				}
+			})(ctx)
+			if !nextCalled {
+				t.Fatalf("canonical session was not accepted, status=%d", ctx.Response.StatusCode())
+			}
+		})
 	}
 }
 

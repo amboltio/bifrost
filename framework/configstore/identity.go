@@ -210,6 +210,120 @@ func (s *RDBConfigStore) ListCredentialsByUserID(ctx context.Context, userID str
 	return credentials, nil
 }
 
+// UpgradeLocalPasswordCredential replaces a successfully verified legacy
+// bcrypt credential with the current Argon2id format. The version predicate
+// prevents an older login response from overwriting a newer reset.
+func (s *RDBConfigStore) UpgradeLocalPasswordCredential(ctx context.Context, userID, credentialID string, expectedVersion uint64, newHash string) error {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(credentialID) == "" || expectedVersion == 0 || strings.TrimSpace(newHash) == "" {
+		return ErrNotFound
+	}
+	return s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var credential tables.TableCredential
+		if err := dbForUpdate(tx).Where("id = ? AND user_id = ? AND version = ? AND is_active = ?", credentialID, userID, expectedVersion, true).First(&credential).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if credential.Kind != tables.CredentialKindPassword && credential.Kind != tables.CredentialKindLegacyPassword {
+			return ErrNotFound
+		}
+		if credential.Kind == tables.CredentialKindLegacyPassword {
+			var current tables.TableCredential
+			err := dbForUpdate(tx).Where("user_id = ? AND kind = ?", userID, tables.CredentialKindPassword).First(&current).Error
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", credential.ID, expectedVersion).Updates(map[string]any{
+					"secret_hash": newHash, "version": gorm.Expr("version + ?", 1), "kind": tables.CredentialKindPassword,
+				}).Error; err != nil {
+					return s.parseGormError(err)
+				}
+			case err != nil:
+				return err
+			case current.IsActive:
+				return ErrNotFound
+			default:
+				if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", current.ID, current.Version).Updates(map[string]any{
+					"secret_hash": newHash, "is_active": true, "version": gorm.Expr("version + ?", 1),
+				}).Error; err != nil {
+					return s.parseGormError(err)
+				}
+				if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", credential.ID, expectedVersion).Update("is_active", false).Error; err != nil {
+					return err
+				}
+			}
+		} else if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", credential.ID, expectedVersion).Updates(map[string]any{
+			"secret_hash": newHash, "version": gorm.Expr("version + ?", 1),
+		}).Error; err != nil {
+			return s.parseGormError(err)
+		}
+		return nil
+	})
+}
+
+// ChangeLocalPasswordCredential atomically replaces an active verifier,
+// increments AuthVersion, and revokes every active session owned by the user.
+// The latter two operations ensure a stolen old session cannot survive a
+// password change on another device.
+func (s *RDBConfigStore) ChangeLocalPasswordCredential(ctx context.Context, userID, credentialID string, expectedVersion uint64, newHash string, changedAt time.Time) error {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(credentialID) == "" || expectedVersion == 0 || strings.TrimSpace(newHash) == "" {
+		return ErrNotFound
+	}
+	if changedAt.IsZero() {
+		changedAt = time.Now().UTC()
+	}
+	return s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var credential tables.TableCredential
+		if err := dbForUpdate(tx).Where("id = ? AND user_id = ? AND version = ? AND is_active = ?", credentialID, userID, expectedVersion, true).First(&credential).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if credential.Kind != tables.CredentialKindPassword && credential.Kind != tables.CredentialKindLegacyPassword {
+			return ErrNotFound
+		}
+		if credential.Kind == tables.CredentialKindLegacyPassword {
+			var current tables.TableCredential
+			err := dbForUpdate(tx).Where("user_id = ? AND kind = ?", userID, tables.CredentialKindPassword).First(&current).Error
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", credential.ID, expectedVersion).Updates(map[string]any{
+					"secret_hash": newHash, "version": gorm.Expr("version + ?", 1), "kind": tables.CredentialKindPassword,
+				}).Error; err != nil {
+					return s.parseGormError(err)
+				}
+			case err != nil:
+				return err
+			case current.IsActive:
+				return ErrNotFound
+			default:
+				if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", current.ID, current.Version).Updates(map[string]any{
+					"secret_hash": newHash, "is_active": true, "version": gorm.Expr("version + ?", 1),
+				}).Error; err != nil {
+					return s.parseGormError(err)
+				}
+				if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", credential.ID, expectedVersion).Update("is_active", false).Error; err != nil {
+					return err
+				}
+			}
+		} else if err := tx.Model(&tables.TableCredential{}).Where("id = ? AND version = ?", credential.ID, expectedVersion).Updates(map[string]any{
+			"secret_hash": newHash, "version": gorm.Expr("version + ?", 1),
+		}).Error; err != nil {
+			return s.parseGormError(err)
+		}
+		if result := tx.Model(&tables.TableUser{}).Where("id = ? AND status = ?", userID, tables.UserStatusActive).Update("auth_version", gorm.Expr("auth_version + ?", 1)); result.Error != nil {
+			return result.Error
+		} else if result.RowsAffected != 1 {
+			return ErrNotFound
+		}
+		if err := tx.Model(&tables.SessionsTable{}).Where("user_id = ? AND revoked_at IS NULL", userID).Update("revoked_at", changedAt.UTC()).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // CreateExternalIdentity persists a validated issuer/subject binding. The
 // composite unique index prevents a provider identity from silently joining two
 // users during concurrent first logins.

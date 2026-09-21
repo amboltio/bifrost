@@ -31,6 +31,9 @@ type IdentitySessionStore interface {
 	CreateSession(ctx context.Context, session *tables.SessionsTable) error
 	TouchIdentitySession(ctx context.Context, id int, lastSeenAt, idleExpiresAt time.Time) error
 	RevokeIdentitySession(ctx context.Context, id int, revokedAt time.Time) error
+	RevokeUserIdentitySession(ctx context.Context, userID string, id int, revokedAt time.Time) error
+	ListUserIdentitySessions(ctx context.Context, userID string) ([]tables.SessionsTable, error)
+	RevokeUserIdentitySessions(ctx context.Context, userID string, revokedAt time.Time) (int64, error)
 }
 
 // CanonicalUserLookupStore adds the transitional lookup keys needed by the
@@ -46,6 +49,20 @@ type SessionService struct {
 	store  IdentitySessionStore
 	policy SessionPolicy
 	now    func() time.Time
+}
+
+// SessionMetadata is the safe session-management response shape. It omits the
+// bearer token and its digest, which must never leave persistence code.
+type SessionMetadata struct {
+	ID                int        `json:"id"`
+	AuthMethod        string     `json:"auth_method"`
+	ProviderID        string     `json:"provider_id,omitempty"`
+	LastSeenAt        *time.Time `json:"last_seen_at,omitempty"`
+	AbsoluteExpiresAt *time.Time `json:"absolute_expires_at,omitempty"`
+	IdleExpiresAt     *time.Time `json:"idle_expires_at,omitempty"`
+	RevokedAt         *time.Time `json:"revoked_at,omitempty"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 // NewSessionService applies safe defaults when the configuration omitted them.
@@ -125,4 +142,64 @@ func (s *SessionService) AuthenticateSession(ctx context.Context, token string) 
 		principal.ProviderID = *session.ProviderID
 	}
 	return principal, nil
+}
+
+// ListUserSessions returns a user's session metadata without bearer material.
+// Caller authorization is deliberately outside this service so it can be used
+// by self-service and privileged management routes with different policies.
+func (s *SessionService) ListUserSessions(ctx context.Context, userID string) ([]SessionMetadata, error) {
+	if s.store == nil || strings.TrimSpace(userID) == "" {
+		return nil, ErrUnauthenticated
+	}
+	sessions, err := s.store.ListUserIdentitySessions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SessionMetadata, 0, len(sessions))
+	for _, session := range sessions {
+		metadata := SessionMetadata{
+			ID: session.ID, AuthMethod: session.AuthMethod, LastSeenAt: session.LastSeenAt,
+			AbsoluteExpiresAt: session.AbsoluteExpiresAt, IdleExpiresAt: session.IdleExpiresAt,
+			RevokedAt: session.RevokedAt, ExpiresAt: session.ExpiresAt, CreatedAt: session.CreatedAt,
+		}
+		if session.ProviderID != nil {
+			metadata.ProviderID = *session.ProviderID
+		}
+		result = append(result, metadata)
+	}
+	return result, nil
+}
+
+// RevokeSession makes one canonical session unusable. Reason is accepted at
+// this boundary so a route can bind its audit event to the same user intent;
+// the durable session row intentionally stores no attacker-controlled text.
+func (s *SessionService) RevokeSession(ctx context.Context, sessionID int, _ string) error {
+	if s.store == nil || sessionID <= 0 {
+		return ErrUnauthenticated
+	}
+	if err := s.store.RevokeIdentitySession(ctx, sessionID, s.now().UTC()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RevokeUserSession invalidates one session only when it belongs to userID.
+// The ownership predicate lives in the storage mutation, rather than a
+// vulnerable list-then-update handler sequence.
+func (s *SessionService) RevokeUserSession(ctx context.Context, userID string, sessionID int, _ string) error {
+	if s.store == nil || strings.TrimSpace(userID) == "" || sessionID <= 0 {
+		return ErrUnauthenticated
+	}
+	return s.store.RevokeUserIdentitySession(ctx, userID, sessionID, s.now().UTC())
+}
+
+// RevokeUserSessions invalidates every currently active session for one user.
+// A password change or account suspension increments AuthVersion as a second,
+// independent invalidation mechanism; this method is for explicit logout-all.
+func (s *SessionService) RevokeUserSessions(ctx context.Context, userID, _ string) error {
+	if s.store == nil || strings.TrimSpace(userID) == "" {
+		return ErrUnauthenticated
+	}
+	_, err := s.store.RevokeUserIdentitySessions(ctx, userID, s.now().UTC())
+	return err
 }

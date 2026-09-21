@@ -241,3 +241,63 @@ func (s *RDBConfigStore) RevokeIdentitySession(ctx context.Context, id int, revo
 	}
 	return nil
 }
+
+// RevokeUserIdentitySession marks one active session revoked only when the
+// supplied user owns it. It intentionally returns ErrNotFound for a missing,
+// already-revoked, or another user's row so a self-service endpoint cannot
+// enumerate session IDs.
+func (s *RDBConfigStore) RevokeUserIdentitySession(ctx context.Context, userID string, id int, revokedAt time.Time) error {
+	if strings.TrimSpace(userID) == "" || id <= 0 {
+		return ErrNotFound
+	}
+	if revokedAt.IsZero() {
+		revokedAt = time.Now().UTC()
+	}
+	result := s.DB().WithContext(ctx).Model(&tables.SessionsTable{}).
+		Where("id = ? AND user_id = ? AND revoked_at IS NULL", id, userID).
+		Update("revoked_at", revokedAt.UTC())
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListUserIdentitySessions returns a user's session metadata in newest-first
+// order. The query excludes Token and TokenHash at the database boundary so a
+// future handler cannot accidentally serialize a reusable bearer credential.
+func (s *RDBConfigStore) ListUserIdentitySessions(ctx context.Context, userID string) ([]tables.SessionsTable, error) {
+	if strings.TrimSpace(userID) == "" {
+		return []tables.SessionsTable{}, nil
+	}
+	var sessions []tables.SessionsTable
+	err := s.DB().WithContext(ctx).Model(&tables.SessionsTable{}).
+		Select("id", "expires_at", "user_id", "auth_method", "provider_id", "last_seen_at", "absolute_expires_at", "idle_expires_at", "revoked_at", "auth_version", "created_at", "updated_at").
+		Where("user_id = ?", userID).
+		Order("created_at DESC, id DESC").
+		Find(&sessions).Error
+	if err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+// RevokeUserIdentitySessions invalidates all active rows owned by a canonical
+// user. It neither deletes session history nor touches another user's rows.
+func (s *RDBConfigStore) RevokeUserIdentitySessions(ctx context.Context, userID string, revokedAt time.Time) (int64, error) {
+	if strings.TrimSpace(userID) == "" {
+		return 0, ErrNotFound
+	}
+	if revokedAt.IsZero() {
+		revokedAt = time.Now().UTC()
+	}
+	result := s.DB().WithContext(ctx).Model(&tables.SessionsTable{}).
+		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Update("revoked_at", revokedAt.UTC())
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}

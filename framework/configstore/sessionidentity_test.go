@@ -175,3 +175,88 @@ func TestRDBIdentitySessionTouchAndRevocationAreFailClosed(t *testing.T) {
 	require.NoError(t, store.RevokeIdentitySession(ctx, session.ID, now.Add(time.Minute)))
 	require.ErrorIs(t, store.TouchIdentitySession(ctx, session.ID, now, now.Add(time.Minute)), ErrNotFound)
 }
+
+func TestRDBIdentitySessionsListAndRevokeByUser(t *testing.T) {
+	store := setupLegacyBootstrapStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 17, 16, 0, 0, 0, time.UTC)
+	first := &tables.TableUser{Email: ptr("first-session@example.test")}
+	second := &tables.TableUser{Email: ptr("second-session@example.test")}
+	require.NoError(t, store.CreateUser(ctx, first))
+	require.NoError(t, store.CreateUser(ctx, second))
+
+	for _, session := range []*tables.SessionsTable{
+		{Token: "first-one", ExpiresAt: now.Add(time.Hour), UserID: &first.ID, AuthMethod: "local", AuthVersion: first.AuthVersion, CreatedAt: now, UpdatedAt: now},
+		{Token: "first-two", ExpiresAt: now.Add(time.Hour), UserID: &first.ID, AuthMethod: "oidc", AuthVersion: first.AuthVersion, CreatedAt: now, UpdatedAt: now},
+		{Token: "second-one", ExpiresAt: now.Add(time.Hour), UserID: &second.ID, AuthMethod: "local", AuthVersion: second.AuthVersion, CreatedAt: now, UpdatedAt: now},
+	} {
+		require.NoError(t, store.CreateSession(ctx, session))
+	}
+
+	sessions, err := store.ListUserIdentitySessions(ctx, first.ID)
+	require.NoError(t, err)
+	require.Len(t, sessions, 2)
+	for _, session := range sessions {
+		assert.Empty(t, session.Token, "listing must never return a raw session token")
+		assert.Equal(t, first.ID, *session.UserID)
+	}
+	require.NoError(t, store.RevokeUserIdentitySession(ctx, first.ID, sessions[0].ID, now))
+	require.ErrorIs(t, store.RevokeUserIdentitySession(ctx, first.ID, sessions[0].ID, now), ErrNotFound)
+
+	secondSession, err := store.GetSession(ctx, "second-one")
+	require.NoError(t, err)
+	require.NotNil(t, secondSession)
+	require.ErrorIs(t, store.RevokeUserIdentitySession(ctx, first.ID, secondSession.ID, now), ErrNotFound)
+
+	revoked, err := store.RevokeUserIdentitySessions(ctx, first.ID, now)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), revoked)
+	revoked, err = store.RevokeUserIdentitySessions(ctx, first.ID, now.Add(time.Minute))
+	require.NoError(t, err)
+	assert.Zero(t, revoked)
+
+	secondSession, err = store.GetSession(ctx, "second-one")
+	require.NoError(t, err)
+	require.NotNil(t, secondSession)
+	assert.True(t, secondSession.IsActiveAt(now))
+}
+
+func TestRDBLocalPasswordCredentialUpgradeAndChangeInvalidateSessions(t *testing.T) {
+	store := setupLegacyBootstrapStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 20, 9, 0, 0, 0, time.UTC)
+	user := &tables.TableUser{Email: ptr("password-change@example.test")}
+	require.NoError(t, store.CreateUser(ctx, user))
+	credential := &tables.TableCredential{
+		ID: "legacy-credential", UserID: user.ID, Kind: tables.CredentialKindLegacyPassword,
+		SecretHash: "$2a$04$JfBKhiAtb1CD7gfws47s4OfzmNedS6TBApRX3iwOFAz0PfeKzP1Zy", Version: 1, IsActive: true,
+	}
+	require.NoError(t, store.CreateCredential(ctx, credential))
+	require.NoError(t, store.CreateSession(ctx, &tables.SessionsTable{
+		Token: "password-change-session", ExpiresAt: now.Add(time.Hour), UserID: &user.ID,
+		AuthMethod: "local", AuthVersion: user.AuthVersion, CreatedAt: now, UpdatedAt: now,
+	}))
+
+	require.NoError(t, store.UpgradeLocalPasswordCredential(ctx, user.ID, credential.ID, credential.Version, "upgraded-argon-verifier"))
+	upgraded, err := store.GetCredentialByUserIDAndKind(ctx, user.ID, tables.CredentialKindPassword)
+	require.NoError(t, err)
+	require.NotNil(t, upgraded)
+	assert.Equal(t, "upgraded-argon-verifier", upgraded.SecretHash)
+	assert.Equal(t, uint64(2), upgraded.Version)
+
+	require.NoError(t, store.ChangeLocalPasswordCredential(ctx, user.ID, upgraded.ID, upgraded.Version, "changed-argon-verifier", now))
+	changed, err := store.GetCredentialByUserIDAndKind(ctx, user.ID, tables.CredentialKindPassword)
+	require.NoError(t, err)
+	require.NotNil(t, changed)
+	assert.Equal(t, "changed-argon-verifier", changed.SecretHash)
+	assert.Equal(t, uint64(3), changed.Version)
+
+	updatedUser, err := store.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updatedUser)
+	assert.Equal(t, user.AuthVersion+1, updatedUser.AuthVersion)
+	session, err := store.GetSession(ctx, "password-change-session")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	require.NotNil(t, session.RevokedAt)
+}

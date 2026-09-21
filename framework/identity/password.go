@@ -99,6 +99,17 @@ func (s *PasswordService) VerifyAndUpgrade(encodedHash, password string) (bool, 
 	return subtle.ConstantTimeCompare(actual, expected) == 1, "", nil
 }
 
+// DummyVerify performs the same bounded Argon2id work used for a normal
+// verifier without accepting any credential. Local login calls it for unknown
+// or disabled accounts so account existence does not create a cheap timing
+// oracle. Invalid client input is replaced with a fixed bounded value.
+func (s *PasswordService) DummyVerify(password string) {
+	if len(password) == 0 || len(password) > MaxPasswordInputBytes {
+		password = "invalid-password-input"
+	}
+	_ = deriveArgon2id([]byte(password), make([]byte, defaultPasswordParameters.saltLength), defaultPasswordParameters)
+}
+
 func validatePasswordInput(password string) error {
 	if len(password) == 0 || len(password) > MaxPasswordInputBytes {
 		return fmt.Errorf("password must contain between 1 and %d bytes", MaxPasswordInputBytes)
