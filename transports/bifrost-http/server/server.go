@@ -2436,6 +2436,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore)
 	oidcHandler := handlers.NewOIDCHandler(s.Config.ConfigStore)
 	usersHandler := handlers.NewUsersHandler(s.Config.ConfigStore)
+	businessUnitsHandler := handlers.NewBusinessUnitsHandler(s.Config.ConfigStore)
 	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore, callbacks)
 	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config.ConfigStore)
 	// Going ahead with API handlers
@@ -2470,6 +2471,9 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	if usersHandler != nil {
 		usersHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if businessUnitsHandler != nil {
+		businessUnitsHandler.RegisterRoutes(s.Router, middlewares...)
 	}
 	if promptsHandler != nil {
 		promptsHandler.RegisterRoutes(s.Router, middlewares...)

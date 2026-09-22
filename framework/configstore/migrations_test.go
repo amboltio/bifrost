@@ -1246,6 +1246,9 @@ func TestTriggerMigrations_FreshDB(t *testing.T) {
 		&tables.TableRoleAssignment{},
 		&tables.TableAuditEvent{},
 		&tables.TableOutboxEvent{},
+		&tables.TableBusinessUnit{},
+		&tables.TableUserBusinessUnitMembership{},
+		&tables.TableTeamBusinessUnitMembership{},
 	}
 
 	migrator := db.Migrator()

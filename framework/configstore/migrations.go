@@ -502,6 +502,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_identity_role_permissions"}, run: migrationAddIdentityRolePermissions},
 	{IDs: []string{"add_identity_oidc_transactions"}, run: migrationAddOIDCTransactions},
 	{IDs: []string{"add_identity_user_team_memberships"}, run: migrationAddIdentityUserTeamMemberships},
+	{IDs: []string{"add_identity_business_units"}, run: migrationAddIdentityBusinessUnits},
 }
 
 // migrationAddIdentityTables creates the canonical identity boundary. It is
@@ -754,6 +755,40 @@ func migrationAddIdentityUserTeamMemberships(ctx context.Context, db *gorm.DB, l
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: removing organization assignments would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityBusinessUnits adds the organization hierarchy and its
+// source-aware user/team membership tables. Existing customers and teams remain
+// valid because both parent references are nullable.
+func migrationAddIdentityBusinessUnits(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_business_units"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			for _, model := range []any{
+				&tables.TableBusinessUnit{},
+				&tables.TableUserBusinessUnitMembership{},
+				&tables.TableTeamBusinessUnitMembership{},
+			} {
+				if !tx.Migrator().HasTable(model) {
+					if err := tx.Migrator().CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing business-unit memberships would lose governance provenance", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {

@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestAuthStatusResponseDoesNotAdvertiseIncompleteIdentityFeatures(t *testing.T) {
+func TestAuthStatusResponseAdvertisesImplementedIdentityFeatures(t *testing.T) {
 	response := newAuthStatusResponse(true, false)
 
 	assert.True(t, response.IsAuthEnabled)
@@ -14,7 +14,7 @@ func TestAuthStatusResponseDoesNotAdvertiseIncompleteIdentityFeatures(t *testing
 	assert.Equal(t, "password", response.AuthType)
 	assert.True(t, response.IdentityCapabilities.LocalUsers)
 	assert.True(t, response.IdentityCapabilities.OIDCLogin)
-	assert.False(t, response.IdentityCapabilities.Organizations)
+	assert.True(t, response.IdentityCapabilities.Organizations)
 	assert.True(t, response.IdentityCapabilities.Roles)
 	assert.False(t, response.IdentityCapabilities.AccessProfiles)
 	assert.False(t, response.IdentityCapabilities.Projects)

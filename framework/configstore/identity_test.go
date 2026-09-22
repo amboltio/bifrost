@@ -34,6 +34,9 @@ func setupIdentityTestStore(t *testing.T, dsn string) *RDBConfigStore {
 		&tables.TableOutboxEvent{},
 		&tables.TableTeam{},
 		&tables.TableUserTeamMembership{},
+		&tables.TableBusinessUnit{},
+		&tables.TableUserBusinessUnitMembership{},
+		&tables.TableTeamBusinessUnitMembership{},
 	))
 	require.NoError(t, db.Create(&tables.TableRole{
 		ID: tables.RoleIDSuperAdmin, Name: tables.RoleNameSuperAdmin,
@@ -67,6 +70,9 @@ func TestIdentityMigrationCreatesCanonicalTablesAndSuperAdminRole(t *testing.T) 
 		"identity_roles",
 		"identity_role_assignments",
 		"identity_user_team_memberships",
+		"governance_business_units",
+		"identity_user_business_unit_memberships",
+		"identity_team_business_unit_memberships",
 	} {
 		var count int64
 		require.NoError(t, db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count).Error)
