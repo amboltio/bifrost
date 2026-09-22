@@ -3,7 +3,10 @@ import { beginLogout, endLogout } from "@/lib/utils/logoutState";
 import { baseApi, clearAuthStorage } from "./baseApi";
 
 export interface LoginRequest {
-	username: string;
+	/** Canonical local login identifier. */
+	email?: string;
+	/** Compatibility field for the legacy configured admin login. */
+	username?: string;
 	password: string;
 }
 
@@ -25,7 +28,16 @@ export interface IsAuthEnabledResponse {
 	is_auth_enabled: boolean;
 	has_valid_token: boolean;
 	auth_type?: "sso" | "password" | "none";
+	authentication_methods?: string[];
+	auth_methods?: string[];
+	providers?: OIDCProviderSummary[];
 	identity_capabilities?: IdentityFeatureCapabilities;
+}
+
+export interface OIDCProviderSummary {
+	id: string;
+	name?: string;
+	display_name?: string;
 }
 
 export interface LogoutResponse {

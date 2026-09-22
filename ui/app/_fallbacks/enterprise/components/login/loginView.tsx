@@ -2,7 +2,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBranding } from "@/lib/hooks/useBranding";
-import { getErrorMessage, useLoginMutation } from "@/lib/store/apis";
+import { getErrorMessage, useIsAuthEnabledQuery, useLoginMutation } from "@/lib/store/apis";
+import { DEFAULT_POST_LOGIN_PATH, getLoginGotoFromSearch } from "@/lib/utils/loginGoto";
 import { BooksIcon, DiscordLogoIcon, GithubLogoIcon } from "@phosphor-icons/react";
 import { useNavigate } from "@tanstack/react-router";
 import { Eye, EyeOff } from "lucide-react";
@@ -31,13 +32,17 @@ const externalLinks = [
 export default function LoginView() {
 	const { resolvedTheme } = useTheme();
 	const [mounted, setMounted] = useState(false);
-	const [username, setUsername] = useState("");
+	const [identifier, setIdentifier] = useState("");
 	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
 	const [errorMessage, setErrorMessage] = useState("");
 	const navigate = useNavigate();
 	const [isLoading, setIsLoading] = useState(false);
 	const [login, { isLoading: isLoggingIn }] = useLoginMutation();
+	const { data: authStatus, isLoading: isAuthStatusLoading } = useIsAuthEnabledQuery();
+	const authenticationMethods = authStatus?.authentication_methods ?? authStatus?.auth_methods ?? [];
+	const localLoginEnabled = authenticationMethods.length === 0 ? authStatus?.auth_type !== "sso" : authenticationMethods.includes("local");
+	const oidcProviders = authStatus?.providers ?? [];
 
 	useEffect(() => {
 		setMounted(true);
@@ -48,7 +53,7 @@ export default function LoginView() {
 		e.preventDefault();
 		setErrorMessage("");
 		try {
-			await login({ username, password }).unwrap();
+			await login({ email: identifier, username: identifier, password }).unwrap();
 			navigate({ to: "/workspace" });
 		} catch (error) {
 			const message = getErrorMessage(error);
@@ -56,6 +61,12 @@ export default function LoginView() {
 		} finally {
 			setIsLoading(false);
 		}
+	};
+
+	const beginOIDCLogin = (providerID: string) => {
+		const goto =
+			typeof window === "undefined" ? DEFAULT_POST_LOGIN_PATH : (getLoginGotoFromSearch(window.location.search) ?? DEFAULT_POST_LOGIN_PATH);
+		window.location.assign(`/api/auth/oidc/${encodeURIComponent(providerID)}/login?redirect=${encodeURIComponent(goto)}`);
 	};
 
 	const { logoSrc, logoAlt } = useBranding(mounted && resolvedTheme === "dark");
@@ -74,55 +85,88 @@ export default function LoginView() {
 						<p className="text-muted-foreground text-sm">Sign in to your account to continue</p>
 					</div>
 
-					<form onSubmit={handleSubmit} className="space-y-5">
-						{errorMessage && <div className="bg-destructive/10 text-destructive rounded-sm p-3 text-sm">{errorMessage}</div>}
+					{localLoginEnabled && (
+						<form onSubmit={handleSubmit} className="space-y-5">
+							{errorMessage && <div className="bg-destructive/10 text-destructive rounded-sm p-3 text-sm">{errorMessage}</div>}
 
-						<div className="space-y-2">
-							<Label htmlFor="username" className="text-sm font-medium">
-								Username
-							</Label>
-							<Input
-								id="username"
-								type="text"
-								placeholder="Enter your username"
-								value={username}
-								onChange={(e) => setUsername(e.target.value)}
-								required
-								className="text-sm"
-								autoComplete="username"
-							/>
-						</div>
-
-						<div className="space-y-2">
-							<Label htmlFor="password" className="text-sm font-medium">
-								Password
-							</Label>
-							<div className="relative">
+							<div className="space-y-2">
+								<Label htmlFor="username" className="text-sm font-medium">
+									Email or username
+								</Label>
 								<Input
-									id="password"
-									type={showPassword ? "text" : "password"}
-									placeholder="Enter your password"
-									value={password}
-									onChange={(e) => setPassword(e.target.value)}
+									id="username"
+									type="text"
+									placeholder="you@example.com"
+									value={identifier}
+									onChange={(e) => setIdentifier(e.target.value)}
 									required
-									className="pr-10 text-sm"
-									autoComplete="current-password"
+									className="text-sm"
+									autoComplete="username"
 								/>
-								<button
-									type="button"
-									onClick={() => setShowPassword(!showPassword)}
-									className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
-									aria-label={showPassword ? "Hide password" : "Show password"}
-								>
-									{showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-								</button>
 							</div>
-						</div>
 
-						<Button type="submit" className="h-9 w-full text-sm" isLoading={isLoading} disabled={isLoading}>
-							{isLoading || isLoggingIn ? "Signing in..." : "Sign in"}
-						</Button>
-					</form>
+							<div className="space-y-2">
+								<Label htmlFor="password" className="text-sm font-medium">
+									Password
+								</Label>
+								<div className="relative">
+									<Input
+										id="password"
+										type={showPassword ? "text" : "password"}
+										placeholder="Enter your password"
+										value={password}
+										onChange={(e) => setPassword(e.target.value)}
+										required
+										className="pr-10 text-sm"
+										autoComplete="current-password"
+									/>
+									<button
+										type="button"
+										onClick={() => setShowPassword(!showPassword)}
+										className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
+										aria-label={showPassword ? "Hide password" : "Show password"}
+									>
+										{showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+									</button>
+								</div>
+							</div>
+
+							<Button type="submit" className="h-9 w-full text-sm" isLoading={isLoading} disabled={isLoading}>
+								{isLoading || isLoggingIn ? "Signing in..." : "Sign in"}
+							</Button>
+						</form>
+					)}
+
+					{localLoginEnabled && oidcProviders.length > 0 && (
+						<div className="text-muted-foreground flex items-center gap-3 text-xs tracking-wider uppercase">
+							<span className="bg-border h-px flex-1" />
+							<span>Or continue with</span>
+							<span className="bg-border h-px flex-1" />
+						</div>
+					)}
+
+					{oidcProviders.length > 0 && (
+						<div className="space-y-2" data-testid="login-oidc-providers">
+							{oidcProviders.map((provider) => (
+								<Button
+									key={provider.id}
+									type="button"
+									variant="outline"
+									className="h-9 w-full text-sm"
+									onClick={() => beginOIDCLogin(provider.id)}
+									data-testid={`login-oidc-provider-${provider.id}`}
+								>
+									{provider.name ?? provider.display_name ?? provider.id}
+								</Button>
+							))}
+						</div>
+					)}
+
+					{!localLoginEnabled && oidcProviders.length === 0 && !isAuthStatusLoading && (
+						<div className="text-muted-foreground rounded-sm border p-3 text-center text-sm">
+							No sign-in methods are currently available.
+						</div>
+					)}
 
 					{/* Social Links */}
 					<div className="flex items-center justify-center gap-4 pt-4">
