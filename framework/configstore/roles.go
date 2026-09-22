@@ -2,6 +2,7 @@ package configstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -9,9 +10,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/maximhq/bifrost/framework/authorization"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"gorm.io/gorm"
 )
+
+// RoleManagementStore is the audited role-catalog contract used by the
+// governance API. System roles are seeded by migrations and cannot be edited
+// or deleted through this surface.
+type RoleManagementStore interface {
+	GetRole(ctx context.Context, id string) (*tables.TableRole, error)
+	CreateRoleAudited(ctx context.Context, role *tables.TableRole, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableRole, error)
+	UpdateRoleAudited(ctx context.Context, id, displayName string, permissions []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableRole, error)
+	DeleteRoleAudited(ctx context.Context, id string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
+}
 
 // UsersQueryParams bounds canonical-user search and pagination at the store
 // boundary. Handler authorization determines which rows are visible.
@@ -78,6 +90,133 @@ func (s *RDBConfigStore) ListRoles(ctx context.Context) ([]tables.TableRole, err
 		return nil, err
 	}
 	return roles, nil
+}
+
+// CreateRoleAudited creates a mutable, non-system role and records the
+// administrator action in the same transaction as the catalog row.
+func (s *RDBConfigStore) CreateRoleAudited(ctx context.Context, role *tables.TableRole, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableRole, error) {
+	if role == nil {
+		return nil, fmt.Errorf("role is required")
+	}
+	role.ID = strings.TrimSpace(role.ID)
+	if role.ID == "" {
+		role.ID = uuid.NewString()
+	}
+	role.Name = strings.TrimSpace(role.Name)
+	role.DisplayName = strings.TrimSpace(role.DisplayName)
+	if role.Name == "" || role.DisplayName == "" {
+		return nil, fmt.Errorf("role name and display name are required")
+	}
+	permissions, err := normalizeRolePermissions(role.Permissions)
+	if err != nil {
+		return nil, err
+	}
+	role.Permissions = permissions
+	role.IsSystem = false
+	role.IsImmutable = false
+	err = s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		if err := tx.WithContext(ctx).Create(role).Error; err != nil {
+			return s.parseGormError(err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return role, nil
+}
+
+// UpdateRoleAudited updates only mutable role fields. Permissions are checked
+// against the published permission catalog before the transaction begins.
+func (s *RDBConfigStore) UpdateRoleAudited(ctx context.Context, id, displayName string, permissions []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableRole, error) {
+	id = strings.TrimSpace(id)
+	displayName = strings.TrimSpace(displayName)
+	if id == "" || displayName == "" {
+		return nil, ErrNotFound
+	}
+	permissions, err := normalizeRolePermissions(permissions)
+	if err != nil {
+		return nil, err
+	}
+	var role tables.TableRole
+	permissionsJSON, err := json.Marshal(permissions)
+	if err != nil {
+		return nil, err
+	}
+	err = s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		if err := dbForUpdate(tx).First(&role, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if role.IsSystem || role.IsImmutable {
+			return ErrRoleImmutable
+		}
+		if err := tx.WithContext(ctx).Model(&tables.TableRole{}).Where("id = ?", id).Updates(map[string]any{"display_name": displayName, "permissions": string(permissionsJSON), "updated_at": time.Now().UTC()}).Error; err != nil {
+			return s.parseGormError(err)
+		}
+		role.DisplayName, role.Permissions = displayName, permissions
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &role, nil
+}
+
+// DeleteRoleAudited removes a mutable role after ensuring no user still
+// depends on it. Keeping this invariant explicit avoids dangling grants.
+func (s *RDBConfigStore) DeleteRoleAudited(ctx context.Context, id string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ErrNotFound
+	}
+	return s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		var role tables.TableRole
+		if err := dbForUpdate(tx).First(&role, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if role.IsSystem || role.IsImmutable {
+			return ErrRoleImmutable
+		}
+		var assignments int64
+		if err := tx.Model(&tables.TableRoleAssignment{}).Where("role_id = ?", id).Count(&assignments).Error; err != nil {
+			return err
+		}
+		if assignments > 0 {
+			return ErrRoleInUse
+		}
+		return tx.Delete(&role).Error
+	})
+}
+
+func normalizeRolePermissions(permissions []string) ([]string, error) {
+	allowed := make(map[string]struct{}, len(authorization.Catalog()))
+	for _, permission := range authorization.Catalog() {
+		allowed[string(permission)] = struct{}{}
+	}
+	result := make([]string, 0, len(permissions))
+	seen := make(map[string]struct{}, len(permissions))
+	for _, permission := range permissions {
+		permission = strings.TrimSpace(permission)
+		if permission == "" {
+			continue
+		}
+		if _, ok := allowed[permission]; !ok {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidPermission, permission)
+		}
+		if _, ok := seen[permission]; ok {
+			continue
+		}
+		seen[permission] = struct{}{}
+		result = append(result, permission)
+	}
+	slices.Sort(result)
+	return result, nil
 }
 
 // GetRolesByUserID resolves only currently assigned roles. Broken assignment

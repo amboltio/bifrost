@@ -46,6 +46,7 @@ type externalIdentityManagementHandlerStore interface {
 // direct handler tests.
 type UsersHandler struct {
 	store         userManagementHandlerStore
+	roleStore     configstore.RoleManagementStore
 	teamStore     userTeamMembershipHandlerStore
 	identityStore externalIdentityManagementHandlerStore
 	passwords     *identity.PasswordService
@@ -77,9 +78,14 @@ func NewUsersHandler(store any) *UsersHandler {
 	}
 	passwords := identity.NewPasswordService()
 	return &UsersHandler{
-		store: managementStore, teamStore: optionalUserTeamStore(store), identityStore: optionalExternalIdentityStore(store), passwords: passwords,
+		store: managementStore, roleStore: optionalRoleManagementStore(store), teamStore: optionalUserTeamStore(store), identityStore: optionalExternalIdentityStore(store), passwords: passwords,
 		recovery: identity.NewRecoveryService(managementStore, passwords, nil), now: time.Now,
 	}
+}
+
+func optionalRoleManagementStore(store any) configstore.RoleManagementStore {
+	roleStore, _ := store.(configstore.RoleManagementStore)
+	return roleStore
 }
 
 func optionalUserTeamStore(store any) userTeamMembershipHandlerStore {
@@ -98,6 +104,13 @@ func (h *UsersHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.B
 	r.GET("/api/governance/users", lib.ChainMiddlewares(h.listUsers, middlewares...))
 	r.POST("/api/governance/users", lib.ChainMiddlewares(h.createUser, middlewares...))
 	r.GET("/api/governance/roles", lib.ChainMiddlewares(h.listRoles, middlewares...))
+	r.POST("/api/governance/roles", lib.ChainMiddlewares(h.createRole, middlewares...))
+	r.GET("/api/governance/roles/{id}", lib.ChainMiddlewares(h.getRole, middlewares...))
+	r.PUT("/api/governance/roles/{id}", lib.ChainMiddlewares(h.updateRole, middlewares...))
+	r.PATCH("/api/governance/roles/{id}", lib.ChainMiddlewares(h.updateRole, middlewares...))
+	r.DELETE("/api/governance/roles/{id}", lib.ChainMiddlewares(h.deleteRole, middlewares...))
+	r.GET("/api/governance/roles/{id}/permissions", lib.ChainMiddlewares(h.getRolePermissions, middlewares...))
+	r.PUT("/api/governance/roles/{id}/permissions", lib.ChainMiddlewares(h.updateRolePermissions, middlewares...))
 	r.GET("/api/governance/users/{id}/teams", lib.ChainMiddlewares(h.listTeams, middlewares...))
 	r.PUT("/api/governance/users/{id}/teams", lib.ChainMiddlewares(h.replaceTeams, middlewares...))
 	r.GET("/api/governance/users/{id}/identities", lib.ChainMiddlewares(h.listIdentities, middlewares...))
@@ -273,6 +286,159 @@ func (h *UsersHandler) listRoles(ctx *fasthttp.RequestCtx) {
 		response = append(response, newManagedRoleResponse(role))
 	}
 	SendJSON(ctx, map[string]any{"roles": response})
+}
+
+func (h *UsersHandler) getRole(ctx *fasthttp.RequestCtx) {
+	if h.roleStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Role management is unavailable")
+		return
+	}
+	id, _ := ctx.UserValue("id").(string)
+	role, err := h.roleStore.GetRole(ctx, strings.TrimSpace(id))
+	if err == nil && role == nil {
+		err = configstore.ErrNotFound
+	}
+	if h.writeRoleStoreError(ctx, err) {
+		return
+	}
+	SendJSON(ctx, newManagedRoleResponse(*role))
+}
+
+func (h *UsersHandler) getRolePermissions(ctx *fasthttp.RequestCtx) {
+	if h.roleStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Role management is unavailable")
+		return
+	}
+	id, _ := ctx.UserValue("id").(string)
+	role, err := h.roleStore.GetRole(ctx, strings.TrimSpace(id))
+	if err == nil && role == nil {
+		err = configstore.ErrNotFound
+	}
+	if h.writeRoleStoreError(ctx, err) {
+		return
+	}
+	SendJSON(ctx, map[string]any{"role_id": role.ID, "permissions": append([]string(nil), role.Permissions...)})
+}
+
+func (h *UsersHandler) createRole(ctx *fasthttp.RequestCtx) {
+	if h.roleStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Role management is unavailable")
+		return
+	}
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	request := struct {
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		DisplayName string   `json:"display_name"`
+		Permissions []string `json:"permissions"`
+	}{}
+	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	role := &tables.TableRole{ID: strings.TrimSpace(request.ID), Name: strings.TrimSpace(request.Name), DisplayName: strings.TrimSpace(request.DisplayName), Permissions: request.Permissions}
+	if role.ID == "" {
+		role.ID = uuid.NewString()
+	}
+	auditEvent, outboxEvent := h.roleAudit(ctx, role.ID, "identity.role.created", map[string]any{"name": role.Name, "permissions": role.Permissions})
+	created, err := h.roleStore.CreateRoleAudited(ctx, role, auditEvent, outboxEvent)
+	if h.writeRoleStoreError(ctx, err) {
+		return
+	}
+	SendJSONWithStatus(ctx, newManagedRoleResponse(*created), fasthttp.StatusCreated)
+}
+
+func (h *UsersHandler) updateRole(ctx *fasthttp.RequestCtx) {
+	if h.roleStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Role management is unavailable")
+		return
+	}
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	id, _ := ctx.UserValue("id").(string)
+	role, err := h.roleStore.GetRole(ctx, strings.TrimSpace(id))
+	if err == nil && role == nil {
+		err = configstore.ErrNotFound
+	}
+	if h.writeRoleStoreError(ctx, err) {
+		return
+	}
+	request := struct {
+		DisplayName *string  `json:"display_name"`
+		Permissions []string `json:"permissions"`
+	}{}
+	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	displayName := role.DisplayName
+	if request.DisplayName != nil {
+		displayName = strings.TrimSpace(*request.DisplayName)
+	}
+	permissions := role.Permissions
+	if request.Permissions != nil {
+		permissions = request.Permissions
+	}
+	auditEvent, outboxEvent := h.roleAudit(ctx, role.ID, "identity.role.updated", map[string]any{"permissions": permissions})
+	updated, err := h.roleStore.UpdateRoleAudited(ctx, role.ID, displayName, permissions, auditEvent, outboxEvent)
+	if h.writeRoleStoreError(ctx, err) {
+		return
+	}
+	SendJSON(ctx, newManagedRoleResponse(*updated))
+}
+
+func (h *UsersHandler) updateRolePermissions(ctx *fasthttp.RequestCtx) {
+	if h.roleStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Role management is unavailable")
+		return
+	}
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	id, _ := ctx.UserValue("id").(string)
+	role, err := h.roleStore.GetRole(ctx, strings.TrimSpace(id))
+	if err == nil && role == nil {
+		err = configstore.ErrNotFound
+	}
+	if h.writeRoleStoreError(ctx, err) {
+		return
+	}
+	request := struct {
+		Permissions []string `json:"permissions"`
+	}{}
+	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	auditEvent, outboxEvent := h.roleAudit(ctx, role.ID, "identity.role.permissions_updated", map[string]any{"permissions": request.Permissions})
+	updated, err := h.roleStore.UpdateRoleAudited(ctx, role.ID, role.DisplayName, request.Permissions, auditEvent, outboxEvent)
+	if h.writeRoleStoreError(ctx, err) {
+		return
+	}
+	SendJSON(ctx, map[string]any{"role_id": updated.ID, "permissions": updated.Permissions})
+}
+
+func (h *UsersHandler) deleteRole(ctx *fasthttp.RequestCtx) {
+	if h.roleStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Role management is unavailable")
+		return
+	}
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	id, _ := ctx.UserValue("id").(string)
+	auditEvent, outboxEvent := h.roleAudit(ctx, strings.TrimSpace(id), "identity.role.deleted", nil)
+	if h.writeRoleStoreError(ctx, h.roleStore.DeleteRoleAudited(ctx, strings.TrimSpace(id), auditEvent, outboxEvent)) {
+		return
+	}
+	ctx.SetStatusCode(fasthttp.StatusNoContent)
 }
 
 func (h *UsersHandler) getUser(ctx *fasthttp.RequestCtx) {
@@ -539,6 +705,26 @@ func (h *UsersHandler) userAudit(ctx *fasthttp.RequestCtx, targetUserID, action 
 	}
 }
 
+func (h *UsersHandler) roleAudit(ctx *fasthttp.RequestCtx, targetRoleID, action string, changedFields map[string]any) (*tables.TableAuditEvent, *tables.TableOutboxEvent) {
+	eventID := uuid.NewString()
+	actorPrincipal := "legacy:local_admin"
+	if actor := canonicalActorUserID(ctx); actor != nil {
+		actorPrincipal = "user:" + *actor
+	}
+	var requestID *string
+	if value, ok := ctx.UserValue(schemas.BifrostContextKeyRequestID).(string); ok && strings.TrimSpace(value) != "" {
+		value = strings.TrimSpace(value)
+		requestID = &value
+	}
+	return &tables.TableAuditEvent{
+		ID: eventID, ActorPrincipal: actorPrincipal, TargetType: "role", TargetID: &targetRoleID,
+		Action: action, RequestID: requestID, OccurredAt: h.now().UTC(), ChangedFields: changedFields,
+	}, &tables.TableOutboxEvent{
+		Topic: "identity.role.changed", DeduplicationKey: "identity.role:" + eventID,
+		Payload: map[string]any{"role_id": targetRoleID, "action": action},
+	}
+}
+
 func (h *UsersHandler) writeStoreError(ctx *fasthttp.RequestCtx, err error) bool {
 	if err == nil {
 		return false
@@ -553,6 +739,28 @@ func (h *UsersHandler) writeStoreError(ctx *fasthttp.RequestCtx, err error) bool
 	default:
 		logger.Error(fmt.Sprintf("user administration operation failed: %v", err))
 		SendError(ctx, fasthttp.StatusInternalServerError, "User administration operation failed")
+	}
+	return true
+}
+
+func (h *UsersHandler) writeRoleStoreError(ctx *fasthttp.RequestCtx, err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, configstore.ErrNotFound):
+		SendError(ctx, fasthttp.StatusNotFound, "Role not found")
+	case errors.Is(err, configstore.ErrAlreadyExists):
+		SendError(ctx, fasthttp.StatusConflict, "A role with that name already exists")
+	case errors.Is(err, configstore.ErrRoleImmutable):
+		SendError(ctx, fasthttp.StatusConflict, "System roles cannot be changed")
+	case errors.Is(err, configstore.ErrRoleInUse):
+		SendError(ctx, fasthttp.StatusConflict, "Role is assigned to users")
+	case errors.Is(err, configstore.ErrInvalidPermission):
+		SendError(ctx, fasthttp.StatusBadRequest, "Role contains an unknown permission")
+	default:
+		logger.Error(fmt.Sprintf("role administration operation failed: %v", err))
+		SendError(ctx, fasthttp.StatusInternalServerError, "Role administration operation failed")
 	}
 	return true
 }

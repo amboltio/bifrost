@@ -120,8 +120,36 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 			}
 		}
 	}
-	if path == "/api/governance/roles" && method == fasthttp.MethodGet {
-		return authorization.PermissionUsersRead, true
+	if path == "/api/governance/roles" {
+		switch method {
+		case fasthttp.MethodGet:
+			return authorization.PermissionUsersRead, true
+		case fasthttp.MethodPost:
+			return authorization.PermissionUsersUpdate, true
+		default:
+			return "", false
+		}
+	}
+	if strings.HasPrefix(path, "/api/governance/roles/") {
+		remainder := strings.TrimPrefix(path, "/api/governance/roles/")
+		parts := strings.Split(remainder, "/")
+		if len(parts) == 1 && parts[0] != "" {
+			switch method {
+			case fasthttp.MethodGet:
+				return authorization.PermissionUsersRead, true
+			case fasthttp.MethodPut, fasthttp.MethodPatch, fasthttp.MethodDelete:
+				return authorization.PermissionUsersUpdate, true
+			}
+		}
+		if len(parts) == 2 && parts[0] != "" && parts[1] == "permissions" {
+			switch method {
+			case fasthttp.MethodGet:
+				return authorization.PermissionUsersRead, true
+			case fasthttp.MethodPut:
+				return authorization.PermissionUsersUpdate, true
+			}
+		}
+		return "", false
 	}
 	if path == "/api/governance/users" {
 		switch method {
