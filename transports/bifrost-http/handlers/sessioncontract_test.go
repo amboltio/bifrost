@@ -19,4 +19,7 @@ func TestAuthStatusResponseDoesNotAdvertiseIncompleteIdentityFeatures(t *testing
 	assert.False(t, response.IdentityCapabilities.AccessProfiles)
 	assert.False(t, response.IdentityCapabilities.Projects)
 	assert.False(t, response.IdentityCapabilities.UserAnalytics)
+	assert.Equal(t, "password", dashboardAuthTypeForMethods([]string{"local", "oidc"}))
+	assert.Equal(t, "sso", dashboardAuthTypeForMethods([]string{"oidc"}))
+	assert.Equal(t, "none", dashboardAuthTypeForMethods(nil))
 }

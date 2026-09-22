@@ -35,6 +35,7 @@ type AuthStatusResponse struct {
 	HasValidToken         bool                                    `json:"has_valid_token"`
 	AuthType              string                                  `json:"auth_type"`
 	AuthenticationMethods []string                                `json:"authentication_methods"`
+	Providers             []oidcProviderResponse                  `json:"providers,omitempty"`
 	IdentityCapabilities  configstore.IdentityFeatureCapabilities `json:"identity_capabilities"`
 }
 
@@ -45,6 +46,26 @@ func newAuthStatusResponse(isEnabled bool, hasValidToken bool) AuthStatusRespons
 		AuthType:              dashboardAuthType(isEnabled),
 		AuthenticationMethods: authenticationMethodsForLegacyStatus(isEnabled),
 		IdentityCapabilities:  configstore.ImplementedIdentityFeatureCapabilities(),
+	}
+}
+
+func dashboardAuthTypeForMethods(methods []string) string {
+	hasLocal, hasOIDC := false, false
+	for _, method := range methods {
+		switch method {
+		case "local":
+			hasLocal = true
+		case "oidc":
+			hasOIDC = true
+		}
+	}
+	switch {
+	case hasLocal:
+		return "password"
+	case hasOIDC:
+		return "sso"
+	default:
+		return "none"
 	}
 }
 
@@ -106,6 +127,10 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 	}
 	response := newAuthStatusResponse(authConfig.IsEnabled, hasValidToken)
 	response.AuthenticationMethods = authConfig.AuthenticationMethods()
+	response.AuthType = dashboardAuthTypeForMethods(response.AuthenticationMethods)
+	for _, provider := range authConfig.EnabledOIDCProviders() {
+		response.Providers = append(response.Providers, oidcProviderResponse{ID: provider.ID, DisplayName: provider.DisplayName})
+	}
 	SendJSON(ctx, response)
 }
 
@@ -128,6 +153,7 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	payload := struct {
+		Email    string `json:"email"`
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}{}
@@ -154,6 +180,10 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 	// as the store supports them, including their bcrypt-to-Argon2id upgrade.
 	// The fallback remains only for a pre-migration config-store implementation
 	// during the one-release compatibility bridge.
+	identifier := strings.TrimSpace(payload.Email)
+	if identifier == "" {
+		identifier = strings.TrimSpace(payload.Username)
+	}
 	var token string
 	var expiresAt time.Time
 	if canonicalStore, canonical := h.configStore.(identity.CanonicalUserLookupStore); canonical {
@@ -162,7 +192,7 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 			SendError(ctx, fasthttp.StatusForbidden, "Local authentication is not enabled")
 			return
 		}
-		user, authenticateErr := localAuth.Authenticate(ctx, payload.Username, payload.Password, ctx.RemoteIP().String())
+		user, authenticateErr := localAuth.Authenticate(ctx, identifier, payload.Password, ctx.RemoteIP().String())
 		if authenticateErr != nil || user == nil {
 			if authenticateErr != nil && !errors.Is(authenticateErr, identity.ErrInvalidCredentials) {
 				logger.Error("failed canonical local login: %v", authenticateErr)

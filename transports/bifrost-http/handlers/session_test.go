@@ -100,3 +100,31 @@ func TestSessionHandlerLoginUsesCanonicalCredentialInsteadOfLegacyConfigVerifier
 }
 
 func stringPtr(value string) *string { return &value }
+
+func TestSessionHandlerLoginAcceptsEmailField(t *testing.T) {
+	email := "email-login@example.test"
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("canonical password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("create bcrypt verifier: %v", err)
+	}
+	store := &canonicalSessionAuthStoreStub{
+		user: &tables.TableUser{ID: "email-user", Email: &email, NormalizedEmail: stringPtr(email), Status: tables.UserStatusActive, AuthVersion: 1},
+		credentials: map[string]*tables.TableCredential{
+			tables.CredentialKindLegacyPassword: {ID: "email-password", UserID: "email-user", Kind: tables.CredentialKindLegacyPassword, SecretHash: string(passwordHash), Version: 1, IsActive: true},
+		},
+		authConfig: &configstore.AuthConfig{IsEnabled: true, LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true}},
+	}
+	handler := NewSessionHandler(store, nil)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+	ctx.Request.SetRequestURI("/api/session/login")
+	ctx.Request.SetBodyString(`{"email":"email-login@example.test","password":"canonical password"}`)
+
+	handler.login(ctx)
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("login status = %d, body=%s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	if store.session == nil || store.session.UserID == nil || *store.session.UserID != "email-user" {
+		t.Fatalf("email login did not issue canonical session: %#v", store.session)
+	}
+}
