@@ -39,6 +39,8 @@ func TestIdentityAuthorizationMiddlewareDeniesUnmappedCanonicalManagementRoutes(
 		wantStatus int
 	}{
 		{name: "viewer reads users", method: fasthttp.MethodGet, path: "/api/governance/users", roles: []tables.TableRole{viewer}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
+		{name: "profile manager reads profiles", method: fasthttp.MethodGet, path: "/api/governance/access-profiles", roles: []tables.TableRole{{ID: "profiles", Permissions: []string{string(authorization.PermissionAccessProfilesRead)}}}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
+		{name: "profile manager creates profiles", method: fasthttp.MethodPost, path: "/api/governance/access-profiles", roles: []tables.TableRole{{ID: "profiles", Permissions: []string{string(authorization.PermissionAccessProfilesCreate)}}}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
 		{name: "viewer cannot create users", method: fasthttp.MethodPost, path: "/api/governance/users", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "viewer cannot access unmapped route", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "super admin retains management access", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{superAdmin}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},

@@ -21,6 +21,8 @@ func SeededRoles() []tables.TableRole {
 			Permissions: permissionStrings([]Permission{
 				PermissionUsersRead, PermissionUsersCreate, PermissionUsersUpdate,
 				PermissionUsersResetPassword, PermissionUsersRevokeSessions, PermissionUsersAssignRoles,
+				PermissionAccessProfilesRead, PermissionAccessProfilesCreate, PermissionAccessProfilesUpdate,
+				PermissionAccessProfilesDelete, PermissionAccessProfilesAssign,
 			}),
 			IsSystem: true,
 		},

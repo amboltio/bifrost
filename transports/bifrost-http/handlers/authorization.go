@@ -138,6 +138,30 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		}
 		return "", false
 	}
+	if path == "/api/governance/access-profiles" {
+		switch method {
+		case fasthttp.MethodGet:
+			return authorization.PermissionAccessProfilesRead, true
+		case fasthttp.MethodPost:
+			return authorization.PermissionAccessProfilesCreate, true
+		default:
+			return "", false
+		}
+	}
+	if strings.HasPrefix(path, "/api/governance/access-profiles/") {
+		remainder := strings.TrimPrefix(path, "/api/governance/access-profiles/")
+		if remainder != "" && !strings.Contains(remainder, "/") {
+			switch method {
+			case fasthttp.MethodGet:
+				return authorization.PermissionAccessProfilesRead, true
+			case fasthttp.MethodPut, fasthttp.MethodPatch:
+				return authorization.PermissionAccessProfilesUpdate, true
+			case fasthttp.MethodDelete:
+				return authorization.PermissionAccessProfilesDelete, true
+			}
+		}
+		return "", false
+	}
 	if strings.HasPrefix(path, "/api/governance/roles/") {
 		remainder := strings.TrimPrefix(path, "/api/governance/roles/")
 		parts := strings.Split(remainder, "/")
@@ -217,6 +241,18 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 			return authorization.PermissionUsersAssignRoles, true
 		}
 		return "", false
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "access-profiles" {
+		switch method {
+		case fasthttp.MethodGet:
+			return authorization.PermissionAccessProfilesRead, true
+		case fasthttp.MethodPut:
+			return authorization.PermissionAccessProfilesAssign, true
+		}
+		return "", false
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "effective-access" && method == fasthttp.MethodGet {
+		return authorization.PermissionAccessProfilesRead, true
 	}
 	if len(parts) != 2 || parts[0] == "" {
 		return "", false

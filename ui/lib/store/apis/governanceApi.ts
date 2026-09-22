@@ -72,6 +72,27 @@ export interface BusinessUnitsResponse {
 	offset: number;
 }
 
+export interface AccessProfile {
+	id: string;
+	name: string;
+	description: string;
+	enabled: boolean;
+	allow_all_providers: boolean;
+	allowed_providers: string[];
+	allowed_models: string[];
+	allowed_mcp_tools: string[];
+	created_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface AccessProfilesResponse {
+	access_profiles: AccessProfile[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
 export interface ManagedRole {
 	id: string;
 	name: string;
@@ -330,6 +351,66 @@ export const governanceApi = baseApi.injectEndpoints({
 		deleteBusinessUnit: builder.mutation<void, string>({
 			query: (id) => ({ url: `/governance/business-units/${encodeURIComponent(id)}`, method: "DELETE" }),
 			invalidatesTags: ["BusinessUnits"],
+		}),
+
+		// Access profiles
+		getAccessProfiles: builder.query<AccessProfilesResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/access-profiles",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["AccessProfiles"],
+		}),
+
+		createAccessProfile: builder.mutation<AccessProfile, Partial<AccessProfile> & { name: string }>({
+			query: (data) => ({ url: "/governance/access-profiles", method: "POST", body: data }),
+			invalidatesTags: ["AccessProfiles"],
+		}),
+
+		updateAccessProfile: builder.mutation<AccessProfile, { id: string; data: Partial<AccessProfile> }>({
+			query: ({ id, data }) => ({ url: `/governance/access-profiles/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+			invalidatesTags: ["AccessProfiles"],
+		}),
+
+		deleteAccessProfile: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/access-profiles/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["AccessProfiles"],
+		}),
+
+		getUserAccessProfiles: builder.query<{ access_profiles: AccessProfile[]; assignments: unknown[] }, string>({
+			query: (id) => `/governance/users/${encodeURIComponent(id)}/access-profiles`,
+			providesTags: ["AccessProfiles", "Users"],
+		}),
+
+		replaceUserAccessProfiles: builder.mutation<
+			{ access_profiles: AccessProfile[]; assignments: unknown[] },
+			{ userId: string; access_profile_ids: string[] }
+		>({
+			query: ({ userId, access_profile_ids }) => ({
+				url: `/governance/users/${encodeURIComponent(userId)}/access-profiles`,
+				method: "PUT",
+				body: { access_profile_ids },
+			}),
+			invalidatesTags: ["AccessProfiles", "Users"],
+		}),
+
+		getUserEffectiveAccess: builder.query<
+			{
+				user_id: string;
+				profile_ids: string[];
+				allow_all_providers: boolean;
+				allowed_providers: string[];
+				allowed_models: string[];
+				allowed_mcp_tools: string[];
+			},
+			string
+		>({
+			query: (id) => `/governance/users/${encodeURIComponent(id)}/effective-access`,
+			providesTags: ["AccessProfiles", "Users"],
 		}),
 
 		// Canonical users and roles
@@ -1041,6 +1122,15 @@ export const {
 	useCreateBusinessUnitMutation,
 	useUpdateBusinessUnitMutation,
 	useDeleteBusinessUnitMutation,
+
+	// Access profiles
+	useGetAccessProfilesQuery,
+	useCreateAccessProfileMutation,
+	useUpdateAccessProfileMutation,
+	useDeleteAccessProfileMutation,
+	useGetUserAccessProfilesQuery,
+	useReplaceUserAccessProfilesMutation,
+	useGetUserEffectiveAccessQuery,
 
 	// Canonical users and roles
 	useGetManagedUsersQuery,

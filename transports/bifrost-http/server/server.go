@@ -2437,6 +2437,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	oidcHandler := handlers.NewOIDCHandler(s.Config.ConfigStore)
 	usersHandler := handlers.NewUsersHandler(s.Config.ConfigStore)
 	businessUnitsHandler := handlers.NewBusinessUnitsHandler(s.Config.ConfigStore)
+	accessProfilesHandler := handlers.NewAccessProfilesHandler(s.Config.ConfigStore)
 	var roleResolver handlers.UserRoleResolver
 	if candidate, ok := s.Config.ConfigStore.(handlers.UserRoleResolver); ok {
 		roleResolver = candidate
@@ -2479,6 +2480,9 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	if businessUnitsHandler != nil {
 		businessUnitsHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if accessProfilesHandler != nil {
+		accessProfilesHandler.RegisterRoutes(s.Router, middlewares...)
 	}
 	if rbacHandler != nil {
 		rbacHandler.RegisterRoutes(s.Router, middlewares...)

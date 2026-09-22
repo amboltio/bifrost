@@ -10,12 +10,22 @@ import "slices"
 type Permission string
 
 const (
-	PermissionUsersRead           Permission = "users.read"
-	PermissionUsersCreate         Permission = "users.create"
-	PermissionUsersUpdate         Permission = "users.update"
-	PermissionUsersResetPassword  Permission = "users.reset_password"
-	PermissionUsersRevokeSessions Permission = "users.revoke_sessions"
-	PermissionUsersAssignRoles    Permission = "users.assign_roles"
+	PermissionUsersRead            Permission = "users.read"
+	PermissionUsersCreate          Permission = "users.create"
+	PermissionUsersUpdate          Permission = "users.update"
+	PermissionUsersResetPassword   Permission = "users.reset_password"
+	PermissionUsersRevokeSessions  Permission = "users.revoke_sessions"
+	PermissionUsersAssignRoles     Permission = "users.assign_roles"
+	PermissionAccessProfilesRead   Permission = "access_profiles.read"
+	PermissionAccessProfilesCreate Permission = "access_profiles.create"
+	PermissionAccessProfilesUpdate Permission = "access_profiles.update"
+	PermissionAccessProfilesDelete Permission = "access_profiles.delete"
+	PermissionAccessProfilesAssign Permission = "access_profiles.assign"
+	PermissionProjectsRead         Permission = "projects.read"
+	PermissionProjectsCreate       Permission = "projects.create"
+	PermissionProjectsUpdate       Permission = "projects.update"
+	PermissionProjectsDelete       Permission = "projects.delete"
+	PermissionProjectsAssign       Permission = "projects.assign"
 )
 
 // Has reports whether a persisted role permission list grants permission.
@@ -33,5 +43,15 @@ func Catalog() []Permission {
 		PermissionUsersResetPassword,
 		PermissionUsersRevokeSessions,
 		PermissionUsersAssignRoles,
+		PermissionAccessProfilesRead,
+		PermissionAccessProfilesCreate,
+		PermissionAccessProfilesUpdate,
+		PermissionAccessProfilesDelete,
+		PermissionAccessProfilesAssign,
+		PermissionProjectsRead,
+		PermissionProjectsCreate,
+		PermissionProjectsUpdate,
+		PermissionProjectsDelete,
+		PermissionProjectsAssign,
 	}
 }
