@@ -102,6 +102,8 @@ func isCanonicalSelfServiceRoute(method, path string) bool {
 		return true
 	case method == fasthttp.MethodDelete && hasSinglePathSegment(path, "/api/session/sessions/"):
 		return true
+	case method == fasthttp.MethodGet && path == "/api/session/me/permissions":
+		return true
 	default:
 		return false
 	}
@@ -129,6 +131,12 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		default:
 			return "", false
 		}
+	}
+	if strings.HasPrefix(path, "/api/governance/rbac/") {
+		if method == fasthttp.MethodGet && (path == "/api/governance/rbac/resources" || path == "/api/governance/rbac/operations" || path == "/api/governance/rbac/permissions") {
+			return authorization.PermissionUsersRead, true
+		}
+		return "", false
 	}
 	if strings.HasPrefix(path, "/api/governance/roles/") {
 		remainder := strings.TrimPrefix(path, "/api/governance/roles/")
