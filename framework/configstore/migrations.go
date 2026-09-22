@@ -501,6 +501,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_identity_recovery_tokens"}, run: migrationAddRecoveryTokens},
 	{IDs: []string{"add_identity_role_permissions"}, run: migrationAddIdentityRolePermissions},
 	{IDs: []string{"add_identity_oidc_transactions"}, run: migrationAddOIDCTransactions},
+	{IDs: []string{"add_identity_user_team_memberships"}, run: migrationAddIdentityUserTeamMemberships},
 }
 
 // migrationAddIdentityTables creates the canonical identity boundary. It is
@@ -719,6 +720,35 @@ func migrationAddOIDCTransactions(ctx context.Context, db *gorm.DB, logger schem
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: removing durable callback replay protection is unsafe", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityUserTeamMemberships creates source-aware organization
+// assignments for canonical users. The source column makes later directory
+// reconciliation additive and prevents it from deleting manual grants.
+func migrationAddIdentityUserTeamMemberships(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_user_team_memberships"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableUser{}) || !tx.Migrator().HasTable(&tables.TableTeam{}) {
+				return fmt.Errorf("identity users and governance teams are required before %s", migrationName)
+			}
+			if tx.Migrator().HasTable(&tables.TableUserTeamMembership{}) {
+				return nil
+			}
+			return tx.Migrator().CreateTable(&tables.TableUserTeamMembership{})
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing organization assignments would lose governance provenance", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {

@@ -146,6 +146,10 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		return authorization.PermissionUsersRevokeSessions, true
 	case parts[1] == "roles" && method == fasthttp.MethodPut:
 		return authorization.PermissionUsersAssignRoles, true
+	case parts[1] == "teams" && method == fasthttp.MethodGet:
+		return authorization.PermissionUsersRead, true
+	case parts[1] == "teams" && method == fasthttp.MethodPut:
+		return authorization.PermissionUsersAssignRoles, true
 	default:
 		return "", false
 	}

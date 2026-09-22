@@ -32,12 +32,17 @@ type userManagementHandlerStore interface {
 	RevokeAllUserSessions(ctx context.Context, userID string, revokedAt time.Time) (int64, error)
 }
 
+type userTeamMembershipHandlerStore interface {
+	configstore.UserTeamMembershipStore
+}
+
 // UsersHandler manages canonical users, role grants, and administrator-issued
 // reset tokens. Its routes rely on IdentityAuthorizationMiddleware for the
 // resource-specific permission check and keep a small store contract for
 // direct handler tests.
 type UsersHandler struct {
 	store     userManagementHandlerStore
+	teamStore userTeamMembershipHandlerStore
 	passwords *identity.PasswordService
 	recovery  *identity.RecoveryService
 	now       func() time.Time
@@ -67,9 +72,14 @@ func NewUsersHandler(store any) *UsersHandler {
 	}
 	passwords := identity.NewPasswordService()
 	return &UsersHandler{
-		store: managementStore, passwords: passwords,
+		store: managementStore, teamStore: optionalUserTeamStore(store), passwords: passwords,
 		recovery: identity.NewRecoveryService(managementStore, passwords, nil), now: time.Now,
 	}
+}
+
+func optionalUserTeamStore(store any) userTeamMembershipHandlerStore {
+	teamStore, _ := store.(userTeamMembershipHandlerStore)
+	return teamStore
 }
 
 // RegisterRoutes installs the user administration surface below governance so
@@ -78,6 +88,8 @@ func (h *UsersHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.B
 	r.GET("/api/governance/users", lib.ChainMiddlewares(h.listUsers, middlewares...))
 	r.POST("/api/governance/users", lib.ChainMiddlewares(h.createUser, middlewares...))
 	r.GET("/api/governance/roles", lib.ChainMiddlewares(h.listRoles, middlewares...))
+	r.GET("/api/governance/users/{id}/teams", lib.ChainMiddlewares(h.listTeams, middlewares...))
+	r.PUT("/api/governance/users/{id}/teams", lib.ChainMiddlewares(h.replaceTeams, middlewares...))
 	r.GET("/api/governance/users/{id}", lib.ChainMiddlewares(h.getUser, middlewares...))
 	r.PATCH("/api/governance/users/{id}", lib.ChainMiddlewares(h.updateUser, middlewares...))
 	r.PUT("/api/governance/users/{id}", lib.ChainMiddlewares(h.updateUser, middlewares...))
@@ -85,6 +97,67 @@ func (h *UsersHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.B
 	r.POST("/api/governance/users/{id}/reset-password", lib.ChainMiddlewares(h.resetPassword, middlewares...))
 	r.POST("/api/governance/users/{id}/revoke-sessions", lib.ChainMiddlewares(h.revokeSessions, middlewares...))
 	r.PUT("/api/governance/users/{id}/roles", lib.ChainMiddlewares(h.replaceRoles, middlewares...))
+}
+
+type managedTeamResponse struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	CustomerID *string `json:"customer_id,omitempty"`
+	Source     string  `json:"source"`
+	ProviderID *string `json:"provider_id,omitempty"`
+}
+
+func (h *UsersHandler) listTeams(ctx *fasthttp.RequestCtx) {
+	if h.teamStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Team memberships are unavailable")
+		return
+	}
+	user, ok := h.requiredUser(ctx)
+	if !ok {
+		return
+	}
+	memberships, err := h.teamStore.ListUserTeamMemberships(ctx, user.ID)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to load team memberships")
+		return
+	}
+	response := make([]managedTeamResponse, 0, len(memberships))
+	for _, membership := range memberships {
+		team := managedTeamResponse{ID: membership.TeamID, Source: membership.Source, ProviderID: membership.ProviderID}
+		if membership.Team != nil {
+			team.ID, team.Name, team.CustomerID = membership.Team.ID, membership.Team.Name, membership.Team.CustomerID
+		}
+		response = append(response, team)
+	}
+	SendJSON(ctx, map[string]any{"teams": response})
+}
+
+func (h *UsersHandler) replaceTeams(ctx *fasthttp.RequestCtx) {
+	if h.teamStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Team memberships are unavailable")
+		return
+	}
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	user, ok := h.requiredUser(ctx)
+	if !ok {
+		return
+	}
+	request := struct {
+		TeamIDs []string `json:"team_ids"`
+	}{}
+	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.teams_updated", map[string]any{"team_ids": request.TeamIDs})
+	err := h.teamStore.ReplaceManualUserTeamMembershipsAudited(ctx, user.ID, request.TeamIDs, canonicalActorUserID(ctx), auditEvent, outboxEvent)
+	if h.writeStoreError(ctx, err) {
+		return
+	}
+	h.listTeams(ctx)
 }
 
 func (h *UsersHandler) listUsers(ctx *fasthttp.RequestCtx) {
