@@ -36,16 +36,21 @@ type userTeamMembershipHandlerStore interface {
 	configstore.UserTeamMembershipStore
 }
 
+type externalIdentityManagementHandlerStore interface {
+	configstore.ExternalIdentityManagementStore
+}
+
 // UsersHandler manages canonical users, role grants, and administrator-issued
 // reset tokens. Its routes rely on IdentityAuthorizationMiddleware for the
 // resource-specific permission check and keep a small store contract for
 // direct handler tests.
 type UsersHandler struct {
-	store     userManagementHandlerStore
-	teamStore userTeamMembershipHandlerStore
-	passwords *identity.PasswordService
-	recovery  *identity.RecoveryService
-	now       func() time.Time
+	store         userManagementHandlerStore
+	teamStore     userTeamMembershipHandlerStore
+	identityStore externalIdentityManagementHandlerStore
+	passwords     *identity.PasswordService
+	recovery      *identity.RecoveryService
+	now           func() time.Time
 }
 
 type managedRoleResponse struct {
@@ -72,7 +77,7 @@ func NewUsersHandler(store any) *UsersHandler {
 	}
 	passwords := identity.NewPasswordService()
 	return &UsersHandler{
-		store: managementStore, teamStore: optionalUserTeamStore(store), passwords: passwords,
+		store: managementStore, teamStore: optionalUserTeamStore(store), identityStore: optionalExternalIdentityStore(store), passwords: passwords,
 		recovery: identity.NewRecoveryService(managementStore, passwords, nil), now: time.Now,
 	}
 }
@@ -80,6 +85,11 @@ func NewUsersHandler(store any) *UsersHandler {
 func optionalUserTeamStore(store any) userTeamMembershipHandlerStore {
 	teamStore, _ := store.(userTeamMembershipHandlerStore)
 	return teamStore
+}
+
+func optionalExternalIdentityStore(store any) externalIdentityManagementHandlerStore {
+	identityStore, _ := store.(externalIdentityManagementHandlerStore)
+	return identityStore
 }
 
 // RegisterRoutes installs the user administration surface below governance so
@@ -90,6 +100,8 @@ func (h *UsersHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.B
 	r.GET("/api/governance/roles", lib.ChainMiddlewares(h.listRoles, middlewares...))
 	r.GET("/api/governance/users/{id}/teams", lib.ChainMiddlewares(h.listTeams, middlewares...))
 	r.PUT("/api/governance/users/{id}/teams", lib.ChainMiddlewares(h.replaceTeams, middlewares...))
+	r.GET("/api/governance/users/{id}/identities", lib.ChainMiddlewares(h.listIdentities, middlewares...))
+	r.DELETE("/api/governance/users/{id}/identities/{identity}", lib.ChainMiddlewares(h.unlinkIdentity, middlewares...))
 	r.GET("/api/governance/users/{id}", lib.ChainMiddlewares(h.getUser, middlewares...))
 	r.PATCH("/api/governance/users/{id}", lib.ChainMiddlewares(h.updateUser, middlewares...))
 	r.PUT("/api/governance/users/{id}", lib.ChainMiddlewares(h.updateUser, middlewares...))
@@ -105,6 +117,71 @@ type managedTeamResponse struct {
 	CustomerID *string `json:"customer_id,omitempty"`
 	Source     string  `json:"source"`
 	ProviderID *string `json:"provider_id,omitempty"`
+}
+
+type managedExternalIdentityResponse struct {
+	ID         string     `json:"id"`
+	ProviderID string     `json:"provider_id"`
+	Issuer     string     `json:"issuer"`
+	Subject    string     `json:"subject"`
+	IsActive   bool       `json:"is_active"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+func (h *UsersHandler) listIdentities(ctx *fasthttp.RequestCtx) {
+	if h.identityStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "External identities are unavailable")
+		return
+	}
+	user, ok := h.requiredUser(ctx)
+	if !ok {
+		return
+	}
+	identities, err := h.identityStore.ListExternalIdentitiesByUserID(ctx, user.ID)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to load external identities")
+		return
+	}
+	response := make([]managedExternalIdentityResponse, 0, len(identities))
+	for _, identity := range identities {
+		response = append(response, managedExternalIdentityResponse{
+			ID: identity.ID, ProviderID: identity.ProviderID, Issuer: identity.Issuer, Subject: identity.Subject,
+			IsActive: identity.IsActive, LastSeenAt: identity.LastSeenAt, CreatedAt: identity.CreatedAt,
+		})
+	}
+	SendJSON(ctx, map[string]any{"identities": response})
+}
+
+func (h *UsersHandler) unlinkIdentity(ctx *fasthttp.RequestCtx) {
+	if h.identityStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "External identities are unavailable")
+		return
+	}
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	user, ok := h.requiredUser(ctx)
+	if !ok {
+		return
+	}
+	identityID, _ := ctx.UserValue("identity").(string)
+	identityID = strings.TrimSpace(identityID)
+	if identityID == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "Identity ID is required")
+		return
+	}
+	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.external_identity_revoked", map[string]any{"identity_id": identityID})
+	err := h.identityStore.SetExternalIdentityActiveAudited(ctx, user.ID, identityID, false, auditEvent, outboxEvent)
+	if errors.Is(err, configstore.ErrLastAuthenticationMethod) {
+		SendError(ctx, fasthttp.StatusConflict, "At least one active authentication method is required")
+		return
+	}
+	if h.writeStoreError(ctx, err) {
+		return
+	}
+	ctx.SetStatusCode(fasthttp.StatusNoContent)
 }
 
 func (h *UsersHandler) listTeams(ctx *fasthttp.RequestCtx) {

@@ -136,6 +136,9 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 			return "", false
 		}
 	}
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "identities" && parts[2] != "" && method == fasthttp.MethodDelete {
+		return authorization.PermissionUsersUpdate, true
+	}
 	if len(parts) != 2 || parts[0] == "" {
 		return "", false
 	}
@@ -150,6 +153,8 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		return authorization.PermissionUsersRead, true
 	case parts[1] == "teams" && method == fasthttp.MethodPut:
 		return authorization.PermissionUsersAssignRoles, true
+	case parts[1] == "identities" && method == fasthttp.MethodGet:
+		return authorization.PermissionUsersRead, true
 	default:
 		return "", false
 	}

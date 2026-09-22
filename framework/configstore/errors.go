@@ -9,6 +9,7 @@ import (
 var ErrNotFound = errors.New("not found")
 var ErrAlreadyExists = errors.New("already exists")
 var ErrLastSuperAdmin = errors.New("operation would remove the last active super-admin")
+var ErrLastAuthenticationMethod = errors.New("operation would remove the last active authentication method")
 
 // ErrMCPEndpointSlugExists is returned when a create resolves an endpoint slug already used by a
 // Virtual MCP or an MCP client. Both serve at /mcp/<slug>, so the slug namespace is shared; callers
