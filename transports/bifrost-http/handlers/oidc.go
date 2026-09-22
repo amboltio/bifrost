@@ -24,6 +24,7 @@ type OIDCHandler struct {
 
 type oidcProviderResponse struct {
 	ID          string `json:"id"`
+	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
 }
 
@@ -99,7 +100,7 @@ func (h *OIDCHandler) providers(ctx *fasthttp.RequestCtx) {
 			}
 		}
 		for _, provider := range authConfig.EnabledOIDCProviders() {
-			response.Providers = append(response.Providers, oidcProviderResponse{ID: provider.ID, DisplayName: provider.DisplayName})
+			response.Providers = append(response.Providers, oidcProviderResponse{ID: provider.ID, Name: provider.DisplayName, DisplayName: provider.DisplayName})
 		}
 	}
 	SendJSON(ctx, response)

@@ -35,6 +35,7 @@ type AuthStatusResponse struct {
 	HasValidToken         bool                                    `json:"has_valid_token"`
 	AuthType              string                                  `json:"auth_type"`
 	AuthenticationMethods []string                                `json:"authentication_methods"`
+	AuthMethods           []string                                `json:"auth_methods"`
 	Providers             []oidcProviderResponse                  `json:"providers,omitempty"`
 	IdentityCapabilities  configstore.IdentityFeatureCapabilities `json:"identity_capabilities"`
 }
@@ -127,6 +128,7 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 	}
 	response := newAuthStatusResponse(authConfig.IsEnabled, hasValidToken)
 	response.AuthenticationMethods = authConfig.AuthenticationMethods()
+	response.AuthMethods = append([]string(nil), response.AuthenticationMethods...)
 	response.AuthType = dashboardAuthTypeForMethods(response.AuthenticationMethods)
 	for _, provider := range authConfig.EnabledOIDCProviders() {
 		response.Providers = append(response.Providers, oidcProviderResponse{ID: provider.ID, DisplayName: provider.DisplayName})
