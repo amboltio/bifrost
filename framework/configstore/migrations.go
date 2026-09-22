@@ -714,6 +714,11 @@ func migrationAddOIDCTransactions(ctx context.Context, db *gorm.DB, logger schem
 				return fmt.Errorf("add identity_users.email_verified: %w", err)
 			}
 			if tx.Migrator().HasTable(&tables.TableOIDCTransaction{}) {
+				if err := addColumnIfNotExists(tx, logger, &tables.TableOIDCTransaction{}, "LinkUserID"); err != nil {
+					return fmt.Errorf("add identity_oidc_transactions.link_user_id: %w", err)
+				}
+			}
+			if tx.Migrator().HasTable(&tables.TableOIDCTransaction{}) {
 				return nil
 			}
 			return tx.Migrator().CreateTable(&tables.TableOIDCTransaction{})

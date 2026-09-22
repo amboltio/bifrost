@@ -29,6 +29,8 @@ type oidcTestStore struct {
 	provisionedUser     *tables.TableUser
 	provisionedExternal *tables.TableExternalIdentity
 	provisionedRole     string
+	linkedUserID        string
+	linkedExternal      *tables.TableExternalIdentity
 }
 
 func (s *oidcTestStore) CreateOIDCTransaction(_ context.Context, transaction *tables.TableOIDCTransaction) error {
@@ -76,6 +78,17 @@ func (s *oidcTestStore) ProvisionOIDCIdentity(_ context.Context, user *tables.Ta
 	return user, nil
 }
 
+func (s *oidcTestStore) LinkExternalIdentity(_ context.Context, userID string, external *tables.TableExternalIdentity) error {
+	external.UserID = userID
+	if external.ID == "" {
+		external.ID = "linked-identity"
+	}
+	external.IsActive = true
+	s.linkedUserID = userID
+	s.linkedExternal = external
+	return nil
+}
+
 func testOIDCProvider(issuer string) OIDCProvider {
 	return OIDCProvider{
 		ID: "example", DisplayName: "Example", IssuerURL: issuer,
@@ -116,6 +129,28 @@ func TestOIDCServiceBeginUsesDiscoveryPKCEAndDigestOnlyState(t *testing.T) {
 	assert.Equal(t, query.Get("code_challenge"), pkceChallenge(store.transaction.CodeVerifier))
 	assert.Equal(t, "openid profile", query.Get("scope"))
 	assert.Equal(t, "/workspace", store.transaction.RedirectPath)
+}
+
+func TestOIDCServiceBeginLinkBindsTransactionToUser(t *testing.T) {
+	var serverURL string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer": serverURL, "authorization_endpoint": serverURL + "/authorize",
+			"token_endpoint": serverURL + "/token", "jwks_uri": serverURL + "/jwks",
+		})
+	}))
+	defer server.Close()
+	serverURL = server.URL
+	store := &oidcTestStore{}
+	service := NewOIDCService(store, server.Client(), nil)
+	_, err := service.BeginLink(context.Background(), testOIDCProvider(server.URL), "https://bifrost.example.test/api/auth/oidc/example/callback", "/settings/security", "user-1")
+	require.NoError(t, err)
+	require.NotNil(t, store.transaction.LinkUserID)
+	assert.Equal(t, "user-1", *store.transaction.LinkUserID)
 }
 
 func TestOIDCServiceCompleteValidatesIssuerAudienceNonceAndResolvesIdentity(t *testing.T) {

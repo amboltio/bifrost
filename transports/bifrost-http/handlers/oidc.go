@@ -37,6 +37,7 @@ func NewOIDCHandler(store configstore.ConfigStore) *OIDCHandler {
 func (h *OIDCHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
 	r.GET("/api/auth/providers", lib.ChainMiddlewares(h.providers, middlewares...))
 	r.GET("/api/auth/oidc/{provider}/login", lib.ChainMiddlewares(h.login, middlewares...))
+	r.GET("/api/auth/oidc/{provider}/link", lib.ChainMiddlewares(h.link, middlewares...))
 	r.GET("/api/auth/oidc/{provider}/callback", lib.ChainMiddlewares(h.callback, middlewares...))
 	r.POST("/api/auth/oidc/logout", lib.ChainMiddlewares(h.logout, middlewares...))
 }
@@ -116,6 +117,10 @@ func (h *OIDCHandler) callback(ctx *fasthttp.RequestCtx) {
 		ctx.Redirect("/login?error=oidc_failed", fasthttp.StatusFound)
 		return
 	}
+	if result.Linked {
+		ctx.Redirect(result.RedirectPath, fasthttp.StatusFound)
+		return
+	}
 	sessionStore, ok := h.configStore.(identity.IdentitySessionStore)
 	if !ok {
 		ctx.Redirect("/login?error=oidc_failed", fasthttp.StatusFound)
@@ -129,6 +134,33 @@ func (h *OIDCHandler) callback(ctx *fasthttp.RequestCtx) {
 	}
 	setSessionCookie(ctx, token, expiresAt)
 	ctx.Redirect(result.RedirectPath, fasthttp.StatusFound)
+}
+
+func (h *OIDCHandler) link(ctx *fasthttp.RequestCtx) {
+	userID, _ := ctx.UserValue(schemas.BifrostContextKeyUserID).(string)
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		SendError(ctx, fasthttp.StatusUnauthorized, "Sign in before linking an identity")
+		return
+	}
+	_, provider, err := h.provider(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusNotFound, "OIDC provider not found")
+		return
+	}
+	oidcStore, ok := h.configStore.(identity.OIDCLoginStore)
+	if !ok {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "OIDC authentication is unavailable")
+		return
+	}
+	redirectPath := string(ctx.QueryArgs().Peek("redirect"))
+	service := identity.NewOIDCService(oidcStore, nil, nil)
+	start, err := service.BeginLink(ctx, toIdentityOIDCProvider(provider), oidcCallbackURL(ctx, provider.ID), redirectPath, userID)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid OIDC link request")
+		return
+	}
+	ctx.Redirect(start.AuthorizationURL, fasthttp.StatusFound)
 }
 
 func (h *OIDCHandler) logout(ctx *fasthttp.RequestCtx) {

@@ -29,9 +29,10 @@ import (
 const oidcTransactionTTL = 10 * time.Minute
 
 var (
-	ErrOIDCProviderUnavailable = errors.New("OIDC provider is unavailable")
-	ErrOIDCTransactionInvalid  = errors.New("OIDC login transaction is invalid")
-	ErrOIDCIdentityNotLinked   = errors.New("OIDC identity is not linked")
+	ErrOIDCProviderUnavailable   = errors.New("OIDC provider is unavailable")
+	ErrOIDCTransactionInvalid    = errors.New("OIDC login transaction is invalid")
+	ErrOIDCIdentityNotLinked     = errors.New("OIDC identity is not linked")
+	ErrOIDCIdentityAlreadyLinked = errors.New("OIDC identity is already linked to another user")
 )
 
 // OIDCProvider is the runtime-safe subset of the declarative provider config.
@@ -58,6 +59,10 @@ type OIDCLoginStore interface {
 	GetUser(ctx context.Context, id string) (*tables.TableUser, error)
 }
 
+type OIDCLinkStore interface {
+	LinkExternalIdentity(ctx context.Context, userID string, external *tables.TableExternalIdentity) error
+}
+
 type OIDCProvisioningStore interface {
 	ProvisionOIDCIdentity(ctx context.Context, user *tables.TableUser, external *tables.TableExternalIdentity, roleID string) (*tables.TableUser, error)
 }
@@ -71,6 +76,7 @@ type OIDCLoginResult struct {
 	UserID       string
 	ProviderID   string
 	RedirectPath string
+	Linked       bool
 }
 
 type OIDCService struct {
@@ -99,6 +105,16 @@ func NewOIDCService(store OIDCLoginStore, client *http.Client, now func() time.T
 }
 
 func (s *OIDCService) Begin(ctx context.Context, provider OIDCProvider, callbackURL, redirectPath string) (*OIDCLoginStart, error) {
+	return s.begin(ctx, provider, callbackURL, redirectPath, "")
+}
+
+// BeginLink starts the same protected OIDC transaction but binds the verified
+// callback to an already authenticated canonical user.
+func (s *OIDCService) BeginLink(ctx context.Context, provider OIDCProvider, callbackURL, redirectPath, userID string) (*OIDCLoginStart, error) {
+	return s.begin(ctx, provider, callbackURL, redirectPath, strings.TrimSpace(userID))
+}
+
+func (s *OIDCService) begin(ctx context.Context, provider OIDCProvider, callbackURL, redirectPath, linkUserID string) (*OIDCLoginStart, error) {
 	if s == nil || s.store == nil {
 		return nil, ErrOIDCProviderUnavailable
 	}
@@ -133,6 +149,9 @@ func (s *OIDCService) Begin(ctx context.Context, provider OIDCProvider, callback
 	transaction := &tables.TableOIDCTransaction{
 		ID: uuid.NewString(), StateHash: digestString(state), NonceHash: digestString(nonce),
 		ProviderID: provider.ID, CodeVerifier: verifier, RedirectPath: redirectPath, ExpiresAt: expiresAt,
+	}
+	if linkUserID != "" {
+		transaction.LinkUserID = &linkUserID
 	}
 	if err := s.store.CreateOIDCTransaction(ctx, transaction); err != nil {
 		return nil, fmt.Errorf("persist OIDC login transaction: %w", err)
@@ -212,6 +231,33 @@ func (s *OIDCService) Complete(ctx context.Context, provider OIDCProvider, callb
 		return nil, err
 	}
 	var user *tables.TableUser
+	if transaction.LinkUserID != nil && strings.TrimSpace(*transaction.LinkUserID) != "" {
+		linker, ok := s.store.(OIDCLinkStore)
+		if !ok {
+			return nil, ErrOIDCIdentityNotLinked
+		}
+		userID := strings.TrimSpace(*transaction.LinkUserID)
+		user, err = s.store.GetUser(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if user == nil || user.Status != tables.UserStatusActive {
+			return nil, ErrOIDCIdentityNotLinked
+		}
+		if external != nil && external.UserID != userID {
+			return nil, ErrOIDCIdentityAlreadyLinked
+		}
+		if external == nil {
+			external = &tables.TableExternalIdentity{UserID: userID, ProviderID: provider.ID, Issuer: discovery.Issuer, Subject: claims.Subject, IsActive: true}
+		}
+		if err := linker.LinkExternalIdentity(ctx, userID, external); err != nil {
+			return nil, err
+		}
+		if err := s.store.TouchExternalIdentity(ctx, external.ID, s.now().UTC()); err != nil {
+			return nil, err
+		}
+		return &OIDCLoginResult{UserID: user.ID, ProviderID: provider.ID, RedirectPath: transaction.RedirectPath, Linked: true}, nil
+	}
 	if external == nil {
 		if !provider.AllowJITProvisioning || !claims.EmailVerified || strings.TrimSpace(claims.Email) == "" {
 			return nil, ErrOIDCIdentityNotLinked

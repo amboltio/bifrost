@@ -19,6 +19,7 @@ type TableOIDCTransaction struct {
 	StateHash        string     `gorm:"type:char(64);not null;uniqueIndex:idx_identity_oidc_transactions_state_hash" json:"-"`
 	NonceHash        string     `gorm:"type:char(64);not null" json:"-"`
 	ProviderID       string     `gorm:"type:varchar(255);not null;index" json:"provider_id"`
+	LinkUserID       *string    `gorm:"type:varchar(255);index" json:"-"`
 	CodeVerifier     string     `gorm:"type:text;not null" json:"-"`
 	RedirectPath     string     `gorm:"type:text;not null" json:"-"`
 	ExpiresAt        time.Time  `gorm:"not null;index" json:"expires_at"`

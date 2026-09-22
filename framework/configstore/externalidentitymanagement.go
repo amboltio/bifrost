@@ -18,6 +18,58 @@ type ExternalIdentityManagementStore interface {
 	SetExternalIdentityActiveAudited(ctx context.Context, userID, identityID string, isActive bool, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
 }
 
+// LinkExternalIdentity records an issuer/subject only after the OIDC service
+// has validated its signature, issuer, audience, nonce, and state. A subject
+// already owned by another user is rejected by the unique constraint and the
+// explicit ownership check below.
+func (s *RDBConfigStore) LinkExternalIdentity(ctx context.Context, userID string, external *tables.TableExternalIdentity) error {
+	if strings.TrimSpace(userID) == "" || external == nil {
+		return ErrNotFound
+	}
+	if strings.TrimSpace(external.Issuer) == "" || strings.TrimSpace(external.Subject) == "" || strings.TrimSpace(external.ProviderID) == "" {
+		return ErrNotFound
+	}
+	targetID := userID
+	audit := &tables.TableAuditEvent{
+		ActorPrincipal: "user:" + userID, TargetType: "user", TargetID: &targetID,
+		Action: "identity.user.external_identity_linked", OccurredAt: time.Now().UTC(),
+		ChangedFields: map[string]any{"provider_id": external.ProviderID, "issuer": external.Issuer, "subject": external.Subject},
+	}
+	outbox := &tables.TableOutboxEvent{
+		Topic: "identity.user.changed", DeduplicationKey: "identity.user:external-link:" + userID + ":" + external.Issuer + ":" + external.Subject,
+		AvailableAt: time.Now().UTC(), Payload: map[string]any{"user_id": userID, "action": audit.Action},
+	}
+	return s.ApplyAuditedChange(ctx, audit, outbox, func(tx *gorm.DB) error {
+		user, err := lockedUser(tx, userID)
+		if err != nil {
+			return err
+		}
+		if user.Status != tables.UserStatusActive {
+			return ErrNotFound
+		}
+		var existing tables.TableExternalIdentity
+		err = dbForUpdate(tx).Where("issuer = ? AND subject = ?", strings.TrimSpace(external.Issuer), strings.TrimSpace(external.Subject)).First(&existing).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			external.UserID = userID
+			external.IsActive = true
+			return s.CreateExternalIdentity(ctx, external, tx)
+		case err != nil:
+			return err
+		case existing.UserID != userID:
+			return ErrAlreadyExists
+		default:
+			if err := tx.Model(&tables.TableExternalIdentity{}).Where("id = ?", existing.ID).Updates(map[string]any{"provider_id": external.ProviderID, "is_active": true}).Error; err != nil {
+				return err
+			}
+			external.ID = existing.ID
+			external.UserID = userID
+			external.IsActive = true
+			return nil
+		}
+	})
+}
+
 func (s *RDBConfigStore) ListExternalIdentitiesByUserID(ctx context.Context, userID string) ([]tables.TableExternalIdentity, error) {
 	if strings.TrimSpace(userID) == "" {
 		return []tables.TableExternalIdentity{}, nil

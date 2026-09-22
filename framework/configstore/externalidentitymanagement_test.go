@@ -51,3 +51,20 @@ func TestRevokeExternalIdentityRevokesSessionsAndBumpsAuthVersion(t *testing.T) 
 	require.NoError(t, store.DB().First(&session).Error)
 	assert.NotNil(t, session.RevokedAt)
 }
+
+func TestLinkExternalIdentityRejectsSubjectOwnedByAnotherUser(t *testing.T) {
+	store := setupIdentityTestStore(t, ":memory:")
+	ctx := context.Background()
+	first := &tables.TableUser{Email: ptr("first-link@example.test"), Status: tables.UserStatusActive}
+	second := &tables.TableUser{Email: ptr("second-link@example.test"), Status: tables.UserStatusActive}
+	require.NoError(t, store.CreateUser(ctx, first))
+	require.NoError(t, store.CreateUser(ctx, second))
+	existing := &tables.TableExternalIdentity{UserID: first.ID, ProviderID: "okta", Issuer: "https://okta.example.test", Subject: "same-subject", IsActive: true}
+	require.NoError(t, store.CreateExternalIdentity(ctx, existing))
+
+	err := store.LinkExternalIdentity(ctx, second.ID, &tables.TableExternalIdentity{ProviderID: "okta", Issuer: existing.Issuer, Subject: existing.Subject, IsActive: true})
+	require.ErrorIs(t, err, ErrAlreadyExists)
+	got, err := store.GetExternalIdentityByIssuerSubject(ctx, existing.Issuer, existing.Subject)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, got.UserID)
+}
