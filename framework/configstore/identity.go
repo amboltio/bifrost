@@ -393,6 +393,28 @@ func (s *RDBConfigStore) GetExternalIdentityByIssuerSubject(ctx context.Context,
 	return &identity, nil
 }
 
+// TouchExternalIdentity records the last successfully verified login without
+// changing the issuer/subject binding. The predicate keeps a removed binding
+// from being revived by a stale callback.
+func (s *RDBConfigStore) TouchExternalIdentity(ctx context.Context, id string, seenAt time.Time) error {
+	if strings.TrimSpace(id) == "" {
+		return ErrNotFound
+	}
+	if seenAt.IsZero() {
+		seenAt = time.Now().UTC()
+	}
+	result := s.DB().WithContext(ctx).Model(&tables.TableExternalIdentity{}).
+		Where("id = ? AND is_active = ?", id, true).
+		Update("last_seen_at", seenAt.UTC())
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetExternalIdentityActive preserves historical provider bindings while
 // preventing a disabled provider identity from authenticating.
 func (s *RDBConfigStore) SetExternalIdentityActive(ctx context.Context, id string, isActive bool) error {

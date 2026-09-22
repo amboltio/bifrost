@@ -35,6 +35,7 @@ type CredentialStore interface {
 type ExternalIdentityStore interface {
 	CreateExternalIdentity(ctx context.Context, identity *tables.TableExternalIdentity, tx ...*gorm.DB) error
 	GetExternalIdentityByIssuerSubject(ctx context.Context, issuer, subject string) (*tables.TableExternalIdentity, error)
+	TouchExternalIdentity(ctx context.Context, id string, seenAt time.Time) error
 	SetExternalIdentityActive(ctx context.Context, id string, isActive bool) error
 }
 
