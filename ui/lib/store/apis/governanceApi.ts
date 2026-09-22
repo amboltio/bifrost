@@ -350,6 +350,26 @@ export const governanceApi = baseApi.injectEndpoints({
 			providesTags: ["Roles"],
 		}),
 
+		getRBACPermissions: builder.query<{ permissions: { id: string; resource: string; operation: string }[] }, void>({
+			query: () => "/governance/rbac/permissions",
+			providesTags: ["Permissions"],
+		}),
+
+		createManagedRole: builder.mutation<ManagedRole, { name: string; display_name: string; permissions: string[] }>({
+			query: (data) => ({ url: "/governance/roles", method: "POST", body: data }),
+			invalidatesTags: ["Roles"],
+		}),
+
+		updateManagedRole: builder.mutation<ManagedRole, { id: string; data: { display_name?: string; permissions?: string[] } }>({
+			query: ({ id, data }) => ({ url: `/governance/roles/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+			invalidatesTags: ["Roles"],
+		}),
+
+		deleteManagedRole: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/roles/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["Roles"],
+		}),
+
 		createManagedUser: builder.mutation<ManagedUser, { email: string; display_name: string; password: string; role_ids: string[] }>({
 			query: (data) => ({ url: "/governance/users", method: "POST", body: data }),
 			invalidatesTags: ["Users"],
@@ -1025,6 +1045,10 @@ export const {
 	// Canonical users and roles
 	useGetManagedUsersQuery,
 	useGetManagedRolesQuery,
+	useGetRBACPermissionsQuery,
+	useCreateManagedRoleMutation,
+	useUpdateManagedRoleMutation,
+	useDeleteManagedRoleMutation,
 	useCreateManagedUserMutation,
 	useDisableManagedUserMutation,
 
