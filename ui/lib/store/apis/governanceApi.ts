@@ -118,6 +118,16 @@ export interface ProjectsResponse {
 	offset: number;
 }
 
+export interface UserVirtualKeyAssignment {
+	id: string;
+	user_id: string;
+	virtual_key_id: string;
+	source: string;
+	assigned_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
 export interface ManagedRole {
 	id: string;
 	name: string;
@@ -478,6 +488,23 @@ export const governanceApi = baseApi.injectEndpoints({
 				body: { user_ids },
 			}),
 			invalidatesTags: ["Projects", "Users"],
+		}),
+
+		getUserVirtualKeyAssignments: builder.query<{ assignments: UserVirtualKeyAssignment[] }, string>({
+			query: (id) => `/governance/users/${encodeURIComponent(id)}/virtual-keys`,
+			providesTags: ["Users", "VirtualKeys"],
+		}),
+
+		replaceUserVirtualKeyAssignments: builder.mutation<
+			{ assignments: UserVirtualKeyAssignment[] },
+			{ userId: string; virtual_key_ids: string[] }
+		>({
+			query: ({ userId, virtual_key_ids }) => ({
+				url: `/governance/users/${encodeURIComponent(userId)}/virtual-keys`,
+				method: "PUT",
+				body: { virtual_key_ids },
+			}),
+			invalidatesTags: ["Users", "VirtualKeys"],
 		}),
 
 		// Canonical users and roles
@@ -1206,6 +1233,8 @@ export const {
 	useDeleteProjectMutation,
 	useGetProjectMembersQuery,
 	useReplaceProjectMembersMutation,
+	useGetUserVirtualKeyAssignmentsQuery,
+	useReplaceUserVirtualKeyAssignmentsMutation,
 
 	// Canonical users and roles
 	useGetManagedUsersQuery,

@@ -195,6 +195,14 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		}
 		return "", false
 	}
+	if strings.HasPrefix(path, "/api/governance/virtual-keys/") {
+		remainder := strings.TrimPrefix(path, "/api/governance/virtual-keys/")
+		parts := strings.Split(remainder, "/")
+		if len(parts) == 2 && parts[0] != "" && parts[1] == "users" && method == fasthttp.MethodGet {
+			return authorization.PermissionVirtualKeysAssign, true
+		}
+		return "", false
+	}
 	if strings.HasPrefix(path, "/api/governance/roles/") {
 		remainder := strings.TrimPrefix(path, "/api/governance/roles/")
 		parts := strings.Split(remainder, "/")
@@ -290,6 +298,15 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 			return authorization.PermissionProjectsRead, true
 		case fasthttp.MethodPut:
 			return authorization.PermissionProjectsAssign, true
+		}
+		return "", false
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "virtual-keys" {
+		switch method {
+		case fasthttp.MethodGet:
+			return authorization.PermissionVirtualKeysAssign, true
+		case fasthttp.MethodPut:
+			return authorization.PermissionVirtualKeysAssign, true
 		}
 		return "", false
 	}

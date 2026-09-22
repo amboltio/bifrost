@@ -505,6 +505,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_identity_business_units"}, run: migrationAddIdentityBusinessUnits},
 	{IDs: []string{"add_identity_access_profiles"}, run: migrationAddIdentityAccessProfiles},
 	{IDs: []string{"add_identity_projects"}, run: migrationAddIdentityProjects},
+	{IDs: []string{"add_identity_user_virtual_key_assignments"}, run: migrationAddIdentityUserVirtualKeyAssignments},
 }
 
 // migrationAddIdentityTables creates the canonical identity boundary. It is
@@ -848,6 +849,29 @@ func migrationAddIdentityProjects(ctx context.Context, db *gorm.DB, logger schem
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: removing project memberships would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+func migrationAddIdentityUserVirtualKeyAssignments(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_user_virtual_key_assignments"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableUserVirtualKeyAssignment{}) {
+				return tx.Migrator().CreateTable(&tables.TableUserVirtualKeyAssignment{})
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing key ownership history would lose audit provenance", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {

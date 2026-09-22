@@ -7,8 +7,10 @@ import {
 	useDisableManagedUserMutation,
 	useGetManagedRolesQuery,
 	useGetManagedUsersQuery,
+	useGetUserVirtualKeyAssignmentsQuery,
+	useReplaceUserVirtualKeyAssignmentsMutation,
 } from "@/lib/store";
-import { UserPlus, UserRound, UserRoundX } from "lucide-react";
+import { KeyRound, UserPlus, UserRound, UserRoundX } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,10 +23,18 @@ export default function UsersView() {
 	const [displayName, setDisplayName] = useState("");
 	const [password, setPassword] = useState("");
 	const [roleID, setRoleID] = useState("");
+	const [selectedUserForKeys, setSelectedUserForKeys] = useState<string | null>(null);
+	const [virtualKeyIDs, setVirtualKeyIDs] = useState("");
+	const { data: keyAssignments } = useGetUserVirtualKeyAssignmentsQuery(selectedUserForKeys ?? "", { skip: !selectedUserForKeys });
+	const [replaceUserVirtualKeys, { isLoading: isSavingVirtualKeys }] = useReplaceUserVirtualKeyAssignmentsMutation();
 
 	useEffect(() => {
 		if (!roleID && rolesData?.roles.length) setRoleID(rolesData.roles[0].id);
 	}, [roleID, rolesData]);
+
+	useEffect(() => {
+		setVirtualKeyIDs(keyAssignments?.assignments.map((assignment) => assignment.virtual_key_id).join(", ") ?? "");
+	}, [keyAssignments]);
 
 	const reset = () => {
 		setEmail("");
@@ -48,6 +58,22 @@ export default function UsersView() {
 		try {
 			await disableUser(id).unwrap();
 			toast.success("User disabled");
+		} catch (mutationError) {
+			toast.error(getErrorMessage(mutationError));
+		}
+	};
+
+	const saveVirtualKeys = async () => {
+		if (!selectedUserForKeys) return;
+		try {
+			await replaceUserVirtualKeys({
+				userId: selectedUserForKeys,
+				virtual_key_ids: virtualKeyIDs
+					.split(",")
+					.map((value) => value.trim())
+					.filter(Boolean),
+			}).unwrap();
+			toast.success("Virtual-key assignments updated");
 		} catch (mutationError) {
 			toast.error(getErrorMessage(mutationError));
 		}
@@ -96,6 +122,16 @@ export default function UsersView() {
 											<UserRoundX className="text-destructive h-4 w-4" />
 										</Button>
 									)}
+									<Button
+										type="button"
+										variant="ghost"
+										size="icon"
+										onClick={() => setSelectedUserForKeys(user.id)}
+										dataTestId={`user-virtual-keys-${user.id}`}
+										aria-label={`Manage virtual keys for ${user.email || user.id}`}
+									>
+										<KeyRound className="h-4 w-4" />
+									</Button>
 								</div>
 							))}
 						</div>
@@ -103,6 +139,30 @@ export default function UsersView() {
 						<div className="text-muted-foreground p-8 text-center text-sm">No users have been created.</div>
 					)}
 				</div>
+
+				{selectedUserForKeys && (
+					<div className="border-border h-fit space-y-4 rounded-sm border p-4" data-testid="user-virtual-key-assignment-form">
+						<h2 className="text-sm font-semibold">Virtual-key assignments</h2>
+						<p className="text-muted-foreground text-xs">
+							Enter virtual-key IDs separated by commas. Assignment changes are audited and revoke prior manual grants.
+						</p>
+						<Input value={virtualKeyIDs} onChange={(event) => setVirtualKeyIDs(event.target.value)} placeholder="key-id-1, key-id-2" />
+						<div className="flex gap-2">
+							<Button
+								type="button"
+								onClick={saveVirtualKeys}
+								isLoading={isSavingVirtualKeys}
+								disabled={isSavingVirtualKeys}
+								dataTestId="user-virtual-key-save-button"
+							>
+								Save assignments
+							</Button>
+							<Button type="button" variant="outline" onClick={() => setSelectedUserForKeys(null)}>
+								Close
+							</Button>
+						</div>
+					</div>
+				)}
 
 				<form onSubmit={submit} className="border-border h-fit space-y-4 rounded-sm border p-4" data-testid="user-create-form">
 					<div className="flex items-center gap-2">
