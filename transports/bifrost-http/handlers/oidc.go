@@ -26,6 +26,7 @@ type oidcProviderResponse struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
+	Type        string `json:"type"`
 }
 
 func NewOIDCHandler(store configstore.ConfigStore) *OIDCHandler {
@@ -76,9 +77,11 @@ func (h *OIDCHandler) claimsPreview(ctx *fasthttp.RequestCtx) {
 	}
 	SendJSON(ctx, map[string]any{
 		"provider_id":     provider.ID,
+		"provider_type":   provider.NormalizedType(),
 		"required_claims": []string{"iss", "sub", "aud", "exp", "iat", "nonce"},
 		"identity_claims": []string{"email", "email_verified", "name"},
-		"mapping_mode":    "standard_oidc_claims",
+		"claim_mappings":  provider.ClaimMappings,
+		"mapping_mode":    "configured_claim_paths",
 	})
 }
 
@@ -100,7 +103,7 @@ func (h *OIDCHandler) providers(ctx *fasthttp.RequestCtx) {
 			}
 		}
 		for _, provider := range authConfig.EnabledOIDCProviders() {
-			response.Providers = append(response.Providers, oidcProviderResponse{ID: provider.ID, Name: provider.DisplayName, DisplayName: provider.DisplayName})
+			response.Providers = append(response.Providers, oidcProviderResponse{ID: provider.ID, Name: provider.DisplayName, DisplayName: provider.DisplayName, Type: provider.NormalizedType()})
 		}
 	}
 	SendJSON(ctx, response)
@@ -264,7 +267,16 @@ func toIdentityOIDCProvider(provider configstore.OIDCProviderConfig) identity.OI
 	if provider.ClientSecret != nil {
 		clientSecret = provider.ClientSecret.GetValue()
 	}
-	return identity.OIDCProvider{ID: provider.ID, DisplayName: provider.DisplayName, IssuerURL: provider.IssuerURL, ClientID: clientID, ClientSecret: clientSecret, Scopes: append([]string(nil), provider.Scopes...), AllowJITProvisioning: provider.AllowJITProvisioning, AllowedEmailDomains: append([]string(nil), provider.AllowedEmailDomains...)}
+	return identity.OIDCProvider{
+		ID: provider.ID, DisplayName: provider.DisplayName, Type: provider.NormalizedType(),
+		IssuerURL: provider.IssuerURL, ClientID: clientID, ClientSecret: clientSecret,
+		Scopes: append([]string(nil), provider.Scopes...), AllowedAudiences: append([]string(nil), provider.AllowedAudiences...),
+		ClaimMappings: identity.OIDCClaimMappings{
+			Email: provider.ClaimMappings.Email, EmailVerified: provider.ClaimMappings.EmailVerified,
+			Name: provider.ClaimMappings.Name, Groups: provider.ClaimMappings.Groups, Roles: provider.ClaimMappings.Roles,
+		},
+		AllowJITProvisioning: provider.AllowJITProvisioning, AllowedEmailDomains: append([]string(nil), provider.AllowedEmailDomains...),
+	}
 }
 
 func oidcCallbackURL(ctx *fasthttp.RequestCtx, providerID string) string {

@@ -57,15 +57,46 @@ type LocalLoginConfig struct {
 // provider. Runtime discovery, PKCE transactions and token verification are
 // implemented separately; this contract purposefully stores no token material.
 type OIDCProviderConfig struct {
-	ID                   string             `json:"id"`
-	DisplayName          string             `json:"display_name"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	// Type selects a named provider preset while retaining the generic OIDC
+	// protocol implementation. Empty and "generic" use the standard claims.
+	Type                 string             `json:"type,omitempty"`
 	IssuerURL            string             `json:"issuer_url"`
 	ClientID             *schemas.SecretVar `json:"client_id"`
 	ClientSecret         *schemas.SecretVar `json:"client_secret"`
 	Scopes               []string           `json:"scopes,omitempty"`
+	AllowedAudiences     []string           `json:"allowed_audiences,omitempty"`
+	ClaimMappings        OIDCClaimMappings  `json:"claim_mappings,omitempty"`
 	AllowJITProvisioning bool               `json:"allow_jit_provisioning"`
 	AllowedEmailDomains  []string           `json:"allowed_email_domains,omitempty"`
 	IsEnabled            bool               `json:"is_enabled"`
+}
+
+// SupportedOIDCProviderTypes is the set of named presets exposed by the
+// configuration contract. Presets share discovery, PKCE, and JWT validation;
+// they exist so operators and the UI can describe the IdP in its own terms.
+var SupportedOIDCProviderTypes = []string{
+	"generic", "okta", "entra", "keycloak", "zitadel", "google_workspace", "auth0",
+}
+
+// OIDCClaimMappings allows providers that use non-standard claim names to
+// map the claims required to identify a user. Paths use dot notation for
+// nested claims (for example, "profile.email").
+type OIDCClaimMappings struct {
+	Email         string `json:"email,omitempty"`
+	EmailVerified string `json:"email_verified,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Groups        string `json:"groups,omitempty"`
+	Roles         string `json:"roles,omitempty"`
+}
+
+func (p OIDCProviderConfig) NormalizedType() string {
+	typeName := strings.ToLower(strings.TrimSpace(p.Type))
+	if typeName == "" {
+		return "generic"
+	}
+	return typeName
 }
 
 // UnmarshalJSON defaults a declared provider to enabled. This preserves the
@@ -190,6 +221,10 @@ func (c AuthConfig) Validate() error {
 			return fmt.Errorf("auth_config has duplicate OIDC provider ID %q", id)
 		}
 		providerIDs[id] = struct{}{}
+		providerType := provider.NormalizedType()
+		if !containsString(SupportedOIDCProviderTypes, providerType) {
+			return fmt.Errorf("auth_config.oidc_providers[%q] has unsupported type %q", id, provider.Type)
+		}
 		if !provider.IsEnabled {
 			continue
 		}
@@ -205,6 +240,17 @@ func (c AuthConfig) Validate() error {
 		}
 		if !hasConfiguredSecret(provider.ClientSecret) {
 			return fmt.Errorf("auth_config.oidc_providers[%q] requires client_secret", id)
+		}
+		seenAudiences := make(map[string]struct{}, len(provider.AllowedAudiences))
+		for _, audience := range provider.AllowedAudiences {
+			audience = strings.TrimSpace(audience)
+			if audience == "" {
+				return fmt.Errorf("auth_config.oidc_providers[%q] has an empty allowed_audiences entry", id)
+			}
+			if _, exists := seenAudiences[audience]; exists {
+				return fmt.Errorf("auth_config.oidc_providers[%q] has duplicate allowed_audiences", id)
+			}
+			seenAudiences[audience] = struct{}{}
 		}
 		seenDomains := make(map[string]struct{}, len(provider.AllowedEmailDomains))
 		for _, domain := range provider.AllowedEmailDomains {
@@ -223,6 +269,15 @@ func (c AuthConfig) Validate() error {
 		return fmt.Errorf("auth_config is enabled but has no usable login method")
 	}
 	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (c AuthConfig) localLoginEnabled() bool {

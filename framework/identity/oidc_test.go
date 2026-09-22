@@ -175,7 +175,7 @@ func TestOIDCServiceCompleteValidatesIssuerAudienceNonceAndResolvesIdentity(t *t
 			_ = r.ParseForm()
 			receivedVerifier = r.Form.Get("code_verifier")
 			token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-				"iss": serverURL, "sub": "subject-1", "aud": "client-id", "exp": time.Now().Add(time.Hour).Unix(),
+				"iss": serverURL, "sub": "subject-1", "aud": "resource-audience", "exp": time.Now().Add(time.Hour).Unix(),
 				"iat": time.Now().Add(-time.Minute).Unix(), "nonce": "nonce-value",
 				"email": "alice@example.test", "email_verified": true,
 			})
@@ -206,13 +206,27 @@ func TestOIDCServiceCompleteValidatesIssuerAudienceNonceAndResolvesIdentity(t *t
 		user:     &tables.TableUser{ID: "user-1", Status: tables.UserStatusActive},
 	}
 	service := NewOIDCService(store, server.Client(), func() time.Time { return now })
-	result, err := service.Complete(context.Background(), testOIDCProvider(server.URL), "https://bifrost.example.test/api/auth/oidc/example/callback", state, "auth-code")
+	provider := testOIDCProvider(server.URL)
+	provider.AllowedAudiences = []string{"resource-audience"}
+	result, err := service.Complete(context.Background(), provider, "https://bifrost.example.test/api/auth/oidc/example/callback", state, "auth-code")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, "user-1", result.UserID)
 	assert.Equal(t, "example", result.ProviderID)
 	assert.Equal(t, "verifier-value", receivedVerifier)
 	assert.True(t, store.touched)
+}
+
+func TestOIDCClaimMappingsSupportNestedClaims(t *testing.T) {
+	claims := &oidcIDTokenClaims{raw: map[string]any{
+		"profile": map[string]any{"email": "mapped@example.test", "verified": "true", "display_name": "Mapped User"},
+	}}
+	claims.applyClaimMappings(OIDCClaimMappings{
+		Email: "profile.email", EmailVerified: "profile.verified", Name: "profile.display_name",
+	})
+	assert.Equal(t, "mapped@example.test", claims.Email)
+	assert.True(t, claims.EmailVerified)
+	assert.Equal(t, "Mapped User", claims.Name)
 }
 
 func TestOIDCServiceCompleteRejectsNonceMismatch(t *testing.T) {

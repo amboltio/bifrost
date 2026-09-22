@@ -41,12 +41,25 @@ var (
 type OIDCProvider struct {
 	ID                   string
 	DisplayName          string
+	Type                 string
 	IssuerURL            string
 	ClientID             string
 	ClientSecret         string
 	Scopes               []string
+	AllowedAudiences     []string
+	ClaimMappings        OIDCClaimMappings
 	AllowJITProvisioning bool
 	AllowedEmailDomains  []string
+}
+
+// OIDCClaimMappings mirrors the declarative config without importing the
+// broader configstore package into the protocol package.
+type OIDCClaimMappings struct {
+	Email         string
+	EmailVerified string
+	Name          string
+	Groups        string
+	Roles         string
 }
 
 // OIDCLoginStore is intentionally narrower than ConfigStore. It makes the
@@ -376,6 +389,65 @@ type oidcIDTokenClaims struct {
 	Email         string `json:"email,omitempty"`
 	EmailVerified bool   `json:"email_verified,omitempty"`
 	Name          string `json:"name,omitempty"`
+	raw           map[string]any
+}
+
+func (c *oidcIDTokenClaims) UnmarshalJSON(data []byte) error {
+	type alias oidcIDTokenClaims
+	var parsed alias
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = oidcIDTokenClaims(parsed)
+	c.raw = raw
+	return nil
+}
+
+func (c *oidcIDTokenClaims) applyClaimMappings(mapping OIDCClaimMappings) {
+	if c == nil {
+		return
+	}
+	if value, ok := claimValue(c.raw, mapping.Email); ok {
+		if email, ok := value.(string); ok {
+			c.Email = strings.TrimSpace(email)
+		}
+	}
+	if value, ok := claimValue(c.raw, mapping.EmailVerified); ok {
+		switch verified := value.(type) {
+		case bool:
+			c.EmailVerified = verified
+		case string:
+			c.EmailVerified = strings.EqualFold(strings.TrimSpace(verified), "true")
+		}
+	}
+	if value, ok := claimValue(c.raw, mapping.Name); ok {
+		if name, ok := value.(string); ok {
+			c.Name = strings.TrimSpace(name)
+		}
+	}
+}
+
+func claimValue(raw map[string]any, path string) (any, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" || len(raw) == 0 {
+		return nil, false
+	}
+	var current any = raw
+	for _, part := range strings.Split(path, ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 func (s *OIDCService) verifyIDToken(ctx context.Context, raw string, discovery *oidcDiscovery, provider OIDCProvider) (*oidcIDTokenClaims, error) {
@@ -386,6 +458,19 @@ func (s *OIDCService) verifyIDToken(ctx context.Context, raw string, discovery *
 		return nil, ErrOIDCProviderUnavailable
 	}
 	claims := &oidcIDTokenClaims{}
+	audiences := make([]string, 0, len(provider.AllowedAudiences)+1)
+	seenAudiences := make(map[string]struct{}, len(provider.AllowedAudiences)+1)
+	for _, audience := range append(provider.AllowedAudiences, provider.ClientID) {
+		audience = strings.TrimSpace(audience)
+		if audience == "" {
+			continue
+		}
+		if _, exists := seenAudiences[audience]; exists {
+			continue
+		}
+		seenAudiences[audience] = struct{}{}
+		audiences = append(audiences, audience)
+	}
 	token, err := jwt.ParseWithClaims(raw, claims, func(parsed *jwt.Token) (any, error) {
 		kid, _ := parsed.Header["kid"].(string)
 		if kid == "" {
@@ -402,10 +487,11 @@ func (s *OIDCService) verifyIDToken(ctx context.Context, raw string, discovery *
 			return publicKey, nil
 		}
 		return nil, fmt.Errorf("OIDC key not found")
-	}, jwt.WithIssuer(discovery.Issuer), jwt.WithAudience(provider.ClientID), jwt.WithExpirationRequired(), jwt.WithValidMethods(oidcJWTAlgorithms))
+	}, jwt.WithIssuer(discovery.Issuer), jwt.WithAudience(audiences...), jwt.WithExpirationRequired(), jwt.WithValidMethods(oidcJWTAlgorithms))
 	if err != nil || token == nil || !token.Valid || claims.Subject == "" || claims.Nonce == "" || claims.IssuedAt == nil {
 		return nil, ErrOIDCTransactionInvalid
 	}
+	claims.applyClaimMappings(provider.ClaimMappings)
 	return claims, nil
 }
 

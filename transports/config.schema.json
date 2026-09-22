@@ -4250,6 +4250,12 @@
                 "maxLength": 128,
                 "description": "Login-page label for this provider"
               },
+              "type": {
+                "type": "string",
+                "enum": ["generic", "okta", "entra", "keycloak", "zitadel", "google_workspace", "auth0"],
+                "default": "generic",
+                "description": "Named OIDC provider preset. Presets share the generic discovery and token-validation engine."
+              },
               "issuer_url": {
                 "type": "string",
                 "format": "uri",
@@ -4274,6 +4280,27 @@
                 },
                 "uniqueItems": true,
                 "description": "Additional OIDC scopes requested with the required openid scope"
+              },
+              "allowed_audiences": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true,
+                "description": "Additional accepted JWT audiences. The client_id is always accepted."
+              },
+              "claim_mappings": {
+                "type": "object",
+                "description": "Optional dot-notated claim paths for providers with non-standard identity claims.",
+                "properties": {
+                  "email": {"type": "string", "minLength": 1},
+                  "email_verified": {"type": "string", "minLength": 1},
+                  "name": {"type": "string", "minLength": 1},
+                  "groups": {"type": "string", "minLength": 1},
+                  "roles": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
               },
               "allow_jit_provisioning": {
                 "type": "boolean",

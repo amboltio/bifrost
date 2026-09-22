@@ -58,6 +58,19 @@ func TestAuthConfigAuthenticationMethodsSupportLocalOIDCAndMixedModes(t *testing
 			}`,
 			expected: []string{"local", "oidc"},
 		},
+		{
+			name: "named provider with claim mappings and additional audience",
+			config: `{
+				"is_enabled": true,
+				"oidc_providers": [{
+					"id": "auth0", "type": "auth0", "display_name": "Auth0",
+					"issuer_url": "https://tenant.example", "client_id": "client", "client_secret": "secret",
+					"allowed_audiences": ["https://api.example"],
+					"claim_mappings": {"email": "profile.email", "email_verified": "profile.verified", "name": "profile.display_name"}
+				}]
+			}`,
+			expected: []string{"oidc"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -110,6 +123,22 @@ func TestAuthConfigValidationRejectsUnsafeOrUnusableModes(t *testing.T) {
 				"oidc_providers": [{"id": "entra", "display_name": "Entra", "issuer_url": "https://issuer.example", "client_id": "client", "client_secret": "secret", "allowed_email_domains": ["example.com/path"]}]
 			}`,
 			expectedError: "allowed_email_domains",
+		},
+		{
+			name: "unsupported provider type",
+			config: `{
+				"is_enabled": true,
+				"oidc_providers": [{"id": "custom", "type": "unsupported", "display_name": "Custom", "issuer_url": "https://issuer.example", "client_id": "client", "client_secret": "secret"}]
+			}`,
+			expectedError: "unsupported type",
+		},
+		{
+			name: "duplicate audience",
+			config: `{
+				"is_enabled": true,
+				"oidc_providers": [{"id": "entra", "display_name": "Entra", "issuer_url": "https://issuer.example", "client_id": "client", "client_secret": "secret", "allowed_audiences": ["api", "api"]}]
+			}`,
+			expectedError: "duplicate allowed_audiences",
 		},
 	}
 
