@@ -28,9 +28,18 @@ when both are present they must be equivalent after defaults are applied.
         {
           "id": "entra",
           "display_name": "Microsoft Entra ID",
+          "type": "entra",
           "issuer_url": "https://login.microsoftonline.com/<tenant>/v2.0",
           "client_id": "env.BIFROST_ENTRA_CLIENT_ID",
-          "client_secret": "env.BIFROST_ENTRA_CLIENT_SECRET"
+          "client_secret": "env.BIFROST_ENTRA_CLIENT_SECRET",
+          "allowed_audiences": ["api://bifrost"],
+          "claim_mappings": {
+            "email": "email",
+            "email_verified": "email_verified",
+            "name": "name",
+            "groups": "groups",
+            "roles": "roles"
+          }
         }
       ]
     }
@@ -47,6 +56,18 @@ persisted through the legacy three-row admin-auth store.
 
 The local-session defaults are a 12-hour absolute lifetime and a 30-minute idle
 timeout. A configured idle timeout may not exceed the absolute lifetime.
+
+`oidc_providers[].type` accepts `generic`, `okta`, `entra`, `keycloak`,
+`zitadel`, `google_workspace`, and `auth0`. These named presets use the same
+discovery, PKCE, issuer, signature, nonce, expiration, and audience validation
+engine. The client ID is always an accepted audience; `allowed_audiences` adds
+resource audiences used by providers that issue tokens for more than one API.
+
+The runtime uses standard `email`, `email_verified`, and `name` claims by
+default. `claim_mappings` accepts dot-notated paths for providers that nest
+identity claims (for example `profile.email`). `groups` and `roles` are
+returned in claims-preview metadata for future authorization mapping; they do
+not grant permissions by themselves.
 
 ## Existing schema inventory
 
