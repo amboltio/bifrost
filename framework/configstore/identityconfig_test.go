@@ -169,6 +169,19 @@ func TestAuthConfigNormalizedAppliesSessionDefaultsWithoutMutatingInput(t *testi
 	assert.Zero(t, config.LocalLogin.IdleTimeoutSeconds, "normalization must not mutate file-owned configuration")
 }
 
+func TestOIDCProviderEffectiveClaimMappingsApplyPresetDefaultsAndOverrides(t *testing.T) {
+	provider := OIDCProviderConfig{Type: "auth0", ClaimMappings: OIDCClaimMappings{Email: "profile.email"}}
+	mapping := provider.EffectiveClaimMappings()
+	assert.Equal(t, "profile.email", mapping.Email)
+	assert.Equal(t, "email_verified", mapping.EmailVerified)
+	assert.Equal(t, "name", mapping.Name)
+	assert.Equal(t, "groups", mapping.Groups)
+	assert.Equal(t, "roles", mapping.Roles)
+
+	generic := (OIDCProviderConfig{}).EffectiveClaimMappings()
+	assert.Equal(t, OIDCClaimMappings{Email: "email", EmailVerified: "email_verified", Name: "name"}, generic)
+}
+
 func TestAuthConfigRedactedNeverExposesOIDCClientSecrets(t *testing.T) {
 	t.Setenv("BIFROST_OIDC_CLIENT_ID", "real-oidc-client-id")
 	t.Setenv("BIFROST_OIDC_CLIENT_SECRET", "real-oidc-client-secret")

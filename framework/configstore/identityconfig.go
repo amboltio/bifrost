@@ -99,6 +99,35 @@ func (p OIDCProviderConfig) NormalizedType() string {
 	return typeName
 }
 
+// EffectiveClaimMappings returns safe defaults for the named presets and then
+// applies explicit operator overrides. The defaults intentionally stay within
+// standard OIDC claims; provider-specific groups/roles are only advisory until
+// an authorization mapping is configured.
+func (p OIDCProviderConfig) EffectiveClaimMappings() OIDCClaimMappings {
+	mapping := OIDCClaimMappings{Email: "email", EmailVerified: "email_verified", Name: "name"}
+	switch p.NormalizedType() {
+	case "okta", "entra", "keycloak", "zitadel", "google_workspace", "auth0":
+		mapping.Groups = "groups"
+		mapping.Roles = "roles"
+	}
+	if value := strings.TrimSpace(p.ClaimMappings.Email); value != "" {
+		mapping.Email = value
+	}
+	if value := strings.TrimSpace(p.ClaimMappings.EmailVerified); value != "" {
+		mapping.EmailVerified = value
+	}
+	if value := strings.TrimSpace(p.ClaimMappings.Name); value != "" {
+		mapping.Name = value
+	}
+	if value := strings.TrimSpace(p.ClaimMappings.Groups); value != "" {
+		mapping.Groups = value
+	}
+	if value := strings.TrimSpace(p.ClaimMappings.Roles); value != "" {
+		mapping.Roles = value
+	}
+	return mapping
+}
+
 // UnmarshalJSON defaults a declared provider to enabled. This preserves the
 // concise provider entries accepted by the initial configuration contract while
 // still letting an operator retain a disabled provider for later reactivation.

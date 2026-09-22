@@ -75,12 +75,13 @@ func (h *OIDCHandler) claimsPreview(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusNotFound, "OIDC provider not found")
 		return
 	}
+	effectiveMappings := provider.EffectiveClaimMappings()
 	SendJSON(ctx, map[string]any{
 		"provider_id":     provider.ID,
 		"provider_type":   provider.NormalizedType(),
 		"required_claims": []string{"iss", "sub", "aud", "exp", "iat", "nonce"},
 		"identity_claims": []string{"email", "email_verified", "name"},
-		"claim_mappings":  provider.ClaimMappings,
+		"claim_mappings":  effectiveMappings,
 		"mapping_mode":    "configured_claim_paths",
 	})
 }
@@ -267,13 +268,14 @@ func toIdentityOIDCProvider(provider configstore.OIDCProviderConfig) identity.OI
 	if provider.ClientSecret != nil {
 		clientSecret = provider.ClientSecret.GetValue()
 	}
+	effectiveMappings := provider.EffectiveClaimMappings()
 	return identity.OIDCProvider{
 		ID: provider.ID, DisplayName: provider.DisplayName, Type: provider.NormalizedType(),
 		IssuerURL: provider.IssuerURL, ClientID: clientID, ClientSecret: clientSecret,
 		Scopes: append([]string(nil), provider.Scopes...), AllowedAudiences: append([]string(nil), provider.AllowedAudiences...),
 		ClaimMappings: identity.OIDCClaimMappings{
-			Email: provider.ClaimMappings.Email, EmailVerified: provider.ClaimMappings.EmailVerified,
-			Name: provider.ClaimMappings.Name, Groups: provider.ClaimMappings.Groups, Roles: provider.ClaimMappings.Roles,
+			Email: effectiveMappings.Email, EmailVerified: effectiveMappings.EmailVerified,
+			Name: effectiveMappings.Name, Groups: effectiveMappings.Groups, Roles: effectiveMappings.Roles,
 		},
 		AllowJITProvisioning: provider.AllowJITProvisioning, AllowedEmailDomains: append([]string(nil), provider.AllowedEmailDomains...),
 	}
