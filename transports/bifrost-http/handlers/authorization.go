@@ -162,6 +162,39 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		}
 		return "", false
 	}
+	if path == "/api/governance/projects" {
+		switch method {
+		case fasthttp.MethodGet:
+			return authorization.PermissionProjectsRead, true
+		case fasthttp.MethodPost:
+			return authorization.PermissionProjectsCreate, true
+		default:
+			return "", false
+		}
+	}
+	if strings.HasPrefix(path, "/api/governance/projects/") {
+		remainder := strings.TrimPrefix(path, "/api/governance/projects/")
+		parts := strings.Split(remainder, "/")
+		if len(parts) == 1 && parts[0] != "" {
+			switch method {
+			case fasthttp.MethodGet:
+				return authorization.PermissionProjectsRead, true
+			case fasthttp.MethodPut, fasthttp.MethodPatch:
+				return authorization.PermissionProjectsUpdate, true
+			case fasthttp.MethodDelete:
+				return authorization.PermissionProjectsDelete, true
+			}
+		}
+		if len(parts) == 2 && parts[0] != "" && parts[1] == "members" {
+			switch method {
+			case fasthttp.MethodGet:
+				return authorization.PermissionProjectsRead, true
+			case fasthttp.MethodPut:
+				return authorization.PermissionProjectsAssign, true
+			}
+		}
+		return "", false
+	}
 	if strings.HasPrefix(path, "/api/governance/roles/") {
 		remainder := strings.TrimPrefix(path, "/api/governance/roles/")
 		parts := strings.Split(remainder, "/")
@@ -248,6 +281,15 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 			return authorization.PermissionAccessProfilesRead, true
 		case fasthttp.MethodPut:
 			return authorization.PermissionAccessProfilesAssign, true
+		}
+		return "", false
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "projects" {
+		switch method {
+		case fasthttp.MethodGet:
+			return authorization.PermissionProjectsRead, true
+		case fasthttp.MethodPut:
+			return authorization.PermissionProjectsAssign, true
 		}
 		return "", false
 	}

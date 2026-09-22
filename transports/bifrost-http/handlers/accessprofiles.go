@@ -96,7 +96,7 @@ type accessProfileRequest struct {
 	Name              string   `json:"name"`
 	Description       string   `json:"description"`
 	Enabled           *bool    `json:"enabled"`
-	AllowAllProviders bool     `json:"allow_all_providers"`
+	AllowAllProviders *bool    `json:"allow_all_providers"`
 	AllowedProviders  []string `json:"allowed_providers"`
 	AllowedModels     []string `json:"allowed_models"`
 	AllowedMCPTools   []string `json:"allowed_mcp_tools"`
@@ -116,7 +116,11 @@ func (h *AccessProfilesHandler) create(ctx *fasthttp.RequestCtx) {
 	if request.Enabled != nil {
 		enabled = *request.Enabled
 	}
-	profile := &tables.TableAccessProfile{ID: strings.TrimSpace(request.ID), Name: strings.TrimSpace(request.Name), Description: strings.TrimSpace(request.Description), Enabled: enabled, AllowAllProviders: request.AllowAllProviders, AllowedProviders: request.AllowedProviders, AllowedModels: request.AllowedModels, AllowedMCPTools: request.AllowedMCPTools, CreatedByUserID: canonicalActorUserID(ctx)}
+	allowAllProviders := false
+	if request.AllowAllProviders != nil {
+		allowAllProviders = *request.AllowAllProviders
+	}
+	profile := &tables.TableAccessProfile{ID: strings.TrimSpace(request.ID), Name: strings.TrimSpace(request.Name), Description: strings.TrimSpace(request.Description), Enabled: enabled, AllowAllProviders: allowAllProviders, AllowedProviders: request.AllowedProviders, AllowedModels: request.AllowedModels, AllowedMCPTools: request.AllowedMCPTools, CreatedByUserID: canonicalActorUserID(ctx)}
 	if profile.ID == "" {
 		profile.ID = uuid.NewString()
 	}
@@ -158,6 +162,10 @@ func (h *AccessProfilesHandler) update(ctx *fasthttp.RequestCtx) {
 		enabled = *request.Enabled
 	}
 	providers, models, mcpTools := current.AllowedProviders, current.AllowedModels, current.AllowedMCPTools
+	allowAllProviders := current.AllowAllProviders
+	if request.AllowAllProviders != nil {
+		allowAllProviders = *request.AllowAllProviders
+	}
 	if request.AllowedProviders != nil {
 		providers = request.AllowedProviders
 	}
@@ -168,7 +176,7 @@ func (h *AccessProfilesHandler) update(ctx *fasthttp.RequestCtx) {
 		mcpTools = request.AllowedMCPTools
 	}
 	audit, outbox := h.audit(ctx, current.ID, "governance.access_profile.updated")
-	updated, err := h.store.UpdateAccessProfileAudited(ctx, current.ID, name, description, enabled, request.AllowAllProviders, providers, models, mcpTools, audit, outbox)
+	updated, err := h.store.UpdateAccessProfileAudited(ctx, current.ID, name, description, enabled, allowAllProviders, providers, models, mcpTools, audit, outbox)
 	if h.writeError(ctx, err) {
 		return
 	}

@@ -93,6 +93,31 @@ export interface AccessProfilesResponse {
 	offset: number;
 }
 
+export interface Project {
+	id: string;
+	name: string;
+	description: string;
+	enabled: boolean;
+	expires_at?: string;
+	access_rule: string;
+	membership_mode: string;
+	accounting_mode: string;
+	split_policy: string;
+	allow_all_providers: boolean;
+	allowed_providers: string[];
+	allowed_models: string[];
+	created_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ProjectsResponse {
+	projects: Project[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
 export interface ManagedRole {
 	id: string;
 	name: string;
@@ -411,6 +436,48 @@ export const governanceApi = baseApi.injectEndpoints({
 		>({
 			query: (id) => `/governance/users/${encodeURIComponent(id)}/effective-access`,
 			providesTags: ["AccessProfiles", "Users"],
+		}),
+
+		// Projects
+		getProjects: builder.query<ProjectsResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/projects",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["Projects"],
+		}),
+
+		createProject: builder.mutation<Project, Partial<Project> & { name: string }>({
+			query: (data) => ({ url: "/governance/projects", method: "POST", body: data }),
+			invalidatesTags: ["Projects"],
+		}),
+
+		updateProject: builder.mutation<Project, { id: string; data: Partial<Project> }>({
+			query: ({ id, data }) => ({ url: `/governance/projects/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+			invalidatesTags: ["Projects"],
+		}),
+
+		deleteProject: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/projects/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["Projects"],
+		}),
+
+		getProjectMembers: builder.query<{ members: unknown[] }, string>({
+			query: (id) => `/governance/projects/${encodeURIComponent(id)}/members`,
+			providesTags: ["Projects", "Users"],
+		}),
+
+		replaceProjectMembers: builder.mutation<{ members: unknown[] }, { projectId: string; user_ids: string[] }>({
+			query: ({ projectId, user_ids }) => ({
+				url: `/governance/projects/${encodeURIComponent(projectId)}/members`,
+				method: "PUT",
+				body: { user_ids },
+			}),
+			invalidatesTags: ["Projects", "Users"],
 		}),
 
 		// Canonical users and roles
@@ -1131,6 +1198,14 @@ export const {
 	useGetUserAccessProfilesQuery,
 	useReplaceUserAccessProfilesMutation,
 	useGetUserEffectiveAccessQuery,
+
+	// Projects
+	useGetProjectsQuery,
+	useCreateProjectMutation,
+	useUpdateProjectMutation,
+	useDeleteProjectMutation,
+	useGetProjectMembersQuery,
+	useReplaceProjectMembersMutation,
 
 	// Canonical users and roles
 	useGetManagedUsersQuery,

@@ -17,7 +17,7 @@ func TestAuthStatusResponseAdvertisesImplementedIdentityFeatures(t *testing.T) {
 	assert.True(t, response.IdentityCapabilities.Organizations)
 	assert.True(t, response.IdentityCapabilities.Roles)
 	assert.True(t, response.IdentityCapabilities.AccessProfiles)
-	assert.False(t, response.IdentityCapabilities.Projects)
+	assert.True(t, response.IdentityCapabilities.Projects)
 	assert.False(t, response.IdentityCapabilities.UserAnalytics)
 	assert.Equal(t, "password", dashboardAuthTypeForMethods([]string{"local", "oidc"}))
 	assert.Equal(t, "sso", dashboardAuthTypeForMethods([]string{"oidc"}))
