@@ -4275,6 +4275,11 @@
                 "uniqueItems": true,
                 "description": "Additional OIDC scopes requested with the required openid scope"
               },
+              "allow_jit_provisioning": {
+                "type": "boolean",
+                "default": false,
+                "description": "Allow a verified OIDC email to create a new viewer user when no external identity is linked"
+              },
               "is_enabled": {
                 "type": "boolean",
                 "default": true,

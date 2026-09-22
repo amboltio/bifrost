@@ -29,6 +29,7 @@ type TableUser struct {
 	ID              string     `gorm:"primaryKey;type:varchar(255)" json:"id"`
 	Email           *string    `gorm:"type:varchar(320)" json:"email,omitempty"`
 	NormalizedEmail *string    `gorm:"type:varchar(320);uniqueIndex:idx_identity_users_normalized_email" json:"normalized_email,omitempty"`
+	EmailVerified   bool       `gorm:"not null;default:false" json:"email_verified"`
 	LegacyUsername  *string    `gorm:"type:varchar(255);uniqueIndex:idx_identity_users_legacy_username" json:"legacy_username,omitempty"`
 	DisplayName     string     `gorm:"type:varchar(255);not null;default:''" json:"display_name"`
 	Status          string     `gorm:"type:varchar(32);not null;default:'active';index" json:"status"`

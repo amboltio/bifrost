@@ -706,6 +706,12 @@ func migrationAddOIDCTransactions(ctx context.Context, db *gorm.DB, logger schem
 		ID: migrationName,
 		Migrate: func(tx *gorm.DB) error {
 			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableUser{}) {
+				return fmt.Errorf("identity_users is missing: run add_identity_tables before %s", migrationName)
+			}
+			if err := addColumnIfNotExists(tx, logger, &tables.TableUser{}, "EmailVerified"); err != nil {
+				return fmt.Errorf("add identity_users.email_verified: %w", err)
+			}
 			if tx.Migrator().HasTable(&tables.TableOIDCTransaction{}) {
 				return nil
 			}

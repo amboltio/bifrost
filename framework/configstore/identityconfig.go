@@ -35,10 +35,11 @@ type IdentityFeatureCapabilities struct {
 }
 
 // ImplementedIdentityFeatureCapabilities is the public feature gate for
-// identity/governance management UI. Each value moves to true only with its
-// protected backend vertical slice, never merely because schema fields exist.
+// identity/governance management UI. The canonical user, local login, OIDC
+// login, role catalog, and protected user-management slices are available;
+// broader governance verticals remain gated until their resolvers are ready.
 func ImplementedIdentityFeatureCapabilities() IdentityFeatureCapabilities {
-	return IdentityFeatureCapabilities{}
+	return IdentityFeatureCapabilities{LocalUsers: true, OIDCLogin: true, Roles: true}
 }
 
 // LocalLoginConfig controls email/password sign-in. Account creation is
@@ -55,13 +56,14 @@ type LocalLoginConfig struct {
 // provider. Runtime discovery, PKCE transactions and token verification are
 // implemented separately; this contract purposefully stores no token material.
 type OIDCProviderConfig struct {
-	ID           string             `json:"id"`
-	DisplayName  string             `json:"display_name"`
-	IssuerURL    string             `json:"issuer_url"`
-	ClientID     *schemas.SecretVar `json:"client_id"`
-	ClientSecret *schemas.SecretVar `json:"client_secret"`
-	Scopes       []string           `json:"scopes,omitempty"`
-	IsEnabled    bool               `json:"is_enabled"`
+	ID                   string             `json:"id"`
+	DisplayName          string             `json:"display_name"`
+	IssuerURL            string             `json:"issuer_url"`
+	ClientID             *schemas.SecretVar `json:"client_id"`
+	ClientSecret         *schemas.SecretVar `json:"client_secret"`
+	Scopes               []string           `json:"scopes,omitempty"`
+	AllowJITProvisioning bool               `json:"allow_jit_provisioning"`
+	IsEnabled            bool               `json:"is_enabled"`
 }
 
 // UnmarshalJSON defaults a declared provider to enabled. This preserves the

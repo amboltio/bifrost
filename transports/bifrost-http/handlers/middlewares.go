@@ -1209,6 +1209,7 @@ func (m *AuthMiddleware) APIMiddleware() schemas.BifrostHTTPMiddleware {
 	}
 	return m.middleware(func(authConfig *configstore.AuthConfig, url string) bool {
 		if slices.Contains(systemWhitelistedRoutes, url) ||
+			isPublicOIDCRoute(url) ||
 			slices.IndexFunc(whitelistedPrefixes, func(prefix string) bool {
 				return strings.HasPrefix(url, prefix)
 			}) != -1 {
@@ -1227,6 +1228,20 @@ func (m *AuthMiddleware) APIMiddleware() schemas.BifrostHTTPMiddleware {
 		}
 		return false
 	}, false)
+}
+
+// isPublicOIDCRoute allows the login page to discover enabled providers and
+// complete an upstream browser redirect without a Bifrost session. The local
+// OIDC logout endpoint is deliberately excluded and remains authenticated.
+func isPublicOIDCRoute(path string) bool {
+	if path == "/api/auth/providers" {
+		return true
+	}
+	if !strings.HasPrefix(path, "/api/auth/oidc/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/api/auth/oidc/"), "/")
+	return len(parts) == 2 && parts[0] != "" && (parts[1] == "login" || parts[1] == "callback")
 }
 
 // middleware is the core authentication middleware that checks if the request should be authenticated or not.

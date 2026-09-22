@@ -22,10 +22,13 @@ import (
 )
 
 type oidcTestStore struct {
-	transaction *tables.TableOIDCTransaction
-	external    *tables.TableExternalIdentity
-	user        *tables.TableUser
-	touched     bool
+	transaction         *tables.TableOIDCTransaction
+	external            *tables.TableExternalIdentity
+	user                *tables.TableUser
+	touched             bool
+	provisionedUser     *tables.TableUser
+	provisionedExternal *tables.TableExternalIdentity
+	provisionedRole     string
 }
 
 func (s *oidcTestStore) CreateOIDCTransaction(_ context.Context, transaction *tables.TableOIDCTransaction) error {
@@ -60,6 +63,17 @@ func (s *oidcTestStore) GetUser(context.Context, string) (*tables.TableUser, err
 }
 func (s *oidcTestStore) GetUserByNormalizedEmail(context.Context, string) (*tables.TableUser, error) {
 	return nil, nil
+}
+
+func (s *oidcTestStore) ProvisionOIDCIdentity(_ context.Context, user *tables.TableUser, external *tables.TableExternalIdentity, roleID string) (*tables.TableUser, error) {
+	if user.ID == "" {
+		user.ID = "jit-user"
+	}
+	external.UserID = user.ID
+	s.provisionedUser = user
+	s.provisionedExternal = external
+	s.provisionedRole = roleID
+	return user, nil
 }
 
 func testOIDCProvider(issuer string) OIDCProvider {
@@ -170,6 +184,61 @@ func TestOIDCServiceCompleteRejectsNonceMismatch(t *testing.T) {
 	// The success-path test exercises the full signature and claim validation;
 	// this targeted check ensures the nonce remains bound to the transaction.
 	assert.NotEqual(t, testPKCEChallenge("nonce-value"), testPKCEChallenge("different-nonce"))
+}
+
+func TestOIDCServiceCompleteJITProvisioningUsesVerifiedEmail(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	var serverURL string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer": serverURL, "authorization_endpoint": serverURL + "/authorize",
+				"token_endpoint": serverURL + "/token", "jwks_uri": serverURL + "/jwks",
+			})
+		case "/jwks":
+			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+				"kty": "RSA", "kid": "test-key", "alg": "RS256",
+				"n": base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				"e": base64.RawURLEncoding.EncodeToString([]byte{1, 0, 1}),
+			}}})
+		case "/token":
+			token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+				"iss": serverURL, "sub": "jit-subject", "aud": "client-id", "exp": time.Now().Add(time.Hour).Unix(),
+				"iat": time.Now().Add(-time.Minute).Unix(), "nonce": "nonce-value",
+				"email": "jit@example.test", "email_verified": true, "name": "JIT User",
+			})
+			token.Header["kid"] = "test-key"
+			raw, signErr := token.SignedString(key)
+			require.NoError(t, signErr)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id_token": raw})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	now := time.Date(2026, time.September, 22, 10, 0, 0, 0, time.UTC)
+	state := "jit-state"
+	store := &oidcTestStore{transaction: &tables.TableOIDCTransaction{
+		StateHash:  fmt.Sprintf("%x", sha256.Sum256([]byte(state))),
+		NonceHash:  fmt.Sprintf("%x", sha256.Sum256([]byte("nonce-value"))),
+		ProviderID: "example", CodeVerifier: "verifier-value", ExpiresAt: now.Add(5 * time.Minute),
+	}}
+	provider := testOIDCProvider(server.URL)
+	provider.AllowJITProvisioning = true
+	service := NewOIDCService(store, server.Client(), func() time.Time { return now })
+
+	result, err := service.Complete(context.Background(), provider, "https://bifrost.example.test/api/auth/oidc/example/callback", state, "auth-code")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "jit-user", result.UserID)
+	assert.Equal(t, "viewer", store.provisionedRole)
+	assert.Equal(t, "jit@example.test", *store.provisionedUser.Email)
+	assert.Equal(t, "JIT User", store.provisionedUser.DisplayName)
+	assert.Equal(t, "jit-subject", store.provisionedExternal.Subject)
 }
 
 func testPKCEChallenge(verifier string) string {

@@ -38,12 +38,13 @@ var (
 // Secrets are copied into this value only for the bounded token exchange and
 // are never included in results, audit fields, or persistence rows.
 type OIDCProvider struct {
-	ID           string
-	DisplayName  string
-	IssuerURL    string
-	ClientID     string
-	ClientSecret string
-	Scopes       []string
+	ID                   string
+	DisplayName          string
+	IssuerURL            string
+	ClientID             string
+	ClientSecret         string
+	Scopes               []string
+	AllowJITProvisioning bool
 }
 
 // OIDCLoginStore is intentionally narrower than ConfigStore. It makes the
@@ -55,6 +56,10 @@ type OIDCLoginStore interface {
 	GetExternalIdentityByIssuerSubject(ctx context.Context, issuer, subject string) (*tables.TableExternalIdentity, error)
 	TouchExternalIdentity(ctx context.Context, id string, seenAt time.Time) error
 	GetUser(ctx context.Context, id string) (*tables.TableUser, error)
+}
+
+type OIDCProvisioningStore interface {
+	ProvisionOIDCIdentity(ctx context.Context, user *tables.TableUser, external *tables.TableExternalIdentity, roleID string) (*tables.TableUser, error)
 }
 
 type OIDCLoginStart struct {
@@ -206,12 +211,32 @@ func (s *OIDCService) Complete(ctx context.Context, provider OIDCProvider, callb
 	if err != nil {
 		return nil, err
 	}
-	if external == nil || !external.IsActive || external.ProviderID != provider.ID {
+	var user *tables.TableUser
+	if external == nil {
+		if !provider.AllowJITProvisioning || !claims.EmailVerified || strings.TrimSpace(claims.Email) == "" {
+			return nil, ErrOIDCIdentityNotLinked
+		}
+		provisioner, ok := s.store.(OIDCProvisioningStore)
+		if !ok {
+			return nil, ErrOIDCIdentityNotLinked
+		}
+		user = &tables.TableUser{Email: stringPointer(claims.Email), DisplayName: claims.Name, Status: tables.UserStatusActive, EmailVerified: true}
+		if strings.TrimSpace(user.DisplayName) == "" {
+			user.DisplayName = claims.Email
+		}
+		external = &tables.TableExternalIdentity{UserID: user.ID, ProviderID: provider.ID, Issuer: discovery.Issuer, Subject: claims.Subject, IsActive: true}
+		user, err = provisioner.ProvisionOIDCIdentity(ctx, user, external, "viewer")
+		if err != nil {
+			return nil, err
+		}
+	} else if !external.IsActive || external.ProviderID != provider.ID {
 		return nil, ErrOIDCIdentityNotLinked
 	}
-	user, err := s.store.GetUser(ctx, external.UserID)
-	if err != nil {
-		return nil, err
+	if user == nil {
+		user, err = s.store.GetUser(ctx, external.UserID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if user == nil || user.Status != tables.UserStatusActive {
 		return nil, ErrOIDCIdentityNotLinked
@@ -273,6 +298,7 @@ type oidcIDTokenClaims struct {
 	Nonce         string `json:"nonce"`
 	Email         string `json:"email,omitempty"`
 	EmailVerified bool   `json:"email_verified,omitempty"`
+	Name          string `json:"name,omitempty"`
 }
 
 func (s *OIDCService) verifyIDToken(ctx context.Context, raw string, discovery *oidcDiscovery, provider OIDCProvider) (*oidcIDTokenClaims, error) {
@@ -470,4 +496,8 @@ func digestString(value string) string {
 func pkceChallenge(verifier string) string {
 	digest := sha256.Sum256([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
