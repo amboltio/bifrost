@@ -55,6 +55,23 @@ type PricingOverrideQueryArgs = {
 	search?: string;
 };
 
+export interface BusinessUnit {
+	id: string;
+	name: string;
+	description: string;
+	customer_id?: string;
+	created_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface BusinessUnitsResponse {
+	business_units: BusinessUnit[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
 export const governanceApi = baseApi.injectEndpoints({
 	endpoints: (builder) => ({
 		// Virtual Keys
@@ -259,6 +276,36 @@ export const governanceApi = baseApi.injectEndpoints({
 					// Mutation failed
 				}
 			},
+		}),
+
+		// Business units
+		getBusinessUnits: builder.query<BusinessUnitsResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/business-units",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["BusinessUnits"],
+		}),
+
+		createBusinessUnit: builder.mutation<BusinessUnit, { name: string; description?: string; customer_id?: string }>({
+			query: (data) => ({ url: "/governance/business-units", method: "POST", body: data }),
+			invalidatesTags: ["BusinessUnits"],
+		}),
+
+		updateBusinessUnit: builder.mutation<BusinessUnit, { id: string; data: { name?: string; description?: string; customer_id?: string } }>(
+			{
+				query: ({ id, data }) => ({ url: `/governance/business-units/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+				invalidatesTags: ["BusinessUnits"],
+			},
+		),
+
+		deleteBusinessUnit: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/business-units/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["BusinessUnits"],
 		}),
 
 		// Customers
@@ -916,6 +963,12 @@ export const {
 	useCreateTeamMutation,
 	useUpdateTeamMutation,
 	useDeleteTeamMutation,
+
+	// Business units
+	useGetBusinessUnitsQuery,
+	useCreateBusinessUnitMutation,
+	useUpdateBusinessUnitMutation,
+	useDeleteBusinessUnitMutation,
 
 	// Customers
 	useGetCustomersQuery,
