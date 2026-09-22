@@ -103,6 +103,14 @@ func TestAuthConfigValidationRejectsUnsafeOrUnusableModes(t *testing.T) {
 			}`,
 			expectedError: "duplicate OIDC provider ID",
 		},
+		{
+			name: "invalid allowed email domain",
+			config: `{
+				"is_enabled": true,
+				"oidc_providers": [{"id": "entra", "display_name": "Entra", "issuer_url": "https://issuer.example", "client_id": "client", "client_secret": "secret", "allowed_email_domains": ["example.com/path"]}]
+			}`,
+			expectedError: "allowed_email_domains",
+		},
 	}
 
 	for _, tt := range tests {

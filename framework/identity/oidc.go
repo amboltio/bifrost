@@ -46,6 +46,7 @@ type OIDCProvider struct {
 	ClientSecret         string
 	Scopes               []string
 	AllowJITProvisioning bool
+	AllowedEmailDomains  []string
 }
 
 // OIDCLoginStore is intentionally narrower than ConfigStore. It makes the
@@ -248,6 +249,9 @@ func (s *OIDCService) Complete(ctx context.Context, provider OIDCProvider, callb
 	claims, err := s.verifyIDToken(ctx, idToken, discovery, provider)
 	if err != nil {
 		return nil, err
+	}
+	if !emailDomainAllowed(claims.Email, provider.AllowedEmailDomains) {
+		return nil, ErrOIDCIdentityNotLinked
 	}
 	nonceDigest := digestString(claims.Nonce)
 	if subtle.ConstantTimeCompare([]byte(nonceDigest), []byte(transaction.NonceHash)) != 1 {
@@ -573,4 +577,22 @@ func pkceChallenge(verifier string) string {
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+func emailDomainAllowed(email string, allowedDomains []string) bool {
+	if len(allowedDomains) == 0 {
+		return true
+	}
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(email)), "@")
+	if len(parts) != 2 || parts[1] == "" {
+		return false
+	}
+	domain := parts[1]
+	for _, allowed := range allowedDomains {
+		allowed = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(allowed)), "@")
+		if allowed != "" && domain == allowed {
+			return true
+		}
+	}
+	return false
 }

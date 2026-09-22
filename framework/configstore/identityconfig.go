@@ -63,6 +63,7 @@ type OIDCProviderConfig struct {
 	ClientSecret         *schemas.SecretVar `json:"client_secret"`
 	Scopes               []string           `json:"scopes,omitempty"`
 	AllowJITProvisioning bool               `json:"allow_jit_provisioning"`
+	AllowedEmailDomains  []string           `json:"allowed_email_domains,omitempty"`
 	IsEnabled            bool               `json:"is_enabled"`
 }
 
@@ -203,6 +204,17 @@ func (c AuthConfig) Validate() error {
 		}
 		if !hasConfiguredSecret(provider.ClientSecret) {
 			return fmt.Errorf("auth_config.oidc_providers[%q] requires client_secret", id)
+		}
+		seenDomains := make(map[string]struct{}, len(provider.AllowedEmailDomains))
+		for _, domain := range provider.AllowedEmailDomains {
+			domain = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), "@")
+			if domain == "" || strings.ContainsAny(domain, " /\\") || !strings.Contains(domain, ".") {
+				return fmt.Errorf("auth_config.oidc_providers[%q] has an invalid allowed_email_domains entry", id)
+			}
+			if _, exists := seenDomains[domain]; exists {
+				return fmt.Errorf("auth_config.oidc_providers[%q] has duplicate allowed_email_domains", id)
+			}
+			seenDomains[domain] = struct{}{}
 		}
 	}
 

@@ -276,6 +276,14 @@ func TestOIDCServiceCompleteJITProvisioningUsesVerifiedEmail(t *testing.T) {
 	assert.Equal(t, "jit-subject", store.provisionedExternal.Subject)
 }
 
+func TestOIDCEmailDomainPolicy(t *testing.T) {
+	assert.True(t, emailDomainAllowed("Alice@Example.COM", []string{"example.com"}))
+	assert.True(t, emailDomainAllowed("alice@example.com", []string{"@example.com"}))
+	assert.False(t, emailDomainAllowed("alice@other.test", []string{"example.com"}))
+	assert.False(t, emailDomainAllowed("not-an-email", []string{"example.com"}))
+	assert.True(t, emailDomainAllowed("alice@other.test", nil))
+}
+
 func testPKCEChallenge(verifier string) string {
 	digest := sha256.Sum256([]byte(verifier))
 	return strings.TrimRight(base64.RawURLEncoding.EncodeToString(digest[:]), "=")

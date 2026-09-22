@@ -4280,6 +4280,16 @@
                 "default": false,
                 "description": "Allow a verified OIDC email to create a new viewer user when no external identity is linked"
               },
+              "allowed_email_domains": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9.-]+$"
+                },
+                "uniqueItems": true,
+                "description": "Optional verified email domains accepted from this provider"
+              },
               "is_enabled": {
                 "type": "boolean",
                 "default": true,

@@ -74,10 +74,10 @@ func (h *OIDCHandler) claimsPreview(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	SendJSON(ctx, map[string]any{
-		"provider_id": provider.ID,
+		"provider_id":     provider.ID,
 		"required_claims": []string{"iss", "sub", "aud", "exp", "iat", "nonce"},
 		"identity_claims": []string{"email", "email_verified", "name"},
-		"mapping_mode": "standard_oidc_claims",
+		"mapping_mode":    "standard_oidc_claims",
 	})
 }
 
@@ -263,7 +263,7 @@ func toIdentityOIDCProvider(provider configstore.OIDCProviderConfig) identity.OI
 	if provider.ClientSecret != nil {
 		clientSecret = provider.ClientSecret.GetValue()
 	}
-	return identity.OIDCProvider{ID: provider.ID, DisplayName: provider.DisplayName, IssuerURL: provider.IssuerURL, ClientID: clientID, ClientSecret: clientSecret, Scopes: append([]string(nil), provider.Scopes...), AllowJITProvisioning: provider.AllowJITProvisioning}
+	return identity.OIDCProvider{ID: provider.ID, DisplayName: provider.DisplayName, IssuerURL: provider.IssuerURL, ClientID: clientID, ClientSecret: clientSecret, Scopes: append([]string(nil), provider.Scopes...), AllowJITProvisioning: provider.AllowJITProvisioning, AllowedEmailDomains: append([]string(nil), provider.AllowedEmailDomains...)}
 }
 
 func oidcCallbackURL(ctx *fasthttp.RequestCtx, providerID string) string {
