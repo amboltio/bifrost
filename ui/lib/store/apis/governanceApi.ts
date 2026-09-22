@@ -72,6 +72,30 @@ export interface BusinessUnitsResponse {
 	offset: number;
 }
 
+export interface ManagedRole {
+	id: string;
+	name: string;
+	display_name: string;
+	permissions: string[];
+	is_system: boolean;
+	is_immutable: boolean;
+}
+
+export interface ManagedUser {
+	id: string;
+	email?: string;
+	display_name: string;
+	status: string;
+	roles: ManagedRole[];
+}
+
+export interface ManagedUsersResponse {
+	users: ManagedUser[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
 export const governanceApi = baseApi.injectEndpoints({
 	endpoints: (builder) => ({
 		// Virtual Keys
@@ -306,6 +330,34 @@ export const governanceApi = baseApi.injectEndpoints({
 		deleteBusinessUnit: builder.mutation<void, string>({
 			query: (id) => ({ url: `/governance/business-units/${encodeURIComponent(id)}`, method: "DELETE" }),
 			invalidatesTags: ["BusinessUnits"],
+		}),
+
+		// Canonical users and roles
+		getManagedUsers: builder.query<ManagedUsersResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/users",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["Users"],
+		}),
+
+		getManagedRoles: builder.query<{ roles: ManagedRole[] }, void>({
+			query: () => "/governance/roles",
+			providesTags: ["Roles"],
+		}),
+
+		createManagedUser: builder.mutation<ManagedUser, { email: string; display_name: string; password: string; role_ids: string[] }>({
+			query: (data) => ({ url: "/governance/users", method: "POST", body: data }),
+			invalidatesTags: ["Users"],
+		}),
+
+		disableManagedUser: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/users/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["Users"],
 		}),
 
 		// Customers
@@ -969,6 +1021,12 @@ export const {
 	useCreateBusinessUnitMutation,
 	useUpdateBusinessUnitMutation,
 	useDeleteBusinessUnitMutation,
+
+	// Canonical users and roles
+	useGetManagedUsersQuery,
+	useGetManagedRolesQuery,
+	useCreateManagedUserMutation,
+	useDisableManagedUserMutation,
 
 	// Customers
 	useGetCustomersQuery,
