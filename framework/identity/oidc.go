@@ -72,6 +72,16 @@ type OIDCLoginStart struct {
 	ExpiresAt        time.Time
 }
 
+// OIDCProviderMetadata is the safe discovery result exposed to administrators
+// during provider verification. It contains endpoints only, never credentials
+// or ID-token material.
+type OIDCProviderMetadata struct {
+	Issuer                string `json:"issuer"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	JWKSURI               string `json:"jwks_uri"`
+}
+
 type OIDCLoginResult struct {
 	UserID       string
 	ProviderID   string
@@ -106,6 +116,23 @@ func NewOIDCService(store OIDCLoginStore, client *http.Client, now func() time.T
 
 func (s *OIDCService) Begin(ctx context.Context, provider OIDCProvider, callbackURL, redirectPath string) (*OIDCLoginStart, error) {
 	return s.begin(ctx, provider, callbackURL, redirectPath, "")
+}
+
+func (s *OIDCService) VerifyProvider(ctx context.Context, provider OIDCProvider) (*OIDCProviderMetadata, error) {
+	if s == nil || s.store == nil {
+		return nil, ErrOIDCProviderUnavailable
+	}
+	if err := validateOIDCProvider(provider); err != nil {
+		return nil, err
+	}
+	discovery, err := s.discover(ctx, provider.IssuerURL)
+	if err != nil {
+		return nil, err
+	}
+	return &OIDCProviderMetadata{
+		Issuer: discovery.Issuer, AuthorizationEndpoint: discovery.AuthorizationEndpoint,
+		TokenEndpoint: discovery.TokenEndpoint, JWKSURI: discovery.JWKSURI,
+	}, nil
 }
 
 // BeginLink starts the same protected OIDC transaction but binds the verified

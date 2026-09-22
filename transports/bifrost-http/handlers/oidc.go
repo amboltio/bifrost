@@ -36,10 +36,49 @@ func NewOIDCHandler(store configstore.ConfigStore) *OIDCHandler {
 
 func (h *OIDCHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
 	r.GET("/api/auth/providers", lib.ChainMiddlewares(h.providers, middlewares...))
+	r.POST("/api/auth/providers/{provider}/verify", lib.ChainMiddlewares(h.verifyProvider, middlewares...))
+	r.GET("/api/auth/providers/{provider}/claims-preview", lib.ChainMiddlewares(h.claimsPreview, middlewares...))
 	r.GET("/api/auth/oidc/{provider}/login", lib.ChainMiddlewares(h.login, middlewares...))
 	r.GET("/api/auth/oidc/{provider}/link", lib.ChainMiddlewares(h.link, middlewares...))
 	r.GET("/api/auth/oidc/{provider}/callback", lib.ChainMiddlewares(h.callback, middlewares...))
 	r.POST("/api/auth/oidc/logout", lib.ChainMiddlewares(h.logout, middlewares...))
+}
+
+func (h *OIDCHandler) verifyProvider(ctx *fasthttp.RequestCtx) {
+	_, provider, err := h.provider(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusNotFound, "OIDC provider not found")
+		return
+	}
+	oidcStore, ok := h.configStore.(identity.OIDCLoginStore)
+	if !ok {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "OIDC authentication is unavailable")
+		return
+	}
+	metadata, err := identity.NewOIDCService(oidcStore, nil, nil).VerifyProvider(ctx, toIdentityOIDCProvider(provider))
+	if err != nil {
+		if errors.Is(err, identity.ErrOIDCProviderUnavailable) {
+			SendError(ctx, fasthttp.StatusBadGateway, "OIDC provider is unavailable")
+			return
+		}
+		SendError(ctx, fasthttp.StatusBadRequest, "OIDC provider configuration is invalid")
+		return
+	}
+	SendJSON(ctx, metadata)
+}
+
+func (h *OIDCHandler) claimsPreview(ctx *fasthttp.RequestCtx) {
+	_, provider, err := h.provider(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusNotFound, "OIDC provider not found")
+		return
+	}
+	SendJSON(ctx, map[string]any{
+		"provider_id": provider.ID,
+		"required_claims": []string{"iss", "sub", "aud", "exp", "iat", "nonce"},
+		"identity_claims": []string{"email", "email_verified", "name"},
+		"mapping_mode": "standard_oidc_claims",
+	})
 }
 
 func (h *OIDCHandler) providers(ctx *fasthttp.RequestCtx) {

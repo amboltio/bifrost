@@ -108,6 +108,18 @@ func isCanonicalSelfServiceRoute(method, path string) bool {
 }
 
 func managementRoutePermission(method, path string) (authorization.Permission, bool) {
+	if strings.HasPrefix(path, "/api/auth/providers/") {
+		suffix := strings.TrimPrefix(path, "/api/auth/providers/")
+		parts := strings.Split(suffix, "/")
+		if len(parts) == 2 && parts[0] != "" {
+			switch {
+			case parts[1] == "verify" && method == fasthttp.MethodPost:
+				return authorization.PermissionUsersUpdate, true
+			case parts[1] == "claims-preview" && method == fasthttp.MethodGet:
+				return authorization.PermissionUsersRead, true
+			}
+		}
+	}
 	if path == "/api/governance/roles" && method == fasthttp.MethodGet {
 		return authorization.PermissionUsersRead, true
 	}
