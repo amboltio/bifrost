@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -66,21 +67,22 @@ func (h *AccessProfilesHandler) RegisterRoutes(r *router.Router, middlewares ...
 }
 
 type accessProfileResponse struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	Description       string   `json:"description"`
-	Enabled           bool     `json:"enabled"`
-	AllowAllProviders bool     `json:"allow_all_providers"`
-	AllowedProviders  []string `json:"allowed_providers"`
-	AllowedModels     []string `json:"allowed_models"`
-	AllowedMCPTools   []string `json:"allowed_mcp_tools"`
-	CreatedByUserID   *string  `json:"created_by_user_id,omitempty"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
+	ID                string                               `json:"id"`
+	Name              string                               `json:"name"`
+	Description       string                               `json:"description"`
+	Enabled           bool                                 `json:"enabled"`
+	AllowAllProviders bool                                 `json:"allow_all_providers"`
+	AllowedProviders  []string                             `json:"allowed_providers"`
+	AllowedModels     []string                             `json:"allowed_models"`
+	ProviderConfigs   []tables.AccessProfileProviderConfig `json:"provider_configs"`
+	AllowedMCPTools   []string                             `json:"allowed_mcp_tools"`
+	CreatedByUserID   *string                              `json:"created_by_user_id,omitempty"`
+	CreatedAt         string                               `json:"created_at"`
+	UpdatedAt         string                               `json:"updated_at"`
 }
 
 func newAccessProfileResponse(profile tables.TableAccessProfile) accessProfileResponse {
-	return accessProfileResponse{ID: profile.ID, Name: profile.Name, Description: profile.Description, Enabled: profile.Enabled, AllowAllProviders: profile.AllowAllProviders, AllowedProviders: profile.AllowedProviders, AllowedModels: profile.AllowedModels, AllowedMCPTools: profile.AllowedMCPTools, CreatedByUserID: profile.CreatedByUserID, CreatedAt: profile.CreatedAt.UTC().Format("2006-01-02T15:04:05.999Z07:00"), UpdatedAt: profile.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999Z07:00")}
+	return accessProfileResponse{ID: profile.ID, Name: profile.Name, Description: profile.Description, Enabled: profile.Enabled, AllowAllProviders: profile.AllowAllProviders, AllowedProviders: profile.AllowedProviders, AllowedModels: profile.AllowedModels, ProviderConfigs: profile.ProviderConfigs, AllowedMCPTools: profile.AllowedMCPTools, CreatedByUserID: profile.CreatedByUserID, CreatedAt: profile.CreatedAt.UTC().Format("2006-01-02T15:04:05.999Z07:00"), UpdatedAt: profile.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999Z07:00")}
 }
 
 func (h *AccessProfilesHandler) list(ctx *fasthttp.RequestCtx) {
@@ -114,14 +116,22 @@ func (h *AccessProfilesHandler) get(ctx *fasthttp.RequestCtx) {
 }
 
 type accessProfileRequest struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	Description       string   `json:"description"`
-	Enabled           *bool    `json:"enabled"`
-	AllowAllProviders *bool    `json:"allow_all_providers"`
-	AllowedProviders  []string `json:"allowed_providers"`
-	AllowedModels     []string `json:"allowed_models"`
-	AllowedMCPTools   []string `json:"allowed_mcp_tools"`
+	ID                string                                `json:"id"`
+	Name              string                                `json:"name"`
+	Description       string                                `json:"description"`
+	Enabled           *bool                                 `json:"enabled"`
+	AllowAllProviders *bool                                 `json:"allow_all_providers"`
+	AllowedProviders  []string                              `json:"allowed_providers"`
+	AllowedModels     []string                              `json:"allowed_models"`
+	ProviderConfigs   *[]tables.AccessProfileProviderConfig `json:"provider_configs"`
+	AllowedMCPTools   []string                              `json:"allowed_mcp_tools"`
+}
+
+func (r *accessProfileRequest) UnmarshalJSON(data []byte) error {
+	type request accessProfileRequest
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode((*request)(r))
 }
 
 func (h *AccessProfilesHandler) create(ctx *fasthttp.RequestCtx) {
@@ -142,7 +152,16 @@ func (h *AccessProfilesHandler) create(ctx *fasthttp.RequestCtx) {
 	if request.AllowAllProviders != nil {
 		allowAllProviders = *request.AllowAllProviders
 	}
-	profile := &tables.TableAccessProfile{ID: strings.TrimSpace(request.ID), Name: strings.TrimSpace(request.Name), Description: strings.TrimSpace(request.Description), Enabled: enabled, AllowAllProviders: allowAllProviders, AllowedProviders: request.AllowedProviders, AllowedModels: request.AllowedModels, AllowedMCPTools: request.AllowedMCPTools, CreatedByUserID: canonicalActorUserID(ctx)}
+	providerConfigs := []tables.AccessProfileProviderConfig(nil)
+	if request.ProviderConfigs != nil {
+		providerConfigs = *request.ProviderConfigs
+	}
+	providerConfigs, err := configstore.NormalizeAccessProfileProviderConfigs(providerConfigs)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid provider configuration")
+		return
+	}
+	profile := &tables.TableAccessProfile{ID: strings.TrimSpace(request.ID), Name: strings.TrimSpace(request.Name), Description: strings.TrimSpace(request.Description), Enabled: enabled, AllowAllProviders: allowAllProviders, AllowedProviders: request.AllowedProviders, AllowedModels: request.AllowedModels, ProviderConfigs: providerConfigs, AllowedMCPTools: request.AllowedMCPTools, CreatedByUserID: canonicalActorUserID(ctx)}
 	if profile.ID == "" {
 		profile.ID = uuid.NewString()
 	}
@@ -184,6 +203,7 @@ func (h *AccessProfilesHandler) update(ctx *fasthttp.RequestCtx) {
 		enabled = *request.Enabled
 	}
 	providers, models, mcpTools := current.AllowedProviders, current.AllowedModels, current.AllowedMCPTools
+	providerConfigs := current.ProviderConfigs
 	allowAllProviders := current.AllowAllProviders
 	if request.AllowAllProviders != nil {
 		allowAllProviders = *request.AllowAllProviders
@@ -194,11 +214,19 @@ func (h *AccessProfilesHandler) update(ctx *fasthttp.RequestCtx) {
 	if request.AllowedModels != nil {
 		models = request.AllowedModels
 	}
+	if request.ProviderConfigs != nil {
+		providerConfigs = *request.ProviderConfigs
+	}
+	providerConfigs, err = configstore.NormalizeAccessProfileProviderConfigs(providerConfigs)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid provider configuration")
+		return
+	}
 	if request.AllowedMCPTools != nil {
 		mcpTools = request.AllowedMCPTools
 	}
 	audit, outbox := h.audit(ctx, current.ID, "governance.access_profile.updated")
-	updated, err := h.store.UpdateAccessProfileAudited(ctx, current.ID, name, description, enabled, allowAllProviders, providers, models, mcpTools, audit, outbox)
+	updated, err := h.store.UpdateAccessProfileAudited(ctx, current.ID, name, description, enabled, allowAllProviders, providers, models, providerConfigs, mcpTools, audit, outbox)
 	if h.writeError(ctx, err) {
 		return
 	}

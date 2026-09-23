@@ -26,7 +26,7 @@ type AccessProfileManagementStore interface {
 	ListAccessProfiles(ctx context.Context, params AccessProfileQueryParams) ([]tables.TableAccessProfile, int64, error)
 	GetAccessProfile(ctx context.Context, id string) (*tables.TableAccessProfile, error)
 	CreateAccessProfileAudited(ctx context.Context, profile *tables.TableAccessProfile, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableAccessProfile, error)
-	UpdateAccessProfileAudited(ctx context.Context, id, name, description string, enabled, allowAllProviders bool, providers, models, mcpTools []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableAccessProfile, error)
+	UpdateAccessProfileAudited(ctx context.Context, id, name, description string, enabled, allowAllProviders bool, providers, models []string, providerConfigs []tables.AccessProfileProviderConfig, mcpTools []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableAccessProfile, error)
 	DeleteAccessProfileAudited(ctx context.Context, id string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
 	ListUserAccessProfileAssignments(ctx context.Context, userID string) ([]tables.TableUserAccessProfileAssignment, error)
 	ListRoleAccessProfileAssignments(ctx context.Context, roleID string) ([]tables.TableRoleAccessProfileAssignment, error)
@@ -82,8 +82,13 @@ func (s *RDBConfigStore) CreateAccessProfileAudited(ctx context.Context, profile
 	profile.AllowedProviders = normalizeStringList(profile.AllowedProviders)
 	profile.AllowedModels = normalizeStringList(profile.AllowedModels)
 	profile.AllowedMCPTools = normalizeStringList(profile.AllowedMCPTools)
+	providerConfigs, err := NormalizeAccessProfileProviderConfigs(profile.ProviderConfigs)
+	if err != nil {
+		return nil, err
+	}
+	profile.ProviderConfigs = providerConfigs
 	returnProfile := profile
-	err := s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+	err = s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
 		if err := tx.WithContext(ctx).Create(returnProfile).Error; err != nil {
 			return s.parseGormError(err)
 		}
@@ -95,17 +100,25 @@ func (s *RDBConfigStore) CreateAccessProfileAudited(ctx context.Context, profile
 	return returnProfile, nil
 }
 
-func (s *RDBConfigStore) UpdateAccessProfileAudited(ctx context.Context, id, name, description string, enabled, allowAllProviders bool, providers, models, mcpTools []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableAccessProfile, error) {
+func (s *RDBConfigStore) UpdateAccessProfileAudited(ctx context.Context, id, name, description string, enabled, allowAllProviders bool, providers, models []string, providerConfigs []tables.AccessProfileProviderConfig, mcpTools []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableAccessProfile, error) {
 	id, name, description = strings.TrimSpace(id), strings.TrimSpace(name), strings.TrimSpace(description)
 	if id == "" || name == "" {
 		return nil, ErrNotFound
 	}
 	providers, models, mcpTools = normalizeStringList(providers), normalizeStringList(models), normalizeStringList(mcpTools)
+	providerConfigs, err := NormalizeAccessProfileProviderConfigs(providerConfigs)
+	if err != nil {
+		return nil, err
+	}
 	providersJSON, err := json.Marshal(providers)
 	if err != nil {
 		return nil, err
 	}
 	modelsJSON, err := json.Marshal(models)
+	if err != nil {
+		return nil, err
+	}
+	providerConfigsJSON, err := json.Marshal(providerConfigs)
 	if err != nil {
 		return nil, err
 	}
@@ -123,19 +136,41 @@ func (s *RDBConfigStore) UpdateAccessProfileAudited(ctx context.Context, id, nam
 		}
 		if err := tx.WithContext(ctx).Model(&tables.TableAccessProfile{}).Where("id = ?", id).Updates(map[string]any{
 			"name": name, "description": description, "enabled": enabled, "allow_all_providers": allowAllProviders,
-			"allowed_providers": string(providersJSON), "allowed_models": string(modelsJSON), "allowed_mcp_tools": string(mcpToolsJSON),
+			"allowed_providers": string(providersJSON), "allowed_models": string(modelsJSON), "provider_configs": string(providerConfigsJSON), "allowed_mcp_tools": string(mcpToolsJSON),
 			"updated_at": time.Now().UTC(),
 		}).Error; err != nil {
 			return s.parseGormError(err)
 		}
 		profile.Name, profile.Description, profile.Enabled, profile.AllowAllProviders = name, description, enabled, allowAllProviders
-		profile.AllowedProviders, profile.AllowedModels, profile.AllowedMCPTools = providers, models, mcpTools
+		profile.AllowedProviders, profile.AllowedModels, profile.ProviderConfigs, profile.AllowedMCPTools = providers, models, providerConfigs, mcpTools
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &profile, nil
+}
+
+// NormalizeAccessProfileProviderConfigs validates and canonicalizes provider-specific policy rows.
+func NormalizeAccessProfileProviderConfigs(configs []tables.AccessProfileProviderConfig) ([]tables.AccessProfileProviderConfig, error) {
+	result := make([]tables.AccessProfileProviderConfig, 0, len(configs))
+	seen := make(map[string]struct{}, len(configs))
+	for _, config := range configs {
+		config.ProviderName = strings.ToLower(strings.TrimSpace(config.ProviderName))
+		if config.ProviderName == "" {
+			return nil, fmt.Errorf("provider name is required for access profile provider config")
+		}
+		canonicalName := strings.ToLower(config.ProviderName)
+		if _, exists := seen[canonicalName]; exists {
+			return nil, fmt.Errorf("duplicate access profile provider config for %q", config.ProviderName)
+		}
+		seen[canonicalName] = struct{}{}
+		config.AllowedModels = normalizeStringList(config.AllowedModels)
+		config.BlacklistedModels = normalizeStringList(config.BlacklistedModels)
+		config.KeyIDs = normalizeStringList(config.KeyIDs)
+		result = append(result, config)
+	}
+	return result, nil
 }
 
 func (s *RDBConfigStore) DeleteAccessProfileAudited(ctx context.Context, id string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {

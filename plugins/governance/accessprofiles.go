@@ -111,24 +111,44 @@ func (gs *LocalGovernanceStore) resolveUserAccessProfilePermits(ctx *schemas.Bif
 }
 
 func accessProfilePermit(profile *configstoreTables.TableAccessProfile, clientNames map[string]string) schemas.Permit {
-	models := normalizedPermitList(profile.AllowedModels)
-	if len(models) == 0 {
-		models = schemas.WhiteList{"*"}
+	legacyModels := normalizedPermitList(profile.AllowedModels)
+	if len(legacyModels) == 0 {
+		legacyModels = schemas.WhiteList{"*"}
 	}
-	providers := make([]schemas.ProviderPermit, 0, len(profile.AllowedProviders))
-	seenProviders := make(map[string]struct{}, len(profile.AllowedProviders))
+	providers := make([]schemas.ProviderPermit, 0, len(profile.AllowedProviders)+len(profile.ProviderConfigs))
+	configuredProviders := make(map[string]struct{}, len(profile.ProviderConfigs))
+	for _, config := range profile.ProviderConfigs {
+		provider := strings.TrimSpace(config.ProviderName)
+		if provider == "" {
+			continue
+		}
+		canonicalProvider := strings.ToLower(provider)
+		if _, duplicate := configuredProviders[canonicalProvider]; duplicate {
+			continue
+		}
+		configuredProviders[canonicalProvider] = struct{}{}
+		models := normalizedPermitList(config.AllowedModels)
+		if config.AllModelsAllowed {
+			models = schemas.WhiteList{"*"}
+		}
+		providers = append(providers, schemas.ProviderPermit{
+			Provider:          provider,
+			AllowedModels:     models,
+			BlacklistedModels: schemas.BlackList(normalizedPermitList(config.BlacklistedModels)),
+			KeyIDs:            normalizedPermitList(config.KeyIDs),
+		})
+	}
 	for _, provider := range profile.AllowedProviders {
 		provider = strings.TrimSpace(provider)
 		if provider == "" {
 			continue
 		}
-		if _, duplicate := seenProviders[provider]; duplicate {
+		if _, configured := configuredProviders[strings.ToLower(provider)]; configured {
 			continue
 		}
-		seenProviders[provider] = struct{}{}
 		providers = append(providers, schemas.ProviderPermit{
 			Provider:      provider,
-			AllowedModels: models,
+			AllowedModels: legacyModels,
 			KeyIDs:        schemas.WhiteList{"*"},
 		})
 	}

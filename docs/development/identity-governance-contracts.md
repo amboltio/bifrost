@@ -78,9 +78,15 @@ reconciliation is introduced only with the sourced-membership implementation.
 
 The existing `governance.roles`, `governance.access_profiles` and
 `governance.projects` schema blocks keep their published wire names and ID
-types. They are not made available through an OSS management API merely because
-they appear in the schema. The later persistence work maps them to canonical
-users and protected grants instead of importing Enterprise-only behavior.
+types. Access-profile CRUD plus direct user and role assignments are available
+through the OSS governance API. The current profile runtime supports additive
+provider/model/MCP-tool grants and provider-specific model allowlists,
+model-denylists and exact provider key IDs. An empty provider key-ID list
+denies every key for that provider. Legacy profiles without `provider_configs`
+keep the prior all-keys behavior for listed providers. Schema-defined profile
+budgets, rate limits, model budget groups, virtual-MCP associations and
+mandatory caps are not applied by this partial runtime and must not be treated
+as active policy.
 
 ## Credential matrix
 
@@ -169,6 +175,17 @@ hashes, reset tokens, raw sessions or OIDC tokens.
 `POST /api/session/login` retains the legacy `{ "username", "password" }`
 body until canonical-user login is delivered. A wrong credential returns `401`
 with the same generic message for unknown users and wrong passwords.
+
+### Access-profile provider rules
+
+`POST /api/governance/access-profiles` and
+`PUT /api/governance/access-profiles/{id}` accept `provider_configs` rows with
+`provider_name`, `all_models_allowed`, `allowed_models`,
+`blacklisted_models` and `key_ids`. Provider names are stored lower-case;
+duplicate provider rows are rejected. The UI submits key IDs exactly as shown
+in provider configuration. Unsupported fields such as profile budgets and rate
+limits, provider weights and model budget groups are rejected instead of being
+silently discarded.
 
 ### Future canonical-user operations
 

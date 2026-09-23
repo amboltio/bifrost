@@ -8,6 +8,7 @@ import {
 	useGetAccessProfilesQuery,
 	useUpdateAccessProfileMutation,
 } from "@/lib/store";
+import type { AccessProfileProviderConfig } from "@/lib/store/apis/governanceApi";
 import { KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -31,6 +32,7 @@ export default function AccessProfilesIndexView() {
 	const [providers, setProviders] = useState("");
 	const [models, setModels] = useState("");
 	const [mcpTools, setMcpTools] = useState("");
+	const [providerConfigs, setProviderConfigs] = useState<AccessProfileProviderConfig[]>([]);
 	const selected = data?.access_profiles.find((profile) => profile.id === selectedID);
 
 	useEffect(() => {
@@ -42,6 +44,14 @@ export default function AccessProfilesIndexView() {
 		setProviders(selected.allowed_providers.join(", "));
 		setModels(selected.allowed_models.join(", "));
 		setMcpTools(selected.allowed_mcp_tools.join(", "));
+		setProviderConfigs(
+			(selected.provider_configs ?? []).map((config) => ({
+				...config,
+				allowed_models: config.allowed_models ?? [],
+				blacklisted_models: config.blacklisted_models ?? [],
+				key_ids: config.key_ids ?? [],
+			})),
+		);
 	}, [selected]);
 
 	const reset = () => {
@@ -53,6 +63,7 @@ export default function AccessProfilesIndexView() {
 		setProviders("");
 		setModels("");
 		setMcpTools("");
+		setProviderConfigs([]);
 	};
 
 	const submit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -64,6 +75,7 @@ export default function AccessProfilesIndexView() {
 			allow_all_providers: allowAllProviders,
 			allowed_providers: splitValues(providers),
 			allowed_models: splitValues(models),
+			provider_configs: providerConfigs,
 			allowed_mcp_tools: splitValues(mcpTools),
 		};
 		try {
@@ -201,6 +213,95 @@ export default function AccessProfilesIndexView() {
 							value={models}
 							onChange={(event) => setModels(event.target.value)}
 						/>
+					</div>
+					<div className="space-y-3 border-t pt-4">
+						<div className="flex items-center justify-between gap-2">
+							<div>
+								<h3 className="text-sm font-medium">Provider-specific rules</h3>
+								<p className="text-muted-foreground mt-1 text-xs">An empty key ID list denies every key for that provider.</p>
+							</div>
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								onClick={() =>
+									setProviderConfigs((current) => [
+										...current,
+										{
+											provider_name: "",
+											all_models_allowed: false,
+											allowed_models: [],
+											blacklisted_models: [],
+											key_ids: [],
+										},
+									])
+								}
+								dataTestId="access-profile-provider-config-add"
+							>
+								<Plus className="h-4 w-4" />
+								Add rule
+							</Button>
+						</div>
+						{providerConfigs.map((config, index) => {
+							const updateConfig = (patch: Partial<AccessProfileProviderConfig>) =>
+								setProviderConfigs((current) =>
+									current.map((entry, entryIndex) => (entryIndex === index ? { ...entry, ...patch } : entry)),
+								);
+							return (
+								<div key={`${config.provider_name}-${index}`} className="border-border space-y-3 rounded-sm border p-3">
+									<div className="flex items-center gap-2">
+										<Input
+											aria-label={`Provider name ${index + 1}`}
+											placeholder="openai"
+											value={config.provider_name}
+											onChange={(event) => updateConfig({ provider_name: event.target.value })}
+											data-testid={`access-profile-provider-name-${index}`}
+										/>
+										<Button
+											type="button"
+											variant="ghost"
+											size="icon"
+											onClick={() => setProviderConfigs((current) => current.filter((_, entryIndex) => entryIndex !== index))}
+											aria-label={`Remove ${config.provider_name || `provider rule ${index + 1}`}`}
+											dataTestId={`access-profile-provider-remove-${index}`}
+										>
+											<Trash2 className="h-4 w-4" />
+										</Button>
+									</div>
+									<label className="flex items-center gap-2 text-xs">
+										<input
+											type="checkbox"
+											checked={config.all_models_allowed}
+											onChange={(event) => updateConfig({ all_models_allowed: event.target.checked })}
+											data-testid={`access-profile-provider-all-models-${index}`}
+										/>
+										Allow all models for this provider
+									</label>
+									<Input
+										aria-label={`Allowed models for ${config.provider_name || `rule ${index + 1}`}`}
+										placeholder="Allowed models: gpt-4.1, gpt-4o"
+										value={config.allowed_models.join(", ")}
+										disabled={config.all_models_allowed}
+										onChange={(event) => updateConfig({ allowed_models: splitValues(event.target.value) })}
+										data-testid={`access-profile-provider-allowed-models-${index}`}
+									/>
+									<Input
+										aria-label={`Blocked models for ${config.provider_name || `rule ${index + 1}`}`}
+										placeholder="Blocked models: legacy-model"
+										value={config.blacklisted_models.join(", ")}
+										onChange={(event) => updateConfig({ blacklisted_models: splitValues(event.target.value) })}
+										data-testid={`access-profile-provider-blocked-models-${index}`}
+									/>
+									<Input
+										aria-label={`Allowed provider key IDs for ${config.provider_name || `rule ${index + 1}`}`}
+										placeholder="Key IDs: key-123, key-456"
+										value={config.key_ids.join(", ")}
+										onChange={(event) => updateConfig({ key_ids: splitValues(event.target.value) })}
+										data-testid={`access-profile-provider-key-ids-${index}`}
+									/>
+								</div>
+							);
+						})}
 					</div>
 					<div className="space-y-2">
 						<label htmlFor="access-profile-mcp-tools" className="text-sm font-medium">

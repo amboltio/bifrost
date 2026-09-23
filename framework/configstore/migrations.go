@@ -506,6 +506,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_identity_business_units"}, run: migrationAddIdentityBusinessUnits},
 	{IDs: []string{"add_identity_access_profiles"}, run: migrationAddIdentityAccessProfiles},
 	{IDs: []string{"add_identity_role_access_profiles"}, run: migrationAddIdentityRoleAccessProfiles},
+	{IDs: []string{"add_identity_access_profile_provider_configs"}, run: migrationAddIdentityAccessProfileProviderConfigs},
 	{IDs: []string{"add_identity_projects"}, run: migrationAddIdentityProjects},
 	{IDs: []string{"add_identity_user_virtual_key_assignments"}, run: migrationAddIdentityUserVirtualKeyAssignments},
 }
@@ -895,6 +896,33 @@ func migrationAddIdentityRoleAccessProfiles(ctx context.Context, db *gorm.DB, lo
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: removing role access-profile assignments would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+func migrationAddIdentityAccessProfileProviderConfigs(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_access_profile_provider_configs"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			model := &tables.TableAccessProfile{}
+			if !tx.Migrator().HasTable(model) {
+				return tx.Migrator().CreateTable(model)
+			}
+			if !tx.Migrator().HasColumn(model, "ProviderConfigs") {
+				return tx.Migrator().AddColumn(model, "ProviderConfigs")
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing provider key restrictions could widen access", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {

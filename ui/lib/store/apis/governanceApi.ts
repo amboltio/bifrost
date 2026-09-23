@@ -72,6 +72,14 @@ export interface BusinessUnitsResponse {
 	offset: number;
 }
 
+export interface AccessProfileProviderConfig {
+	provider_name: string;
+	all_models_allowed: boolean;
+	allowed_models: string[];
+	blacklisted_models: string[];
+	key_ids: string[];
+}
+
 export interface AccessProfile {
 	id: string;
 	name: string;
@@ -80,6 +88,7 @@ export interface AccessProfile {
 	allow_all_providers: boolean;
 	allowed_providers: string[];
 	allowed_models: string[];
+	provider_configs: AccessProfileProviderConfig[];
 	allowed_mcp_tools: string[];
 	created_by_user_id?: string;
 	created_at: string;

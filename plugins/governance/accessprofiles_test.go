@@ -124,6 +124,31 @@ func TestResolvePermitsIncludesRoleDefaultProfilesAndDeduplicatesSources(t *test
 	assert.True(t, access.IsProviderAllowed("anthropic"))
 }
 
+func TestAccessProfileProviderConfigsRestrictModelsAndKeys(t *testing.T) {
+	profile := &configstoreTables.TableAccessProfile{
+		ID:               "engineering",
+		Name:             "Engineering",
+		Enabled:          true,
+		AllowedProviders: []string{"openai", "anthropic"},
+		ProviderConfigs: []configstoreTables.AccessProfileProviderConfig{
+			{ProviderName: "openai", AllowedModels: []string{"gpt-4o"}, BlacklistedModels: []string{"gpt-4o-mini"}, KeyIDs: []string{"key-openai"}},
+			{ProviderName: "anthropic", AllModelsAllowed: true},
+		},
+	}
+	access := grant.NewAccess([]schemas.Permit{accessProfilePermit(profile, nil)}, nil, "", nil)
+
+	assert.True(t, access.IsModelAllowed("openai", "gpt-4o"))
+	assert.False(t, access.IsModelAllowed("openai", "gpt-4.1"), "provider config model lists are restrictive")
+	assert.False(t, access.IsModelAllowed("openai", "gpt-4o-mini"), "blacklists take precedence over the allowlist")
+	keyIDs, restricted := access.KeysForModel("openai", "gpt-4o")
+	assert.True(t, restricted)
+	assert.Equal(t, []string{"key-openai"}, keyIDs)
+	keyIDs, restricted = access.KeysForModel("anthropic", "claude-sonnet")
+	assert.True(t, restricted, "an empty provider key allowlist denies every key")
+	assert.Empty(t, keyIDs)
+	assert.False(t, access.IsModelAllowed("bedrock", "claude-sonnet"))
+}
+
 func TestResolvePermitsDoesNotInferProfileUserFromVirtualKey(t *testing.T) {
 	profileStore := &fakeAccessProfileStore{
 		assignments: []configstoreTables.TableUserAccessProfileAssignment{{ID: "a1", UserID: "user-1", AccessProfileID: "engineering"}},
