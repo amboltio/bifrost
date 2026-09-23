@@ -76,6 +76,8 @@ type LocalGovernanceStore struct {
 	configStore configstore.ConfigStore
 	// projectStore resolves request-time project headers against durable project and membership rows.
 	projectStore configstore.ProjectManagementStore
+	// profileStore resolves durable user-to-profile assignments before inference access is settled.
+	profileStore configstore.AccessProfileManagementStore
 
 	// Model catalog for cross-provider model matching (optional)
 	modelCatalog *modelcatalog.ModelCatalog
@@ -308,6 +310,7 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 		inMemoryStore:                  inMemoryStore,
 		configStore:                    configStore,
 		projectStore:                   projectManagementStore(configStore),
+		profileStore:                   accessProfileManagementStore(configStore),
 		logger:                         logger,
 		modelCatalog:                   modelCatalog,
 		LastDBUsagesBudgets:            make(map[string]float64),
@@ -1278,6 +1281,7 @@ func (gs *LocalGovernanceStore) ResolvePermits(ctx *schemas.BifrostContext) ([]s
 		StampVirtualKeyScope(ctx, virtualKey)
 		bases = []schemas.Permit{gs.permitForVirtualKey(ctx, virtualKey)}
 	}
+	bases = append(bases, gs.resolveUserAccessProfilePermits(ctx)...)
 	projectPermit, mode := gs.resolveProjectPermit(ctx)
 	return bases, projectPermit, mode
 }
