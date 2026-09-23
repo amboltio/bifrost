@@ -310,6 +310,9 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		}
 		return "", false
 	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "analytics" && method == fasthttp.MethodGet {
+		return authorization.PermissionUserAnalyticsRead, true
+	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "effective-access" && method == fasthttp.MethodGet {
 		return authorization.PermissionAccessProfilesRead, true
 	}

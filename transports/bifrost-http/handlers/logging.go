@@ -395,6 +395,7 @@ func (h *LoggingHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 	r.GET("/api/logs/filterdata", lib.ChainMiddlewares(h.withHiddenRequestTypes(h.getAvailableFilterData), middlewares...))
 	r.GET("/api/logs/rankings", lib.ChainMiddlewares(h.withHiddenRequestTypes(h.getModelRankings), middlewares...))
 	r.GET("/api/logs/rankings/by-dimension", lib.ChainMiddlewares(h.withHiddenRequestTypes(h.getDimensionRankings), middlewares...))
+	r.GET("/api/governance/users/{id}/analytics", lib.ChainMiddlewares(h.withHiddenRequestTypes(h.getUserAnalytics), middlewares...))
 	// Consolidated, public-facing dashboard payload (all of the above in one call)
 	r.GET("/api/logs/dashboard", lib.ChainMiddlewares(h.withHiddenRequestTypes(h.getDashboard), middlewares...))
 	r.DELETE("/api/logs", lib.ChainMiddlewares(h.deleteLogs, middlewares...))
@@ -1562,6 +1563,73 @@ func (h *LoggingHandler) getDimensionRankings(ctx *fasthttp.RequestCtx) {
 	}
 
 	SendJSON(ctx, result)
+}
+
+// userAnalyticsResponse is the self-service analytics contract for a
+// canonical user. The handler pins every query to the authenticated user ID,
+// so a caller cannot widen the result by supplying another user_ids filter.
+type userAnalyticsResponse struct {
+	UserID      string                                      `json:"user_id"`
+	Stats       *logstore.SearchStats                       `json:"stats"`
+	Models      *logstore.ModelRankingResult                `json:"models"`
+	UserRanking *logstore.UserRankingResult                 `json:"user_ranking"`
+	Dimensions  map[string]*logstore.DimensionRankingResult `json:"dimensions"`
+}
+
+func (h *LoggingHandler) getUserAnalytics(ctx *fasthttp.RequestCtx) {
+	actorID, _ := ctx.UserValue(schemas.BifrostContextKeyUserID).(string)
+	actorID = strings.TrimSpace(actorID)
+	targetID, _ := ctx.UserValue("id").(string)
+	targetID = strings.TrimSpace(targetID)
+	if actorID == "" || targetID == "" || actorID != targetID {
+		SendError(ctx, fasthttp.StatusForbidden, "User analytics are limited to the authenticated user")
+		return
+	}
+
+	filters := parseHistogramFilters(ctx)
+	// The path principal is authoritative. Never let a query parameter select
+	// a second user's rows or turn this self-service endpoint into an aggregate.
+	filters.UserIDs = []string{targetID}
+	if !ParseRankingLimit(ctx, filters) {
+		return
+	}
+
+	stats, err := h.logManager.GetStats(ctx, filters)
+	if err != nil {
+		logger.Error("failed to get user analytics stats: %v", err)
+		SendError(ctx, fasthttp.StatusInternalServerError, "User analytics calculation failed")
+		return
+	}
+	models, err := h.logManager.GetModelRankings(ctx, filters)
+	if err != nil {
+		logger.Error("failed to get user analytics model rankings: %v", err)
+		SendError(ctx, fasthttp.StatusInternalServerError, "User analytics calculation failed")
+		return
+	}
+	userRanking, err := h.logManager.GetUserRankings(ctx, filters)
+	if err != nil {
+		logger.Error("failed to get user analytics ranking: %v", err)
+		SendError(ctx, fasthttp.StatusInternalServerError, "User analytics calculation failed")
+		return
+	}
+
+	dimensions := make(map[string]*logstore.DimensionRankingResult, 4)
+	for _, dimension := range []logstore.RankingDimension{
+		logstore.RankingDimensionTeam,
+		logstore.RankingDimensionBusinessUnit,
+		logstore.RankingDimensionCustomer,
+		logstore.RankingDimensionProject,
+	} {
+		result, rankingErr := h.logManager.GetDimensionRankings(ctx, filters, dimension)
+		if rankingErr != nil {
+			logger.Error("failed to get user analytics %s rankings: %v", dimension, rankingErr)
+			SendError(ctx, fasthttp.StatusInternalServerError, "User analytics calculation failed")
+			return
+		}
+		dimensions[string(dimension)] = result
+	}
+
+	SendJSON(ctx, userAnalyticsResponse{UserID: targetID, Stats: stats, Models: models, UserRanking: userRanking, Dimensions: dimensions})
 }
 
 // dashboardRankingDimensions is the fixed set of dimensions returned in the

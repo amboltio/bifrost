@@ -22,6 +22,7 @@ import {
 	RecalculateCostResponse,
 	ThroughputHistogramResponse,
 	TokenHistogramResponse,
+	UserAnalyticsResponse,
 } from "@/lib/types/logs";
 import { baseApi } from "./baseApi";
 import { RoutingRule } from "@/lib/types/routingRules";
@@ -382,6 +383,14 @@ export const logsApi = baseApi.injectEndpoints({
 			providesTags: ["Logs"],
 		}),
 
+		getUserAnalytics: builder.query<UserAnalyticsResponse, { userId: string; filters: LogFilters; limit?: number; all?: boolean }>({
+			query: ({ userId, filters, limit, all }) => ({
+				url: `/governance/users/${encodeURIComponent(userId)}/analytics`,
+				params: { ...buildFilterParams(filters), ...buildRankingLimitParams(limit, all) },
+			}),
+			providesTags: ["Logs"],
+		}),
+
 		// Get dropped requests count
 		getDroppedRequests: builder.query<{ dropped_requests: number }, void>({
 			query: () => "/logs/dropped",
@@ -511,8 +520,10 @@ export const {
 	useLazyGetLogsProviderThroughputHistogramQuery,
 	useGetModelRankingsQuery,
 	useGetDimensionRankingsQuery,
+	useGetUserAnalyticsQuery,
 	useLazyGetModelRankingsQuery,
 	useLazyGetDimensionRankingsQuery,
+	useLazyGetUserAnalyticsQuery,
 	useLazyGetDroppedRequestsQuery,
 	useLazyGetAvailableFilterDataQuery,
 	useDeleteLogsMutation,

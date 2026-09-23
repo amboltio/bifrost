@@ -500,6 +500,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_identity_session_fields"}, run: migrationAddIdentitySessionFields},
 	{IDs: []string{"add_identity_recovery_tokens"}, run: migrationAddRecoveryTokens},
 	{IDs: []string{"add_identity_role_permissions"}, run: migrationAddIdentityRolePermissions},
+	{IDs: []string{"add_identity_user_analytics_permission"}, run: migrationAddIdentityUserAnalyticsPermission},
 	{IDs: []string{"add_identity_oidc_transactions"}, run: migrationAddOIDCTransactions},
 	{IDs: []string{"add_identity_user_team_memberships"}, run: migrationAddIdentityUserTeamMemberships},
 	{IDs: []string{"add_identity_business_units"}, run: migrationAddIdentityBusinessUnits},
@@ -691,6 +692,53 @@ func migrationAddIdentityRolePermissions(ctx context.Context, db *gorm.DB, logge
 		},
 		Rollback: func(*gorm.DB) error {
 			return fmt.Errorf("%s is non-rollbackable: removing permission policy could expose management routes", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityUserAnalyticsPermission grants the new self-analytics
+// read permission to the built-in viewer and user-manager roles. It appends
+// only this permission so existing operator-customized grants remain intact.
+func migrationAddIdentityUserAnalyticsPermission(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_user_analytics_permission"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableRole{}) {
+				return fmt.Errorf("identity_roles is missing: run add_identity_tables before %s", migrationName)
+			}
+			for _, roleID := range []string{authorization.RoleIDViewer, authorization.RoleIDUserManager} {
+				var role tables.TableRole
+				if err := tx.First(&role, "id = ?", roleID).Error; err != nil {
+					return fmt.Errorf("load seeded identity role %s: %w", roleID, err)
+				}
+				if slices.Contains(role.Permissions, string(authorization.PermissionUserAnalyticsRead)) {
+					continue
+				}
+				role.Permissions = append(role.Permissions, string(authorization.PermissionUserAnalyticsRead))
+				permissionsJSON, err := json.Marshal(role.Permissions)
+				if err != nil {
+					return fmt.Errorf("marshal permissions for role %s: %w", roleID, err)
+				}
+				if err := tx.Model(&tables.TableRole{}).Where("id = ?", roleID).Updates(map[string]any{
+					"permissions": string(permissionsJSON),
+					"updated_at":  time.Now().UTC(),
+				}).Error; err != nil {
+					return fmt.Errorf("grant user analytics permission to role %s: %w", roleID, err)
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing role permissions can unexpectedly revoke operator grants", migrationName)
 		},
 	}})
 	if err := m.Migrate(); err != nil {

@@ -69,6 +69,49 @@ func TestParseComplexityFilters(t *testing.T) {
 	})
 }
 
+func TestGetUserAnalyticsPinsAuthenticatedUser(t *testing.T) {
+	manager := &dashboardLogManager{}
+	handler := &LoggingHandler{logManager: manager}
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/governance/users/user-1/analytics?user_ids=other-user&limit=7")
+	ctx.SetUserValue(schemas.BifrostContextKeyUserID, "user-1")
+	ctx.SetUserValue("id", "user-1")
+
+	handler.getUserAnalytics(ctx)
+
+	if got := ctx.Response.StatusCode(); got != fasthttp.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", got, ctx.Response.Body())
+	}
+	if len(manager.statsCalls) != 1 {
+		t.Fatalf("expected one stats call, got %d", len(manager.statsCalls))
+	}
+	filters := manager.statsCalls[0]
+	if len(filters.UserIDs) != 1 || filters.UserIDs[0] != "user-1" {
+		t.Fatalf("expected user filter to be pinned to user-1, got %#v", filters.UserIDs)
+	}
+	if filters.RankingLimit == nil || *filters.RankingLimit != 7 {
+		t.Fatalf("expected ranking limit 7, got %#v", filters.RankingLimit)
+	}
+}
+
+func TestGetUserAnalyticsRejectsDifferentAuthenticatedUser(t *testing.T) {
+	manager := &dashboardLogManager{}
+	handler := &LoggingHandler{logManager: manager}
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/governance/users/user-2/analytics")
+	ctx.SetUserValue(schemas.BifrostContextKeyUserID, "user-1")
+	ctx.SetUserValue("id", "user-2")
+
+	handler.getUserAnalytics(ctx)
+
+	if got := ctx.Response.StatusCode(); got != fasthttp.StatusForbidden {
+		t.Fatalf("expected 403, got %d", got)
+	}
+	if len(manager.statsCalls) != 0 {
+		t.Fatalf("expected no stats calls, got %d", len(manager.statsCalls))
+	}
+}
+
 // TestParseToolCallNamesFilter verifies the tool_call_names query param is
 // parsed as a comma-separated list and left alone when absent.
 func TestParseToolCallNamesFilter(t *testing.T) {
@@ -732,6 +775,9 @@ func (m *dashboardLogManager) GetProviderThroughputHistogram(ctx context.Context
 }
 func (m *dashboardLogManager) GetModelRankings(ctx context.Context, filters *logstore.SearchFilters) (*logstore.ModelRankingResult, error) {
 	return &logstore.ModelRankingResult{}, nil
+}
+func (m *dashboardLogManager) GetUserRankings(ctx context.Context, filters *logstore.SearchFilters) (*logstore.UserRankingResult, error) {
+	return &logstore.UserRankingResult{}, nil
 }
 func (m *dashboardLogManager) GetDimensionRankings(ctx context.Context, filters *logstore.SearchFilters, dimension logstore.RankingDimension) (*logstore.DimensionRankingResult, error) {
 	return &logstore.DimensionRankingResult{Dimension: dimension}, nil

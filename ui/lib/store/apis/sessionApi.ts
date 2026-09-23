@@ -44,6 +44,13 @@ export interface LogoutResponse {
 	message: string;
 }
 
+export interface CurrentUserResponse {
+	id: string;
+	email?: string;
+	display_name: string;
+	status: string;
+}
+
 export const sessionApi = baseApi.injectEndpoints({
 	overrideExisting: false,
 	endpoints: (builder) => ({
@@ -51,6 +58,13 @@ export const sessionApi = baseApi.injectEndpoints({
 		isAuthEnabled: builder.query<IsAuthEnabledResponse, void>({
 			query: () => ({
 				url: "/session/is-auth-enabled",
+				method: "GET",
+			}),
+			providesTags: ["Sessions"],
+		}),
+		getCurrentUser: builder.query<CurrentUserResponse, void>({
+			query: () => ({
+				url: "/session/current-user",
 				method: "GET",
 			}),
 			providesTags: ["Sessions"],
@@ -112,4 +126,4 @@ export const sessionApi = baseApi.injectEndpoints({
 	}),
 });
 
-export const { useIsAuthEnabledQuery, useLoginMutation, useLogoutMutation } = sessionApi;
+export const { useIsAuthEnabledQuery, useGetCurrentUserQuery, useLoginMutation, useLogoutMutation } = sessionApi;

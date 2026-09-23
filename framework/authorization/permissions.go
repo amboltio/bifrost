@@ -27,6 +27,7 @@ const (
 	PermissionProjectsDelete       Permission = "projects.delete"
 	PermissionProjectsAssign       Permission = "projects.assign"
 	PermissionVirtualKeysAssign    Permission = "virtual_keys.assign"
+	PermissionUserAnalyticsRead    Permission = "user_analytics.read"
 )
 
 // Has reports whether a persisted role permission list grants permission.
@@ -55,5 +56,6 @@ func Catalog() []Permission {
 		PermissionProjectsDelete,
 		PermissionProjectsAssign,
 		PermissionVirtualKeysAssign,
+		PermissionUserAnalyticsRead,
 	}
 }

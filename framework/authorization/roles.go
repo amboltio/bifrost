@@ -21,6 +21,7 @@ func SeededRoles() []tables.TableRole {
 			Permissions: permissionStrings([]Permission{
 				PermissionUsersRead, PermissionUsersCreate, PermissionUsersUpdate,
 				PermissionUsersResetPassword, PermissionUsersRevokeSessions, PermissionUsersAssignRoles,
+				PermissionUserAnalyticsRead,
 				PermissionAccessProfilesRead, PermissionAccessProfilesCreate, PermissionAccessProfilesUpdate,
 				PermissionAccessProfilesDelete, PermissionAccessProfilesAssign,
 			}),
@@ -28,7 +29,7 @@ func SeededRoles() []tables.TableRole {
 		},
 		{
 			ID: RoleIDViewer, Name: RoleIDViewer, DisplayName: "Viewer",
-			Permissions: []string{string(PermissionUsersRead)}, IsSystem: true,
+			Permissions: []string{string(PermissionUsersRead), string(PermissionUserAnalyticsRead)}, IsSystem: true,
 		},
 	}
 }

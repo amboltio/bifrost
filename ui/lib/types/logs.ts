@@ -1475,6 +1475,14 @@ export interface UserRankingsResponse {
 	rankings: UserRankingEntry[];
 }
 
+export interface UserAnalyticsResponse {
+	user_id: string;
+	stats: LogStats;
+	models: ModelRankingsResponse;
+	user_ranking: UserRankingsResponse;
+	dimensions: Partial<Record<"team" | "business_unit" | "customer" | "project", DimensionRankingsResponse>>;
+}
+
 export type RankingDimension = "team" | "customer" | "business_unit" | "project" | "user" | "app" | "user_agent" | "virtual_key";
 
 export interface DimensionRankingTrend {

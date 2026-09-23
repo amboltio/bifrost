@@ -36,11 +36,11 @@ type IdentityFeatureCapabilities struct {
 
 // ImplementedIdentityFeatureCapabilities is the public feature gate for
 // identity/governance management UI. The canonical user, organization, local
-// login, OIDC login, role catalog, and protected administration slices are
-// available; user analytics remains gated until its DAC-aware resolver is
-// ready.
+// login, OIDC login, role catalog, protected administration, and self-service
+// user analytics are available. Analytics are scoped to the authenticated user;
+// cross-user reporting remains unavailable through canonical user sessions.
 func ImplementedIdentityFeatureCapabilities() IdentityFeatureCapabilities {
-	return IdentityFeatureCapabilities{LocalUsers: true, OIDCLogin: true, Organizations: true, Roles: true, AccessProfiles: true, Projects: true}
+	return IdentityFeatureCapabilities{LocalUsers: true, OIDCLogin: true, Organizations: true, Roles: true, AccessProfiles: true, Projects: true, UserAnalytics: true}
 }
 
 // LocalLoginConfig controls email/password sign-in. Account creation is

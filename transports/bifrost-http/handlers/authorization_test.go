@@ -25,7 +25,7 @@ func (s roleResolverStub) GetRolesByUserID(context.Context, string) ([]tables.Ta
 }
 
 func TestIdentityAuthorizationMiddlewareDeniesUnmappedCanonicalManagementRoutes(t *testing.T) {
-	viewer := tables.TableRole{ID: authorization.RoleIDViewer, Permissions: []string{string(authorization.PermissionUsersRead)}}
+	viewer := tables.TableRole{ID: authorization.RoleIDViewer, Permissions: []string{string(authorization.PermissionUsersRead), string(authorization.PermissionUserAnalyticsRead)}}
 	superAdmin := tables.TableRole{ID: tables.RoleIDSuperAdmin}
 
 	tests := []struct {
@@ -45,6 +45,8 @@ func TestIdentityAuthorizationMiddlewareDeniesUnmappedCanonicalManagementRoutes(
 		{name: "project manager assigns members", method: fasthttp.MethodPut, path: "/api/governance/projects/project-1/members", roles: []tables.TableRole{{ID: "projects", Permissions: []string{string(authorization.PermissionProjectsAssign)}}}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
 		{name: "key manager assigns user keys", method: fasthttp.MethodPut, path: "/api/governance/users/user/virtual-keys", roles: []tables.TableRole{{ID: "keys", Permissions: []string{string(authorization.PermissionVirtualKeysAssign)}}}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
 		{name: "key manager lists key users", method: fasthttp.MethodGet, path: "/api/governance/virtual-keys/key-1/users", roles: []tables.TableRole{{ID: "keys", Permissions: []string{string(authorization.PermissionVirtualKeysAssign)}}}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
+		{name: "viewer reads own analytics", method: fasthttp.MethodGet, path: "/api/governance/users/user/analytics", roles: []tables.TableRole{viewer}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
+		{name: "analytics write is unmapped", method: fasthttp.MethodPost, path: "/api/governance/users/user/analytics", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "viewer cannot create users", method: fasthttp.MethodPost, path: "/api/governance/users", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "viewer cannot access unmapped route", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "super admin retains management access", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{superAdmin}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
