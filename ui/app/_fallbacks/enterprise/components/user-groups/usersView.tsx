@@ -1,13 +1,17 @@
 import FullPageLoader from "@/components/fullPageLoader";
+import EffectiveAccess from "@/components/governance/effectiveAccess";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
 	getErrorMessage,
 	useCreateManagedUserMutation,
 	useDisableManagedUserMutation,
+	useGetAccessProfilesQuery,
 	useGetManagedRolesQuery,
 	useGetManagedUsersQuery,
+	useGetUserAccessProfilesQuery,
 	useGetUserVirtualKeyAssignmentsQuery,
+	useReplaceUserAccessProfilesMutation,
 	useReplaceUserVirtualKeyAssignmentsMutation,
 } from "@/lib/store";
 import { KeyRound, UserPlus, UserRound, UserRoundX } from "lucide-react";
@@ -27,6 +31,16 @@ export default function UsersView() {
 	const [virtualKeyIDs, setVirtualKeyIDs] = useState("");
 	const { data: keyAssignments } = useGetUserVirtualKeyAssignmentsQuery(selectedUserForKeys ?? "", { skip: !selectedUserForKeys });
 	const [replaceUserVirtualKeys, { isLoading: isSavingVirtualKeys }] = useReplaceUserVirtualKeyAssignmentsMutation();
+	const { currentData: userProfileAssignments, isError: userProfilesError } = useGetUserAccessProfilesQuery(selectedUserForKeys ?? "", {
+		skip: !selectedUserForKeys,
+	});
+	const {
+		currentData: profileOptions,
+		isLoading: isLoadingProfileOptions,
+		isError: profileOptionsError,
+	} = useGetAccessProfilesQuery({ limit: 100 }, { skip: !selectedUserForKeys });
+	const [replaceUserAccessProfiles, { isLoading: isSavingAccessProfiles }] = useReplaceUserAccessProfilesMutation();
+	const [accessProfileIDs, setAccessProfileIDs] = useState<string[]>([]);
 
 	useEffect(() => {
 		if (!roleID && rolesData?.roles.length) setRoleID(rolesData.roles[0].id);
@@ -35,6 +49,14 @@ export default function UsersView() {
 	useEffect(() => {
 		setVirtualKeyIDs(keyAssignments?.assignments.map((assignment) => assignment.virtual_key_id).join(", ") ?? "");
 	}, [keyAssignments]);
+
+	useEffect(() => {
+		setAccessProfileIDs(
+			userProfileAssignments?.assignments
+				.filter((assignment) => assignment.source === "manual")
+				.map((assignment) => assignment.access_profile_id) ?? [],
+		);
+	}, [userProfileAssignments]);
 
 	const reset = () => {
 		setEmail("");
@@ -74,6 +96,16 @@ export default function UsersView() {
 					.filter(Boolean),
 			}).unwrap();
 			toast.success("Virtual-key assignments updated");
+		} catch (mutationError) {
+			toast.error(getErrorMessage(mutationError));
+		}
+	};
+
+	const saveAccessProfiles = async () => {
+		if (!selectedUserForKeys) return;
+		try {
+			await replaceUserAccessProfiles({ userId: selectedUserForKeys, access_profile_ids: accessProfileIDs }).unwrap();
+			toast.success("Access profiles updated");
 		} catch (mutationError) {
 			toast.error(getErrorMessage(mutationError));
 		}
@@ -141,7 +173,7 @@ export default function UsersView() {
 				</div>
 
 				{selectedUserForKeys && (
-					<div className="border-border h-fit space-y-4 rounded-sm border p-4" data-testid="user-virtual-key-assignment-form">
+					<div className="border-border h-fit space-y-5 rounded-sm border p-4" data-testid="user-virtual-key-assignment-form">
 						<h2 className="text-sm font-semibold">Virtual-key assignments</h2>
 						<p className="text-muted-foreground text-xs">
 							Enter virtual-key IDs separated by commas. Assignment changes are audited and revoke prior manual grants.
@@ -161,6 +193,60 @@ export default function UsersView() {
 								Close
 							</Button>
 						</div>
+
+						<section className="border-border space-y-3 border-t pt-4" aria-labelledby="user-access-profile-heading">
+							<div>
+								<h3 id="user-access-profile-heading" className="text-sm font-semibold">
+									Access profiles
+								</h3>
+								<p className="text-muted-foreground mt-1 text-xs">Choose reusable provider, model, and MCP access grants for this user.</p>
+							</div>
+							{userProfilesError || profileOptionsError ? (
+								<p className="text-destructive text-xs" role="alert">
+									Could not load access profiles for this user.
+								</p>
+							) : isLoadingProfileOptions || !userProfileAssignments ? (
+								<p className="text-muted-foreground text-xs">Loading access profiles…</p>
+							) : profileOptions?.access_profiles.length ? (
+								<div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+									{profileOptions.access_profiles.map((profile) => (
+										<label key={profile.id} className="flex cursor-pointer items-start gap-2 text-xs">
+											<input
+												className="accent-primary mt-0.5"
+												type="checkbox"
+												checked={accessProfileIDs.includes(profile.id)}
+												onChange={(event) =>
+													setAccessProfileIDs((current) =>
+														event.target.checked ? [...current, profile.id] : current.filter((id) => id !== profile.id),
+													)
+												}
+											/>
+											<span>
+												<span className="font-medium">{profile.name}</span>
+												{!profile.enabled && <span className="text-muted-foreground"> (disabled)</span>}
+												{profile.description && <span className="text-muted-foreground mt-0.5 block">{profile.description}</span>}
+											</span>
+										</label>
+									))}
+								</div>
+							) : (
+								<p className="text-muted-foreground text-xs">No access profiles are available.</p>
+							)}
+							<Button
+								type="button"
+								size="sm"
+								onClick={saveAccessProfiles}
+								isLoading={isSavingAccessProfiles}
+								disabled={
+									isSavingAccessProfiles || isLoadingProfileOptions || userProfilesError || profileOptionsError || !userProfileAssignments
+								}
+								dataTestId="user-access-profile-save-button"
+							>
+								Save profiles
+							</Button>
+						</section>
+
+						<EffectiveAccess userId={selectedUserForKeys} />
 					</div>
 				)}
 

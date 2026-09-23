@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/url"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/grant"
 	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
@@ -15,6 +17,11 @@ import (
 type effectiveAccessStoreStub struct {
 	configstore.ConfigStore
 	configstore.AccessProfileManagementStore
+	roles []tables.TableRole
+}
+
+func (s effectiveAccessStoreStub) GetRolesByUserID(context.Context, string) ([]tables.TableRole, error) {
+	return s.roles, nil
 }
 
 type effectiveAccessResolverStub struct {
@@ -100,6 +107,31 @@ func TestEffectiveAccessForbidsAnotherUsersDataWithoutAdminAuthority(t *testing.
 
 	require.Equal(t, fasthttp.StatusForbidden, ctx.Response.StatusCode())
 	require.Zero(t, resolver.calls, "unauthorized previews must not invoke the resolver")
+}
+
+func TestEffectiveAccessAllowsCrossUserPreviewWithBothReadPermissions(t *testing.T) {
+	store := effectiveAccessStoreStub{roles: []tables.TableRole{{Permissions: []string{"users.read", "access_profiles.read"}}}}
+	resolver := &effectiveAccessResolverStub{access: grant.NewAccess(nil, nil, "", nil)}
+	handler := NewAccessProfilesHandler(store, resolver)
+	ctx := effectiveAccessRequest("manager-1", "user-2", "provider=openai")
+
+	handler.effectiveAccess(ctx)
+
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, 1, resolver.calls)
+	require.Equal(t, "user-2", resolver.userID)
+}
+
+func TestEffectiveAccessRejectsCrossUserPreviewWithoutUsersRead(t *testing.T) {
+	store := effectiveAccessStoreStub{roles: []tables.TableRole{{Permissions: []string{"access_profiles.read"}}}}
+	resolver := &effectiveAccessResolverStub{access: grant.NewAccess(nil, nil, "", nil)}
+	handler := NewAccessProfilesHandler(store, resolver)
+	ctx := effectiveAccessRequest("manager-1", "user-2", "provider=openai")
+
+	handler.effectiveAccess(ctx)
+
+	require.Equal(t, fasthttp.StatusForbidden, ctx.Response.StatusCode())
+	require.Zero(t, resolver.calls)
 }
 
 func TestEffectiveAccessRejectsModelWithoutProvider(t *testing.T) {

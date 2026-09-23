@@ -93,6 +93,39 @@ export interface AccessProfilesResponse {
 	offset: number;
 }
 
+export interface UserAccessProfileAssignment {
+	id: string;
+	user_id: string;
+	access_profile_id: string;
+	source: string;
+	provider_id?: string;
+	assigned_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface EffectiveAccessQueryArgs {
+	userId: string;
+	provider?: string;
+	model?: string;
+	projectId?: string;
+}
+
+export interface EffectiveAccessResponse {
+	user_id: string;
+	provider?: string;
+	model?: string;
+	project_id?: string;
+	project_resolved?: boolean;
+	allowed?: boolean;
+	allow_all_providers: boolean;
+	allow_all_mcp_tools: boolean;
+	allowed_providers: string[];
+	allowed_mcp_tools: string[];
+	contributing_profile_ids: string[];
+	denied_profiles: { id: string }[];
+}
+
 export interface Project {
 	id: string;
 	name: string;
@@ -416,7 +449,7 @@ export const governanceApi = baseApi.injectEndpoints({
 			invalidatesTags: ["AccessProfiles"],
 		}),
 
-		getUserAccessProfiles: builder.query<{ access_profiles: AccessProfile[]; assignments: unknown[] }, string>({
+		getUserAccessProfiles: builder.query<{ access_profiles: AccessProfile[]; assignments: UserAccessProfileAssignment[] }, string>({
 			query: (id) => `/governance/users/${encodeURIComponent(id)}/access-profiles`,
 			providesTags: ["AccessProfiles", "Users"],
 		}),
@@ -433,18 +466,15 @@ export const governanceApi = baseApi.injectEndpoints({
 			invalidatesTags: ["AccessProfiles", "Users"],
 		}),
 
-		getUserEffectiveAccess: builder.query<
-			{
-				user_id: string;
-				profile_ids: string[];
-				allow_all_providers: boolean;
-				allowed_providers: string[];
-				allowed_models: string[];
-				allowed_mcp_tools: string[];
-			},
-			string
-		>({
-			query: (id) => `/governance/users/${encodeURIComponent(id)}/effective-access`,
+		getUserEffectiveAccess: builder.query<EffectiveAccessResponse, EffectiveAccessQueryArgs>({
+			query: ({ userId, provider, model, projectId }) => ({
+				url: `/governance/users/${encodeURIComponent(userId)}/effective-access`,
+				params: {
+					...(provider && { provider }),
+					...(model && { model }),
+					...(projectId && { project_id: projectId }),
+				},
+			}),
 			providesTags: ["AccessProfiles", "Users"],
 		}),
 

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/fasthttp/router"
 	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/authorization"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/grant"
@@ -22,8 +24,9 @@ import (
 // surface. The handler deliberately returns only allow-list metadata; secrets
 // and provider credentials never belong in an access profile.
 type AccessProfilesHandler struct {
-	store    configstore.AccessProfileManagementStore
-	resolver EffectiveAccessResolver
+	store        configstore.AccessProfileManagementStore
+	resolver     EffectiveAccessResolver
+	roleResolver UserRoleResolver
 }
 
 // EffectiveAccessResolver is the same permit resolver used by inference. The preview only resolves
@@ -41,7 +44,11 @@ func NewAccessProfilesHandler(store configstore.ConfigStore, resolvers ...Effect
 	if len(resolvers) > 0 {
 		resolver = resolvers[0]
 	}
-	return &AccessProfilesHandler{store: management, resolver: resolver}
+	var roleResolver UserRoleResolver
+	if candidate, ok := store.(UserRoleResolver); ok {
+		roleResolver = candidate
+	}
+	return &AccessProfilesHandler{store: management, resolver: resolver, roleResolver: roleResolver}
 }
 
 func (h *AccessProfilesHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
@@ -257,7 +264,7 @@ func (h *AccessProfilesHandler) effectiveAccess(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	actorID, _ := ctx.UserValue(schemas.BifrostContextKeyUserID).(string)
-	if strings.TrimSpace(actorID) != userID && !authBypassed(ctx) && !isTrustedLocalAdmin(ctx) {
+	if strings.TrimSpace(actorID) != userID && !authBypassed(ctx) && !isTrustedLocalAdmin(ctx) && !h.canReadOtherUserEffectiveAccess(actorID) {
 		SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
 		return
 	}
@@ -300,6 +307,25 @@ func (h *AccessProfilesHandler) effectiveAccess(ctx *fasthttp.RequestCtx) {
 		projectResolved = access.Scoping().Type() == string(grant.PermitProject) && access.Scoping().ID() == selection.projectID
 	}
 	SendJSON(ctx, explainEffectiveAccess(userID, selection, access, projectResolved))
+}
+
+func (h *AccessProfilesHandler) canReadOtherUserEffectiveAccess(actorID string) bool {
+	if h.roleResolver == nil || strings.TrimSpace(actorID) == "" {
+		return false
+	}
+	roles, err := h.roleResolver.GetRolesByUserID(context.Background(), strings.TrimSpace(actorID))
+	if err != nil {
+		return false
+	}
+	usersRead, profilesRead := false, false
+	for _, role := range roles {
+		if role.ID == tables.RoleIDSuperAdmin {
+			return true
+		}
+		usersRead = usersRead || authorization.Has(role.Permissions, authorization.PermissionUsersRead)
+		profilesRead = profilesRead || authorization.Has(role.Permissions, authorization.PermissionAccessProfilesRead)
+	}
+	return usersRead && profilesRead
 }
 
 type effectiveAccessSelection struct {
