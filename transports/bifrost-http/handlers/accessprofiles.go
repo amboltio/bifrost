@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/grant"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -20,15 +22,26 @@ import (
 // surface. The handler deliberately returns only allow-list metadata; secrets
 // and provider credentials never belong in an access profile.
 type AccessProfilesHandler struct {
-	store configstore.AccessProfileManagementStore
+	store    configstore.AccessProfileManagementStore
+	resolver EffectiveAccessResolver
 }
 
-func NewAccessProfilesHandler(store configstore.ConfigStore) *AccessProfilesHandler {
+// EffectiveAccessResolver is the same permit resolver used by inference. The preview only resolves
+// access; admission and limit settlement remain inference responsibilities.
+type EffectiveAccessResolver interface {
+	ResolveAccess(ctx *schemas.BifrostContext) (schemas.Access, error)
+}
+
+func NewAccessProfilesHandler(store configstore.ConfigStore, resolvers ...EffectiveAccessResolver) *AccessProfilesHandler {
 	management, ok := store.(configstore.AccessProfileManagementStore)
 	if !ok {
 		return nil
 	}
-	return &AccessProfilesHandler{store: management}
+	var resolver EffectiveAccessResolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
+	return &AccessProfilesHandler{store: management, resolver: resolver}
 }
 
 func (h *AccessProfilesHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
@@ -238,35 +251,242 @@ func (h *AccessProfilesHandler) replaceUserAssignments(ctx *fasthttp.RequestCtx)
 
 func (h *AccessProfilesHandler) effectiveAccess(ctx *fasthttp.RequestCtx) {
 	userID, _ := ctx.UserValue("id").(string)
-	assignments, err := h.store.ListUserAccessProfileAssignments(ctx, strings.TrimSpace(userID))
-	if h.writeError(ctx, err) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || len(userID) > 256 {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid user ID")
 		return
 	}
-	providers, models, tools := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
-	profileIDs := make([]string, 0, len(assignments))
-	allowAllProviders := false
-	for _, assignment := range assignments {
-		profile, getErr := h.store.GetAccessProfile(ctx, assignment.AccessProfileID)
-		if getErr != nil {
-			h.writeError(ctx, getErr)
-			return
+	actorID, _ := ctx.UserValue(schemas.BifrostContextKeyUserID).(string)
+	if strings.TrimSpace(actorID) != userID && !authBypassed(ctx) && !isTrustedLocalAdmin(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
+		return
+	}
+	if h.resolver == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Effective access preview is unavailable")
+		return
+	}
+	selection, ok := effectiveAccessSelectionFromRequest(ctx)
+	if !ok {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid access selection")
+		return
+	}
+
+	// Build the subject context from the authorized target, not from a request-supplied user header.
+	// It intentionally carries no virtual-key credential: this endpoint previews that user's
+	// profile grants without pretending a shared key identifies them.
+	bifrostCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
+	requestGrant := grant.New()
+	requestGrant.SetIdentity(grant.NewIdentity(schemas.Credential{}, &schemas.UserRef{ID: userID}, nil, nil, nil, nil, nil))
+	if !bifrostCtx.SetGrant(requestGrant) {
+		SendError(ctx, fasthttp.StatusInternalServerError, "Effective access preview failed")
+		return
+	}
+	if selection.provider != "" {
+		bifrostCtx.SetValue(schemas.BifrostContextKeyGovernanceRequestProvider, selection.provider)
+	}
+	if selection.projectID != "" {
+		bifrostCtx.SetValue(schemas.BifrostContextKeyRequestHeaders, map[string]string{
+			schemas.HeaderGovernanceProjectID: selection.projectID,
+		})
+	}
+	access, err := h.resolver.ResolveAccess(bifrostCtx)
+	if err != nil {
+		logger.Error(fmt.Sprintf("effective access preview failed: %v", err))
+		SendError(ctx, fasthttp.StatusInternalServerError, "Effective access preview failed")
+		return
+	}
+	projectResolved := selection.projectID == ""
+	if selection.projectID != "" && access != nil && access.Scoping() != nil {
+		projectResolved = access.Scoping().Type() == string(grant.PermitProject) && access.Scoping().ID() == selection.projectID
+	}
+	SendJSON(ctx, explainEffectiveAccess(userID, selection, access, projectResolved))
+}
+
+type effectiveAccessSelection struct {
+	provider  string
+	model     string
+	projectID string
+}
+
+func effectiveAccessSelectionFromRequest(ctx *fasthttp.RequestCtx) (effectiveAccessSelection, bool) {
+	args := ctx.QueryArgs()
+	selection := effectiveAccessSelection{
+		provider:  strings.ToLower(strings.TrimSpace(string(args.Peek("provider")))),
+		model:     strings.TrimSpace(string(args.Peek("model"))),
+		projectID: strings.TrimSpace(string(args.Peek("project_id"))),
+	}
+	if len(selection.provider) > 128 || len(selection.model) > 256 || len(selection.projectID) > 256 {
+		return effectiveAccessSelection{}, false
+	}
+	if selection.model != "" && selection.provider == "" {
+		return effectiveAccessSelection{}, false
+	}
+	return selection, true
+}
+
+type effectiveAccessSource struct {
+	ID string `json:"id"`
+}
+
+type effectiveAccessExplanation struct {
+	UserID                 string                  `json:"user_id"`
+	Provider               string                  `json:"provider,omitempty"`
+	Model                  string                  `json:"model,omitempty"`
+	ProjectID              string                  `json:"project_id,omitempty"`
+	ProjectResolved        *bool                   `json:"project_resolved,omitempty"`
+	Allowed                *bool                   `json:"allowed,omitempty"`
+	AllowAllProviders      bool                    `json:"allow_all_providers"`
+	AllowAllMCPTools       bool                    `json:"allow_all_mcp_tools"`
+	AllowedProviders       []string                `json:"allowed_providers"`
+	AllowedMCPTools        []string                `json:"allowed_mcp_tools"`
+	ContributingProfileIDs []string                `json:"contributing_profile_ids"`
+	DeniedProfiles         []effectiveAccessSource `json:"denied_profiles"`
+}
+
+func explainEffectiveAccess(userID string, selection effectiveAccessSelection, access schemas.Access, projectResolved bool) effectiveAccessExplanation {
+	response := effectiveAccessExplanation{
+		UserID: userID, Provider: selection.provider, Model: selection.model, ProjectID: selection.projectID,
+		AllowedProviders: []string{}, AllowedMCPTools: []string{}, ContributingProfileIDs: []string{}, DeniedProfiles: []effectiveAccessSource{},
+	}
+	if selection.projectID != "" {
+		response.ProjectResolved = &projectResolved
+	}
+	if !projectResolved {
+		if selection.provider != "" {
+			allowed := false
+			response.Allowed = &allowed
 		}
-		if profile == nil || !profile.Enabled {
+		return response
+	}
+	if access == nil {
+		response.AllowAllProviders = true
+		response.AllowAllMCPTools = true
+		if selection.provider != "" {
+			allowed := true
+			response.Allowed = &allowed
+		}
+		return response
+	}
+
+	providers := map[string]struct{}{}
+	for _, permit := range allEffectiveAccessPermits(access) {
+		if permit == nil {
 			continue
 		}
-		profileIDs = append(profileIDs, profile.ID)
-		allowAllProviders = allowAllProviders || profile.AllowAllProviders
-		for _, value := range profile.AllowedProviders {
-			providers[value] = struct{}{}
-		}
-		for _, value := range profile.AllowedModels {
-			models[value] = struct{}{}
-		}
-		for _, value := range profile.AllowedMCPTools {
-			tools[value] = struct{}{}
+		for _, providerPermit := range permit.ProviderPermits() {
+			provider := strings.TrimSpace(providerPermit.Provider)
+			if provider != "" && access.IsProviderAllowed(provider) {
+				if selection.model == "" || access.IsModelAllowed(provider, selection.model) {
+					providers[provider] = struct{}{}
+				}
+			}
 		}
 	}
-	SendJSON(ctx, map[string]any{"user_id": strings.TrimSpace(userID), "profile_ids": profileIDs, "allow_all_providers": allowAllProviders, "allowed_providers": sortedSet(providers), "allowed_models": sortedSet(models), "allowed_mcp_tools": sortedSet(tools)})
+	response.AllowedProviders = boundedSortedSet(providers, 100)
+	response.AllowAllProviders = effectiveAccessAllowsAllProviders(access)
+	response.AllowedMCPTools = boundedSortedSet(sliceSet(access.MCPToolIncludeList()), 100)
+
+	if selection.provider == "" {
+		response.ContributingProfileIDs = profilePermitIDs(allEffectiveAccessPermits(access), 50)
+		return response
+	}
+	allowed := access.IsProviderAllowed(selection.provider)
+	if selection.model != "" {
+		allowed = access.IsModelAllowed(selection.provider, selection.model)
+	}
+	response.Allowed = &allowed
+	if allowed {
+		response.ContributingProfileIDs = profilePermitIDs(access.PermitsForModel(selection.provider, selection.model), 50)
+	} else {
+		response.DeniedProfiles = profilePermitSources(access.DeniedPermitsForModel(selection.provider, selection.model), 50)
+	}
+	return response
+}
+
+func allEffectiveAccessPermits(access schemas.Access) []schemas.Permit {
+	if access == nil {
+		return nil
+	}
+	permits := append([]schemas.Permit(nil), access.Bases()...)
+	if access.Scoping() != nil {
+		permits = append(permits, access.Scoping())
+	}
+	return permits
+}
+
+func effectiveAccessAllowsAllProviders(access schemas.Access) bool {
+	baseAllowsAll := false
+	for _, permit := range access.Bases() {
+		if permit != nil && permit.AllowsAllProviders() {
+			baseAllowsAll = true
+			break
+		}
+	}
+	scope := access.Scoping()
+	if scope == nil {
+		return baseAllowsAll
+	}
+	scopeAllowsAll := scope.AllowsAllProviders()
+	switch access.Mode() {
+	case string(grant.Union):
+		return baseAllowsAll || scopeAllowsAll
+	case string(grant.Intersect):
+		return baseAllowsAll && scopeAllowsAll
+	default:
+		return false
+	}
+}
+
+func profilePermitIDs(permits []schemas.Permit, limit int) []string {
+	set := map[string]struct{}{}
+	for _, permit := range permits {
+		if permit != nil && permit.Type() == string(grant.PermitAccessProfile) && permit.ID() != "" {
+			set[permit.ID()] = struct{}{}
+		}
+	}
+	return boundedSortedSet(set, limit)
+}
+
+func profilePermitSources(permits []schemas.Permit, limit int) []effectiveAccessSource {
+	sources := make([]effectiveAccessSource, 0, min(limit, len(permits)))
+	seen := map[string]struct{}{}
+	for _, permit := range permits {
+		if permit == nil || permit.Type() != string(grant.PermitAccessProfile) || permit.ID() == "" {
+			continue
+		}
+		if _, exists := seen[permit.ID()]; exists {
+			continue
+		}
+		seen[permit.ID()] = struct{}{}
+		sources = append(sources, effectiveAccessSource{ID: permit.ID()})
+		if len(sources) == limit {
+			break
+		}
+	}
+	sort.Slice(sources, func(i, j int) bool { return sources[i].ID < sources[j].ID })
+	return sources
+}
+
+func sliceSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	return set
+}
+
+func boundedSortedSet(values map[string]struct{}, limit int) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result
 }
 
 func sortedSet(values map[string]struct{}) []string {

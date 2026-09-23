@@ -42,7 +42,7 @@ func NewIdentityAuthorizationMiddleware(resolver UserRoleResolver) schemas.Bifro
 
 			method := string(ctx.Method())
 			path := string(ctx.Path())
-			if isCanonicalSelfServiceRoute(method, path) {
+			if isCanonicalSelfServiceRoute(method, path) || isSelfEffectiveAccessRoute(method, path, userID) {
 				next(ctx)
 				return
 			}
@@ -76,6 +76,14 @@ func NewIdentityAuthorizationMiddleware(resolver UserRoleResolver) schemas.Bifro
 			SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
 		}
 	}
+}
+
+func isSelfEffectiveAccessRoute(method, path, userID string) bool {
+	if method != fasthttp.MethodGet || userID == "" || !strings.HasPrefix(path, "/api/governance/users/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/api/governance/users/"), "/")
+	return len(parts) == 2 && parts[0] == userID && parts[1] == "effective-access"
 }
 
 func authBypassed(ctx *fasthttp.RequestCtx) bool {

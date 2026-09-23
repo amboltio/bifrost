@@ -2437,7 +2437,11 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	oidcHandler := handlers.NewOIDCHandler(s.Config.ConfigStore)
 	usersHandler := handlers.NewUsersHandler(s.Config.ConfigStore)
 	businessUnitsHandler := handlers.NewBusinessUnitsHandler(s.Config.ConfigStore)
-	accessProfilesHandler := handlers.NewAccessProfilesHandler(s.Config.ConfigStore)
+	var effectiveAccessResolver handlers.EffectiveAccessResolver
+	if accessResolver, accessErr := s.getGovernancePlugin(); accessErr == nil {
+		effectiveAccessResolver = accessResolver
+	}
+	accessProfilesHandler := handlers.NewAccessProfilesHandler(s.Config.ConfigStore, effectiveAccessResolver)
 	projectsHandler := handlers.NewProjectsHandler(s.Config.ConfigStore)
 	userVirtualKeysHandler := handlers.NewUserVirtualKeysHandler(s.Config.ConfigStore)
 	var roleResolver handlers.UserRoleResolver

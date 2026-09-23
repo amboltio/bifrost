@@ -51,6 +51,7 @@ func TestIdentityAuthorizationMiddlewareDeniesUnmappedCanonicalManagementRoutes(
 		{name: "viewer cannot access unmapped route", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "super admin retains management access", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{superAdmin}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
 		{name: "canonical user manages own sessions", method: fasthttp.MethodGet, path: "/api/session/sessions", roles: nil, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
+		{name: "canonical user previews own effective access", method: fasthttp.MethodGet, path: "/api/governance/users/user/effective-access", roles: nil, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
 		{name: "auth disabled bypass is preserved", method: fasthttp.MethodGet, path: "/api/config", roles: nil, bypassed: true, wantCalled: true, wantStatus: fasthttp.StatusOK},
 	}
 
