@@ -9,6 +9,7 @@ const (
 	AccessProfileSourceManual        = "manual"
 	AccessProfileSourceOIDCClaim     = "oidc_claim"
 	AccessProfileSourceDirectorySync = "directory_sync"
+	RoleAccessProfileSourceManual    = "manual"
 )
 
 // TableAccessProfile stores a reusable, bounded governance policy. The
@@ -45,4 +46,21 @@ type TableUserAccessProfileAssignment struct {
 
 func (TableUserAccessProfileAssignment) TableName() string {
 	return "identity_user_access_profile_assignments"
+}
+
+// TableRoleAccessProfileAssignment gives every member of a role the reusable
+// access profile by default. Direct user assignments can add more profiles;
+// duplicate profile identities are collapsed by the governance resolver.
+type TableRoleAccessProfileAssignment struct {
+	ID               string    `gorm:"primaryKey;type:varchar(255)" json:"id"`
+	RoleID           string    `gorm:"type:varchar(255);not null;index;uniqueIndex:idx_identity_role_access_profile_source,priority:1" json:"role_id"`
+	AccessProfileID  string    `gorm:"type:varchar(255);not null;index;uniqueIndex:idx_identity_role_access_profile_source,priority:2" json:"access_profile_id"`
+	Source           string    `gorm:"type:varchar(64);not null;default:'manual';uniqueIndex:idx_identity_role_access_profile_source,priority:3" json:"source"`
+	AssignedByUserID *string   `gorm:"type:varchar(255);index" json:"assigned_by_user_id,omitempty"`
+	CreatedAt        time.Time `gorm:"index;not null" json:"created_at"`
+	UpdatedAt        time.Time `gorm:"index;not null" json:"updated_at"`
+}
+
+func (TableRoleAccessProfileAssignment) TableName() string {
+	return "identity_role_access_profile_assignments"
 }

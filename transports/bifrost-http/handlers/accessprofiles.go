@@ -60,6 +60,8 @@ func (h *AccessProfilesHandler) RegisterRoutes(r *router.Router, middlewares ...
 	r.DELETE("/api/governance/access-profiles/{id}", lib.ChainMiddlewares(h.delete, middlewares...))
 	r.GET("/api/governance/users/{id}/access-profiles", lib.ChainMiddlewares(h.listUserAssignments, middlewares...))
 	r.PUT("/api/governance/users/{id}/access-profiles", lib.ChainMiddlewares(h.replaceUserAssignments, middlewares...))
+	r.GET("/api/governance/roles/{id}/access-profiles", lib.ChainMiddlewares(h.listRoleAssignments, middlewares...))
+	r.PUT("/api/governance/roles/{id}/access-profiles", lib.ChainMiddlewares(h.replaceRoleAssignments, middlewares...))
 	r.GET("/api/governance/users/{id}/effective-access", lib.ChainMiddlewares(h.effectiveAccess, middlewares...))
 }
 
@@ -254,6 +256,47 @@ func (h *AccessProfilesHandler) replaceUserAssignments(ctx *fasthttp.RequestCtx)
 		return
 	}
 	h.listUserAssignments(ctx)
+}
+
+func (h *AccessProfilesHandler) listRoleAssignments(ctx *fasthttp.RequestCtx) {
+	roleID, _ := ctx.UserValue("id").(string)
+	roleID = strings.TrimSpace(roleID)
+	assignments, err := h.store.ListRoleAccessProfileAssignments(ctx, roleID)
+	if h.writeError(ctx, err) {
+		return
+	}
+	profiles := make([]accessProfileResponse, 0, len(assignments))
+	for _, assignment := range assignments {
+		profile, getErr := h.store.GetAccessProfile(ctx, assignment.AccessProfileID)
+		if getErr != nil {
+			h.writeError(ctx, getErr)
+			return
+		}
+		if profile != nil {
+			profiles = append(profiles, newAccessProfileResponse(*profile))
+		}
+	}
+	SendJSON(ctx, map[string]any{"access_profiles": profiles, "assignments": assignments})
+}
+
+func (h *AccessProfilesHandler) replaceRoleAssignments(ctx *fasthttp.RequestCtx) {
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	roleID, _ := ctx.UserValue("id").(string)
+	request := struct {
+		AccessProfileIDs []string `json:"access_profile_ids"`
+	}{}
+	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	audit, outbox := h.roleAssignmentAudit(ctx, strings.TrimSpace(roleID))
+	if h.writeError(ctx, h.store.ReplaceManualRoleAccessProfilesAudited(ctx, strings.TrimSpace(roleID), request.AccessProfileIDs, canonicalActorUserID(ctx), audit, outbox)) {
+		return
+	}
+	h.listRoleAssignments(ctx)
 }
 
 func (h *AccessProfilesHandler) effectiveAccess(ctx *fasthttp.RequestCtx) {
@@ -539,6 +582,15 @@ func (h *AccessProfilesHandler) audit(ctx *fasthttp.RequestCtx, targetID, action
 		actor = "user:" + *userID
 	}
 	return &tables.TableAuditEvent{ID: eventID, ActorPrincipal: actor, TargetType: "access_profile", TargetID: &targetID, Action: action, OccurredAt: time.Now().UTC()}, &tables.TableOutboxEvent{Topic: "governance.access_profile.changed", DeduplicationKey: "governance.access_profile:" + eventID, Payload: map[string]any{"access_profile_id": targetID, "action": action}}
+}
+
+func (h *AccessProfilesHandler) roleAssignmentAudit(ctx *fasthttp.RequestCtx, roleID string) (*tables.TableAuditEvent, *tables.TableOutboxEvent) {
+	eventID := uuid.NewString()
+	actor := "legacy:local_admin"
+	if userID := canonicalActorUserID(ctx); userID != nil {
+		actor = "user:" + *userID
+	}
+	return &tables.TableAuditEvent{ID: eventID, ActorPrincipal: actor, TargetType: "role", TargetID: &roleID, Action: "governance.role.access_profiles_updated", OccurredAt: time.Now().UTC()}, &tables.TableOutboxEvent{Topic: "governance.role.access_profile.changed", DeduplicationKey: "governance.role.access_profile:" + eventID, Payload: map[string]any{"role_id": roleID, "action": "access_profiles_updated"}}
 }
 
 func accessProfileQueryParams(ctx *fasthttp.RequestCtx) (configstore.AccessProfileQueryParams, bool) {

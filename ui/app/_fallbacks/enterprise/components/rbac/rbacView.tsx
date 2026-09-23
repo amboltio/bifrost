@@ -6,7 +6,10 @@ import {
 	useCreateManagedRoleMutation,
 	useDeleteManagedRoleMutation,
 	useGetManagedRolesQuery,
+	useGetAccessProfilesQuery,
+	useGetRoleAccessProfilesQuery,
 	useGetRBACPermissionsQuery,
+	useReplaceRoleAccessProfilesMutation,
 	useUpdateManagedRoleMutation,
 } from "@/lib/store";
 import { Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
@@ -14,15 +17,25 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 export default function RBACView() {
+	const [selectedID, setSelectedID] = useState<string | null>(null);
 	const { data: rolesData, isLoading, error } = useGetManagedRolesQuery();
 	const { data: permissionsData } = useGetRBACPermissionsQuery();
+	const { currentData: roleAccessProfiles, isError: roleProfilesError } = useGetRoleAccessProfilesQuery(selectedID ?? "", {
+		skip: !selectedID,
+	});
+	const {
+		currentData: accessProfilesData,
+		isLoading: isLoadingAccessProfiles,
+		isError: accessProfilesError,
+	} = useGetAccessProfilesQuery({ limit: 100 }, { skip: !selectedID });
 	const [createRole, { isLoading: isCreating }] = useCreateManagedRoleMutation();
 	const [updateRole, { isLoading: isUpdating }] = useUpdateManagedRoleMutation();
 	const [deleteRole] = useDeleteManagedRoleMutation();
-	const [selectedID, setSelectedID] = useState<string | null>(null);
+	const [replaceRoleAccessProfiles, { isLoading: isSavingAccessProfiles }] = useReplaceRoleAccessProfilesMutation();
 	const [name, setName] = useState("");
 	const [displayName, setDisplayName] = useState("");
 	const [permissions, setPermissions] = useState<string[]>([]);
+	const [accessProfileIDs, setAccessProfileIDs] = useState<string[]>([]);
 	const selected = rolesData?.roles.find((role) => role.id === selectedID);
 
 	useEffect(() => {
@@ -31,6 +44,14 @@ export default function RBACView() {
 		setDisplayName(selected.display_name);
 		setPermissions(selected.permissions);
 	}, [selected]);
+
+	useEffect(() => {
+		setAccessProfileIDs(
+			roleAccessProfiles?.assignments
+				.filter((assignment) => assignment.source === "manual")
+				.map((assignment) => assignment.access_profile_id) ?? [],
+		);
+	}, [roleAccessProfiles]);
 
 	const permissionGroups = useMemo(() => {
 		const groups = new Map<string, { id: string; operation: string }[]>();
@@ -47,6 +68,17 @@ export default function RBACView() {
 		setName("");
 		setDisplayName("");
 		setPermissions([]);
+		setAccessProfileIDs([]);
+	};
+
+	const saveAccessProfiles = async () => {
+		if (!selectedID) return;
+		try {
+			await replaceRoleAccessProfiles({ roleId: selectedID, access_profile_ids: accessProfileIDs }).unwrap();
+			toast.success("Role access profiles updated");
+		} catch (mutationError) {
+			toast.error(getErrorMessage(mutationError));
+		}
 	};
 
 	const submit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -184,6 +216,60 @@ export default function RBACView() {
 							))}
 						</div>
 					</div>
+					{selectedID && (
+						<section className="border-border space-y-3 border-t pt-4" aria-labelledby="role-access-profiles-heading">
+							<div>
+								<h3 id="role-access-profiles-heading" className="text-sm font-semibold">
+									Default access profiles
+								</h3>
+								<p className="text-muted-foreground mt-1 text-xs">
+									Every user assigned to this role receives these additional access grants.
+								</p>
+							</div>
+							{roleProfilesError || accessProfilesError ? (
+								<p className="text-destructive text-xs" role="alert">
+									Could not load role access profiles.
+								</p>
+							) : isLoadingAccessProfiles || !roleAccessProfiles ? (
+								<p className="text-muted-foreground text-xs">Loading access profiles…</p>
+							) : accessProfilesData?.access_profiles.length ? (
+								<div className="max-h-40 space-y-2 overflow-y-auto pr-1">
+									{accessProfilesData.access_profiles.map((profile) => (
+										<label key={profile.id} className="flex cursor-pointer items-start gap-2 text-xs">
+											<input
+												className="accent-primary mt-0.5"
+												type="checkbox"
+												checked={accessProfileIDs.includes(profile.id)}
+												onChange={(event) =>
+													setAccessProfileIDs((current) =>
+														event.target.checked ? [...current, profile.id] : current.filter((id) => id !== profile.id),
+													)
+												}
+											/>
+											<span>
+												<span className="font-medium">{profile.name}</span>
+												{!profile.enabled && <span className="text-muted-foreground"> (disabled)</span>}
+											</span>
+										</label>
+									))}
+								</div>
+							) : (
+								<p className="text-muted-foreground text-xs">No access profiles are available.</p>
+							)}
+							<Button
+								type="button"
+								size="sm"
+								onClick={saveAccessProfiles}
+								isLoading={isSavingAccessProfiles}
+								disabled={
+									isSavingAccessProfiles || isLoadingAccessProfiles || roleProfilesError || accessProfilesError || !roleAccessProfiles
+								}
+								dataTestId="role-access-profile-save-button"
+							>
+								Save default profiles
+							</Button>
+						</section>
+					)}
 					<div className="flex gap-2">
 						<Button type="submit" isLoading={isCreating || isUpdating} disabled={isCreating || isUpdating} dataTestId="role-save-button">
 							{selectedID ? "Save changes" : "Create"}

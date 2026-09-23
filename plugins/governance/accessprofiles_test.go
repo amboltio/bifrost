@@ -15,10 +15,21 @@ import (
 
 type fakeAccessProfileStore struct {
 	configstore.AccessProfileManagementStore
-	assignments []configstoreTables.TableUserAccessProfileAssignment
-	profiles    map[string]*configstoreTables.TableAccessProfile
-	err         error
-	userIDs     []string
+	assignments     []configstoreTables.TableUserAccessProfileAssignment
+	roleAssignments []configstoreTables.TableRoleAccessProfileAssignment
+	profiles        map[string]*configstoreTables.TableAccessProfile
+	err             error
+	userIDs         []string
+}
+
+type fakeUserRoleStore struct {
+	configstore.ConfigStore
+	roles []configstoreTables.TableRole
+	err   error
+}
+
+func (s fakeUserRoleStore) GetRolesByUserID(context.Context, string) ([]configstoreTables.TableRole, error) {
+	return s.roles, s.err
 }
 
 func (s *fakeAccessProfileStore) ListUserAccessProfileAssignments(_ context.Context, userID string) ([]configstoreTables.TableUserAccessProfileAssignment, error) {
@@ -27,6 +38,19 @@ func (s *fakeAccessProfileStore) ListUserAccessProfileAssignments(_ context.Cont
 		return nil, s.err
 	}
 	return s.assignments, nil
+}
+
+func (s *fakeAccessProfileStore) ListRoleAccessProfileAssignments(_ context.Context, roleID string) ([]configstoreTables.TableRoleAccessProfileAssignment, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	result := make([]configstoreTables.TableRoleAccessProfileAssignment, 0)
+	for _, assignment := range s.roleAssignments {
+		if assignment.RoleID == roleID {
+			result = append(result, assignment)
+		}
+	}
+	return result, nil
 }
 
 func (s *fakeAccessProfileStore) GetAccessProfile(_ context.Context, id string) (*configstoreTables.TableAccessProfile, error) {
@@ -75,6 +99,29 @@ func TestResolvePermitsIncludesAssignedUserAccessProfiles(t *testing.T) {
 	assert.False(t, access.IsProviderAllowed("bedrock"))
 	assert.True(t, access.IsMCPToolAllowed("sentry-find_issues"))
 	assert.Equal(t, []string{"user-1"}, store.userIDs)
+}
+
+func TestResolvePermitsIncludesRoleDefaultProfilesAndDeduplicatesSources(t *testing.T) {
+	profileStore := &fakeAccessProfileStore{
+		assignments: []configstoreTables.TableUserAccessProfileAssignment{{UserID: "user-1", AccessProfileID: "shared-profile"}},
+		roleAssignments: []configstoreTables.TableRoleAccessProfileAssignment{
+			{RoleID: "engineering", AccessProfileID: "shared-profile"},
+			{RoleID: "engineering", AccessProfileID: "role-profile"},
+		},
+		profiles: map[string]*configstoreTables.TableAccessProfile{
+			"shared-profile": {ID: "shared-profile", Name: "Shared", Enabled: true, AllowedProviders: []string{"openai"}},
+			"role-profile":   {ID: "role-profile", Name: "Engineering default", Enabled: true, AllowedProviders: []string{"anthropic"}},
+		},
+	}
+	roleStore := fakeUserRoleStore{roles: []configstoreTables.TableRole{{ID: "engineering"}}}
+	governanceStore := &LocalGovernanceStore{profileStore: profileStore, configStore: roleStore}
+
+	bases, _, _ := governanceStore.ResolvePermits(presentUserCtx("user-1"))
+
+	require.Len(t, bases, 2, "direct and role-default paths to the same profile produce one grant")
+	access := grant.NewAccess(bases, nil, "", nil)
+	assert.True(t, access.IsProviderAllowed("openai"))
+	assert.True(t, access.IsProviderAllowed("anthropic"))
 }
 
 func TestResolvePermitsDoesNotInferProfileUserFromVirtualKey(t *testing.T) {

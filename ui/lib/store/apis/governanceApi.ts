@@ -104,6 +104,16 @@ export interface UserAccessProfileAssignment {
 	updated_at: string;
 }
 
+export interface RoleAccessProfileAssignment {
+	id: string;
+	role_id: string;
+	access_profile_id: string;
+	source: string;
+	assigned_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
 export interface EffectiveAccessQueryArgs {
 	userId: string;
 	provider?: string;
@@ -452,6 +462,23 @@ export const governanceApi = baseApi.injectEndpoints({
 		getUserAccessProfiles: builder.query<{ access_profiles: AccessProfile[]; assignments: UserAccessProfileAssignment[] }, string>({
 			query: (id) => `/governance/users/${encodeURIComponent(id)}/access-profiles`,
 			providesTags: ["AccessProfiles", "Users"],
+		}),
+
+		getRoleAccessProfiles: builder.query<{ access_profiles: AccessProfile[]; assignments: RoleAccessProfileAssignment[] }, string>({
+			query: (id) => `/governance/roles/${encodeURIComponent(id)}/access-profiles`,
+			providesTags: ["AccessProfiles", "Roles"],
+		}),
+
+		replaceRoleAccessProfiles: builder.mutation<
+			{ access_profiles: AccessProfile[]; assignments: RoleAccessProfileAssignment[] },
+			{ roleId: string; access_profile_ids: string[] }
+		>({
+			query: ({ roleId, access_profile_ids }) => ({
+				url: `/governance/roles/${encodeURIComponent(roleId)}/access-profiles`,
+				method: "PUT",
+				body: { access_profile_ids },
+			}),
+			invalidatesTags: ["AccessProfiles", "Roles"],
 		}),
 
 		replaceUserAccessProfiles: builder.mutation<
@@ -1254,6 +1281,8 @@ export const {
 	useDeleteAccessProfileMutation,
 	useGetUserAccessProfilesQuery,
 	useReplaceUserAccessProfilesMutation,
+	useGetRoleAccessProfilesQuery,
+	useReplaceRoleAccessProfilesMutation,
 	useGetUserEffectiveAccessQuery,
 
 	// Projects

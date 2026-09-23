@@ -39,3 +39,34 @@ func TestAccessProfileManagementNormalizesAssignmentsAndBlocksDelete(t *testing.
 	require.False(t, updated.Enabled)
 	require.True(t, updated.AllowAllProviders)
 }
+
+func TestRoleAccessProfileAssignmentsAreAuditedAndProtectRoleAndProfile(t *testing.T) {
+	store := setupIdentityTestStore(t, ":memory:")
+	ctx := context.Background()
+	audit, outbox := roleAuditFixtures()
+	role, err := store.CreateRoleAudited(ctx, &tables.TableRole{ID: "engineering", Name: "engineering", DisplayName: "Engineering"}, audit, outbox)
+	require.NoError(t, err)
+
+	audit, outbox = roleAuditFixtures()
+	profile, err := store.CreateAccessProfileAudited(ctx, &tables.TableAccessProfile{ID: "engineering-profile", Name: "Engineering", Enabled: true}, audit, outbox)
+	require.NoError(t, err)
+
+	audit, outbox = roleAuditFixtures()
+	require.NoError(t, store.ReplaceManualRoleAccessProfilesAudited(ctx, role.ID, []string{profile.ID, profile.ID}, nil, audit, outbox))
+	assignments, err := store.ListRoleAccessProfileAssignments(ctx, role.ID)
+	require.NoError(t, err)
+	require.Len(t, assignments, 1)
+	require.Equal(t, tables.RoleAccessProfileSourceManual, assignments[0].Source)
+
+	audit, outbox = roleAuditFixtures()
+	require.ErrorIs(t, store.DeleteRoleAudited(ctx, role.ID, audit, outbox), ErrRoleInUse)
+	audit, outbox = roleAuditFixtures()
+	require.ErrorIs(t, store.DeleteAccessProfileAudited(ctx, profile.ID, audit, outbox), ErrAccessProfileInUse)
+
+	audit, outbox = roleAuditFixtures()
+	require.NoError(t, store.ReplaceManualRoleAccessProfilesAudited(ctx, role.ID, nil, nil, audit, outbox))
+	audit, outbox = roleAuditFixtures()
+	require.NoError(t, store.DeleteAccessProfileAudited(ctx, profile.ID, audit, outbox))
+	audit, outbox = roleAuditFixtures()
+	require.NoError(t, store.DeleteRoleAudited(ctx, role.ID, audit, outbox))
+}

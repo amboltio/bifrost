@@ -190,6 +190,12 @@ func (s *RDBConfigStore) DeleteRoleAudited(ctx context.Context, id string, audit
 		if assignments > 0 {
 			return ErrRoleInUse
 		}
+		if err := tx.Model(&tables.TableRoleAccessProfileAssignment{}).Where("role_id = ?", id).Count(&assignments).Error; err != nil {
+			return err
+		}
+		if assignments > 0 {
+			return ErrRoleInUse
+		}
 		return tx.Delete(&role).Error
 	})
 }

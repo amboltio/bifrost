@@ -21,7 +21,7 @@ type AccessProfileQueryParams struct {
 }
 
 // AccessProfileManagementStore is the durable OSS contract for reusable
-// provider/model/MCP allow-lists and their source-aware user assignments.
+// provider/model/MCP allow-lists and their source-aware user and role assignments.
 type AccessProfileManagementStore interface {
 	ListAccessProfiles(ctx context.Context, params AccessProfileQueryParams) ([]tables.TableAccessProfile, int64, error)
 	GetAccessProfile(ctx context.Context, id string) (*tables.TableAccessProfile, error)
@@ -29,7 +29,9 @@ type AccessProfileManagementStore interface {
 	UpdateAccessProfileAudited(ctx context.Context, id, name, description string, enabled, allowAllProviders bool, providers, models, mcpTools []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableAccessProfile, error)
 	DeleteAccessProfileAudited(ctx context.Context, id string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
 	ListUserAccessProfileAssignments(ctx context.Context, userID string) ([]tables.TableUserAccessProfileAssignment, error)
+	ListRoleAccessProfileAssignments(ctx context.Context, roleID string) ([]tables.TableRoleAccessProfileAssignment, error)
 	ReplaceManualUserAccessProfilesAudited(ctx context.Context, userID string, profileIDs []string, assignedByUserID *string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
+	ReplaceManualRoleAccessProfilesAudited(ctx context.Context, roleID string, profileIDs []string, assignedByUserID *string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
 }
 
 func (s *RDBConfigStore) ListAccessProfiles(ctx context.Context, params AccessProfileQueryParams) ([]tables.TableAccessProfile, int64, error) {
@@ -156,6 +158,12 @@ func (s *RDBConfigStore) DeleteAccessProfileAudited(ctx context.Context, id stri
 		if assignments > 0 {
 			return ErrAccessProfileInUse
 		}
+		if err := tx.Model(&tables.TableRoleAccessProfileAssignment{}).Where("access_profile_id = ?", id).Count(&assignments).Error; err != nil {
+			return err
+		}
+		if assignments > 0 {
+			return ErrAccessProfileInUse
+		}
 		return tx.Delete(&profile).Error
 	})
 }
@@ -163,6 +171,12 @@ func (s *RDBConfigStore) DeleteAccessProfileAudited(ctx context.Context, id stri
 func (s *RDBConfigStore) ListUserAccessProfileAssignments(ctx context.Context, userID string) ([]tables.TableUserAccessProfileAssignment, error) {
 	var assignments []tables.TableUserAccessProfileAssignment
 	err := s.DB().WithContext(ctx).Where("user_id = ?", strings.TrimSpace(userID)).Order("created_at ASC, id ASC").Find(&assignments).Error
+	return assignments, err
+}
+
+func (s *RDBConfigStore) ListRoleAccessProfileAssignments(ctx context.Context, roleID string) ([]tables.TableRoleAccessProfileAssignment, error) {
+	var assignments []tables.TableRoleAccessProfileAssignment
+	err := s.DB().WithContext(ctx).Where("role_id = ?", strings.TrimSpace(roleID)).Order("created_at ASC, id ASC").Find(&assignments).Error
 	return assignments, err
 }
 
@@ -194,6 +208,42 @@ func (s *RDBConfigStore) ReplaceManualUserAccessProfilesAudited(ctx context.Cont
 		}
 		for _, profileID := range ids {
 			assignment := &tables.TableUserAccessProfileAssignment{ID: uuid.NewString(), UserID: userID, AccessProfileID: profileID, Source: tables.AccessProfileSourceManual, AssignedByUserID: assignedByUserID}
+			if err := tx.Create(assignment).Error; err != nil {
+				return s.parseGormError(err)
+			}
+		}
+		return nil
+	})
+}
+
+func (s *RDBConfigStore) ReplaceManualRoleAccessProfilesAudited(ctx context.Context, roleID string, profileIDs []string, assignedByUserID *string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {
+	roleID = strings.TrimSpace(roleID)
+	if roleID == "" {
+		return ErrNotFound
+	}
+	ids := normalizeStringList(profileIDs)
+	return s.ApplyAuditedChange(ctx, auditEvent, outboxEvent, func(tx *gorm.DB) error {
+		var roleCount int64
+		if err := tx.Model(&tables.TableRole{}).Where("id = ?", roleID).Count(&roleCount).Error; err != nil {
+			return err
+		}
+		if roleCount == 0 {
+			return ErrNotFound
+		}
+		if len(ids) > 0 {
+			var profileCount int64
+			if err := tx.Model(&tables.TableAccessProfile{}).Where("id IN ?", ids).Count(&profileCount).Error; err != nil {
+				return err
+			}
+			if profileCount != int64(len(ids)) {
+				return ErrNotFound
+			}
+		}
+		if err := tx.Where("role_id = ? AND source = ?", roleID, tables.RoleAccessProfileSourceManual).Delete(&tables.TableRoleAccessProfileAssignment{}).Error; err != nil {
+			return err
+		}
+		for _, profileID := range ids {
+			assignment := &tables.TableRoleAccessProfileAssignment{ID: uuid.NewString(), RoleID: roleID, AccessProfileID: profileID, Source: tables.RoleAccessProfileSourceManual, AssignedByUserID: assignedByUserID}
 			if err := tx.Create(assignment).Error; err != nil {
 				return s.parseGormError(err)
 			}

@@ -230,6 +230,14 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 				return authorization.PermissionUsersUpdate, true
 			}
 		}
+		if len(parts) == 2 && parts[0] != "" && parts[1] == "access-profiles" {
+			switch method {
+			case fasthttp.MethodGet:
+				return authorization.PermissionAccessProfilesRead, true
+			case fasthttp.MethodPut:
+				return authorization.PermissionAccessProfilesAssign, true
+			}
+		}
 		return "", false
 	}
 	if path == "/api/governance/business-units" {

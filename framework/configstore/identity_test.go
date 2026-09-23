@@ -39,6 +39,7 @@ func setupIdentityTestStore(t *testing.T, dsn string) *RDBConfigStore {
 		&tables.TableTeamBusinessUnitMembership{},
 		&tables.TableAccessProfile{},
 		&tables.TableUserAccessProfileAssignment{},
+		&tables.TableRoleAccessProfileAssignment{},
 		&tables.TableProject{},
 		&tables.TableProjectMember{},
 		&tables.TableUserVirtualKeyAssignment{},

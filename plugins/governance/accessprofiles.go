@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"context"
 	"sort"
 	"strings"
 
@@ -45,15 +46,42 @@ func (gs *LocalGovernanceStore) resolveUserAccessProfilePermits(ctx *schemas.Bif
 		}
 		return nil
 	}
+	profileIDs := make([]string, 0, len(assignments))
+	for _, assignment := range assignments {
+		profileIDs = append(profileIDs, assignment.AccessProfileID)
+	}
+	if roleStore, ok := gs.configStore.(interface {
+		GetRolesByUserID(context.Context, string) ([]configstoreTables.TableRole, error)
+	}); ok {
+		roles, roleErr := roleStore.GetRolesByUserID(ctx, userID)
+		if roleErr != nil {
+			if gs.logger != nil {
+				gs.logger.Error("failed to resolve roles for access-profile grants: %v", roleErr)
+			}
+		} else {
+			for _, role := range roles {
+				roleAssignments, assignmentErr := gs.profileStore.ListRoleAccessProfileAssignments(ctx, role.ID)
+				if assignmentErr != nil {
+					if gs.logger != nil {
+						gs.logger.Error("failed to resolve role access-profile assignments for role %s: %v", role.ID, assignmentErr)
+					}
+					continue
+				}
+				for _, assignment := range roleAssignments {
+					profileIDs = append(profileIDs, assignment.AccessProfileID)
+				}
+			}
+		}
+	}
 
-	seen := make(map[string]struct{}, len(assignments))
-	permits := make([]schemas.Permit, 0, len(assignments))
+	seen := make(map[string]struct{}, len(profileIDs))
+	permits := make([]schemas.Permit, 0, len(profileIDs))
 	clientNames := map[string]string(nil)
 	if gs.inMemoryStore != nil {
 		clientNames = gs.inMemoryStore.GetMCPClientNames()
 	}
-	for _, assignment := range assignments {
-		profileID := strings.TrimSpace(assignment.AccessProfileID)
+	for _, rawProfileID := range profileIDs {
+		profileID := strings.TrimSpace(rawProfileID)
 		if profileID == "" {
 			continue
 		}
