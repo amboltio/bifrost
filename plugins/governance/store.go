@@ -74,6 +74,8 @@ type LocalGovernanceStore struct {
 
 	// Config store for refresh operations
 	configStore configstore.ConfigStore
+	// projectStore resolves request-time project headers against durable project and membership rows.
+	projectStore configstore.ProjectManagementStore
 
 	// Model catalog for cross-provider model matching (optional)
 	modelCatalog *modelcatalog.ModelCatalog
@@ -305,6 +307,7 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 	store := &LocalGovernanceStore{
 		inMemoryStore:                  inMemoryStore,
 		configStore:                    configStore,
+		projectStore:                   projectManagementStore(configStore),
 		logger:                         logger,
 		modelCatalog:                   modelCatalog,
 		LastDBUsagesBudgets:            make(map[string]float64),
@@ -1261,25 +1264,22 @@ func (gs *LocalGovernanceStore) GetVirtualKeyByID(ctx context.Context, vkID stri
 	return vk, true
 }
 
-// ResolvePermits reports the permits a request carries. This store knows only about virtual keys,
-// so the presented key's permit is the whole answer and nothing scopes it.
+// ResolvePermits reports the permits a request carries: the presented key's permit, if any, and
+// the project permit for an admitted project header, if any.
 func (gs *LocalGovernanceStore) ResolvePermits(ctx *schemas.BifrostContext) ([]schemas.Permit, schemas.Permit, grant.CompositionMode) {
+	var bases []schemas.Permit
 	virtualKeyValue := PresentedVirtualKey(ctx)
-	if virtualKeyValue == "" {
-		// A key is the only thing this store resolves permits from, so no key means nothing granted
-		// this request anything. It carries no access, which is what a request with no credential has
-		// always been: unrestricted, and still bound by the deployment's own limits, which are gathered
-		// for it whether or not it carries a permit.
-		return nil, nil, ""
+	if virtualKeyValue != "" {
+		virtualKey, ok := gs.GetVirtualKey(ctx, virtualKeyValue)
+		if !ok || virtualKey == nil {
+			// A project does not rehabilitate a credential that was presented and failed to resolve.
+			return nil, nil, ""
+		}
+		StampVirtualKeyScope(ctx, virtualKey)
+		bases = []schemas.Permit{gs.permitForVirtualKey(ctx, virtualKey)}
 	}
-	virtualKey, ok := gs.GetVirtualKey(ctx, virtualKeyValue)
-	if !ok || virtualKey == nil {
-		// A credential was presented and resolves to nothing. That is refused, not widened: the
-		// funnel's identity step tells the two apart by what was presented.
-		return nil, nil, ""
-	}
-	StampVirtualKeyScope(ctx, virtualKey)
-	return []schemas.Permit{gs.permitForVirtualKey(ctx, virtualKey)}, nil, ""
+	projectPermit, mode := gs.resolveProjectPermit(ctx)
+	return bases, projectPermit, mode
 }
 
 // PresentedVirtualKey is the virtual key the request presented, read off the identity the

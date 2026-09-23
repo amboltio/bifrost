@@ -22,6 +22,8 @@ type ProjectQueryParams struct {
 type ProjectManagementStore interface {
 	ListProjects(ctx context.Context, params ProjectQueryParams) ([]tables.TableProject, int64, error)
 	GetProject(ctx context.Context, id string) (*tables.TableProject, error)
+	GetProjectByName(ctx context.Context, name string) (*tables.TableProject, error)
+	HasProjectMember(ctx context.Context, projectID, userID string) (bool, error)
 	CreateProjectAudited(ctx context.Context, project *tables.TableProject, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableProject, error)
 	UpdateProjectAudited(ctx context.Context, id, name, description string, enabled bool, expiresAt *time.Time, accessRule, membershipMode, accountingMode, splitPolicy string, allowAllProviders bool, providers, models []string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) (*tables.TableProject, error)
 	DeleteProjectAudited(ctx context.Context, id string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error
@@ -53,6 +55,24 @@ func (s *RDBConfigStore) ListProjects(ctx context.Context, params ProjectQueryPa
 func (s *RDBConfigStore) GetProject(ctx context.Context, id string) (*tables.TableProject, error) {
 	var project tables.TableProject
 	if err := s.DB().WithContext(ctx).First(&project, "id = ?", strings.TrimSpace(id)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &project, nil
+}
+
+// GetProjectByName resolves a project by its exact globally unique name. Request headers must not
+// use the fuzzy search used by the management list endpoint: a description or substring match
+// would otherwise choose a project the caller did not name.
+func (s *RDBConfigStore) GetProjectByName(ctx context.Context, name string) (*tables.TableProject, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	var project tables.TableProject
+	if err := s.DB().WithContext(ctx).First(&project, "name = ?", name).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -189,6 +209,21 @@ func (s *RDBConfigStore) ListProjectMembers(ctx context.Context, projectID strin
 	var members []tables.TableProjectMember
 	err := s.DB().WithContext(ctx).Where("project_id = ?", strings.TrimSpace(projectID)).Order("created_at ASC, id ASC").Find(&members).Error
 	return members, err
+}
+
+// HasProjectMember checks one exact membership without loading the full project roster on the
+// inference path.
+func (s *RDBConfigStore) HasProjectMember(ctx context.Context, projectID, userID string) (bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	userID = strings.TrimSpace(userID)
+	if projectID == "" || userID == "" {
+		return false, nil
+	}
+	var count int64
+	err := s.DB().WithContext(ctx).Model(&tables.TableProjectMember{}).
+		Where("project_id = ? AND user_id = ?", projectID, userID).
+		Count(&count).Error
+	return count > 0, err
 }
 
 func (s *RDBConfigStore) ReplaceManualProjectMembersAudited(ctx context.Context, projectID string, userIDs []string, assignedByUserID *string, auditEvent *tables.TableAuditEvent, outboxEvent *tables.TableOutboxEvent) error {
