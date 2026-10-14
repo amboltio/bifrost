@@ -3,9 +3,11 @@ package tables
 import "github.com/maximhq/bifrost/core/network"
 
 const (
-	ConfigAdminUsernameKey = "admin_username"
-	ConfigAdminPasswordKey = "admin_password"
-	ConfigIsAuthEnabledKey = "is_auth_enabled"
+	ConfigDashboardAuthPolicyKey  = "dashboard_auth_policy_v1"
+	ConfigDashboardInitializedKey = "dashboard_identity_initialized_v1"
+	ConfigAdminUsernameKey        = "admin_username"
+	ConfigAdminPasswordKey        = "admin_password"
+	ConfigIsAuthEnabledKey        = "is_auth_enabled"
 	// ConfigIdentityLegacyBootstrapKey records the canonical user created from
 	// the pre-identity admin configuration. It contains only a user ID and
 	// timestamp, never a username, password, or verifier.
@@ -65,6 +67,9 @@ const (
 	ConfigComplexitySemanticGenerationsKey = "complexity_semantic_generations"
 	ConfigRestartRequiredKey               = "restart_required"
 	ConfigHeaderFilterKey                  = "header_filter_config"
+	// ConfigProxyHashKey stores the hash of the proxy_config config.json last applied. It is its own
+	// row because the proxy row is saved whole by the dashboard, which would wipe a hash kept inside it.
+	ConfigProxyHashKey = "proxy_config_hash"
 )
 
 // Keys for the ClientConfig.MetadataJSON blob.
@@ -94,6 +99,27 @@ type GlobalProxyConfig struct {
 	EnableForSCIM      bool `json:"enable_for_scim"`      // Enable proxy for SCIM requests (enterprise only)
 	EnableForInference bool `json:"enable_for_inference"` // Enable proxy for inference requests
 	EnableForAPI       bool `json:"enable_for_api"`       // Enable proxy for API requests
+}
+
+// ToNetwork converts the stored global proxy config into the form the HTTP client
+// factory takes. nil stays nil.
+func (c *GlobalProxyConfig) ToNetwork() *network.GlobalProxyConfig {
+	if c == nil {
+		return nil
+	}
+	return &network.GlobalProxyConfig{
+		Enabled:            c.Enabled,
+		Type:               c.Type,
+		URL:                c.URL,
+		Username:           c.Username,
+		Password:           c.Password,
+		NoProxy:            c.NoProxy,
+		Timeout:            c.Timeout,
+		SkipTLSVerify:      c.SkipTLSVerify,
+		EnableForSCIM:      c.EnableForSCIM,
+		EnableForInference: c.EnableForInference,
+		EnableForAPI:       c.EnableForAPI,
+	}
 }
 
 // GlobalHeaderFilterConfig represents global header filtering configuration

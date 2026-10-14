@@ -52,6 +52,76 @@ func IsOpenAIReasoningModel(model string) bool {
 	return strings.Contains(modelLower, "gpt-5") || strings.Contains(modelLower, "gpt-6")
 }
 
+// defaultCanDisableReasoning: reasoning.effort "none" exists from GPT-5.1 on.
+// GPT-6 Sol and Luna support it, while GPT-6 Astra and unknown GPT-6 variants
+// conservatively remain always-reasoning.
+func defaultCanDisableReasoning(model string) bool {
+	m := bareModelLower(model)
+	switch {
+	case strings.Contains(m, "gpt-6-sol"), strings.Contains(m, "gpt-6-luna"):
+		return true
+	case strings.Contains(m, "gpt-6"), acceptsMinimalEffort(m):
+		return false
+	case strings.Contains(m, "gpt-5"):
+		return !strings.Contains(m, "-pro")
+	default:
+		return !IsOpenAIReasoningModel(m) || strings.Contains(m, "gpt-oss")
+	}
+}
+
+// defaultSupportsToolSearch is the name-based fallback for
+// ModelCaps.SupportsToolSearch on OpenAI wires. OpenAI documents tool_search and
+// defer_loading on the Responses API for gpt-5.4 and later
+// (https://developers.openai.com/api/docs/guides/tools-tool-search). Azure and
+// Bedrock serve the same OpenAI models on the same wire; other OpenAI-compatible
+// backends are not assumed to understand defer_loading.
+func defaultSupportsToolSearch(provider schemas.ModelProvider, model string) bool {
+	switch provider {
+	case schemas.OpenAI, schemas.Azure, schemas.Bedrock, schemas.BedrockMantle:
+	default:
+		return false
+	}
+	m := bareModelLower(model)
+	return strings.Contains(m, "gpt-5.4") ||
+		strings.Contains(m, "gpt-5.5") ||
+		strings.Contains(m, "gpt-5.6") ||
+		strings.Contains(m, "gpt-6")
+}
+
+// defaultSupportsAsyncTools: async tool calling is GPT-6 Astra and later.
+func defaultSupportsAsyncTools(model string) bool {
+	return strings.Contains(bareModelLower(model), "gpt-6")
+}
+
+// defaultReasoningEffort is the name-based fallback for
+// ModelCaps.DefaultReasoningEffort, per OpenAI's model pages: GPT-5.1 through
+// GPT-5.4 default to "none", the -pro variants to "high", and every other
+// reasoning model (o-series, gpt-5, gpt-5.5, gpt-5.6, gpt-6) to "medium".
+// Non-reasoning models answer "".
+func defaultReasoningEffort(model string) string {
+	if !IsOpenAIReasoningModel(model) {
+		return ""
+	}
+	m := bareModelLower(model)
+	switch {
+	case strings.Contains(m, "-pro"):
+		return schemas.ReasoningEffortHigh
+	case strings.Contains(m, "gpt-5.1"), strings.Contains(m, "gpt-5.2"),
+		strings.Contains(m, "gpt-5.3"), strings.Contains(m, "gpt-5.4"):
+		return schemas.ReasoningEffortNone
+	default:
+		return schemas.ReasoningEffortMedium
+	}
+}
+
+// omittedEffortReasons reports whether the model still reasons when
+// reasoning.effort is omitted: the datasheet's default_reasoning_effort, else
+// the name-based default.
+func omittedEffortReasons(caps schemas.ModelCaps, model string) bool {
+	effort := caps.DefaultReasoningEffort(defaultReasoningEffort(model))
+	return effort != "" && effort != schemas.ReasoningEffortNone
+}
+
 // defaultEffortControl widens the base low/medium/high ladder with the effort
 // levels a model natively accepts. Only the widening is name-derived; the
 // datasheet's per-level booleans take precedence when a row exists.
@@ -88,6 +158,33 @@ func acceptsXHighEffort(model string) bool {
 		strings.Contains(modelLower, "gpt-5.5") ||
 		strings.Contains(modelLower, "gpt-5.6") ||
 		strings.Contains(modelLower, "gpt-6")
+}
+
+// defaultReasoningContexts is the name-based fallback for
+// ModelCaps.SupportedReasoningContexts, used when the datasheet says nothing:
+// the base "auto"/"current_turn" pair, widened with "all_turns" for the
+// families that accept it.
+func defaultReasoningContexts(model string) []string {
+	contexts := []string{schemas.ReasoningContextAuto, schemas.ReasoningContextCurrentTurn}
+	if acceptsAllTurnsContext(model) {
+		contexts = append(contexts, schemas.ReasoningContextAllTurns)
+	}
+	return contexts
+}
+
+// acceptsAllTurnsContext reports models that accept reasoning.context
+// "all_turns". OpenAI documents it as the GPT-5.6 default
+// with earlier models defaulting to "current_turn"
+// (https://developers.openai.com/api/docs/guides/reasoning); gpt-5.4 and
+// gpt-5.5 (incl. -pro) accept it too, while the original gpt-5 family (incl.
+// -pro), gpt-5.1..5.3 and the o-series answer 400 "Supported values are:
+// 'auto' and 'current_turn'". Same substring matching as acceptsXHighEffort.
+func acceptsAllTurnsContext(model string) bool {
+	m := bareModelLower(model)
+	return strings.Contains(m, "gpt-5.4") ||
+		strings.Contains(m, "gpt-5.5") ||
+		strings.Contains(m, "gpt-5.6") ||
+		strings.Contains(m, "gpt-6")
 }
 
 // acceptsMinimalEffort reports models that natively accept "minimal" effort:

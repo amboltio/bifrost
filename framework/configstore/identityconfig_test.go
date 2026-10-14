@@ -1,14 +1,80 @@
 package configstore
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAuthConfigPersistenceKeepsLoginPolicyWithoutGlobalCredentials(t *testing.T) {
+	store := setupLegacyBootstrapStore(t)
+	config := &AuthConfig{IsEnabled: true, LocalLogin: &LocalLoginConfig{
+		IsEnabled: true, SessionTTLSeconds: 7200, IdleTimeoutSeconds: 600,
+	}}
+	require.NoError(t, store.UpdateAuthConfig(context.Background(), config))
+	loaded, err := store.GetAuthConfig(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, config.LocalLogin, loaded.LocalLogin)
+	assert.Nil(t, loaded.AdminUserName)
+	assert.Nil(t, loaded.AdminPassword)
+}
+
+// TestAuthConfigPersistenceRoundTripsWithAndWithoutEncryptionKey protects
+// installs that run without an encryption key: the stored policy must be
+// readable back, and only flagged encrypted when it really was.
+func TestAuthConfigPersistenceRoundTripsWithAndWithoutEncryptionKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{{"without key", ""}, {"with key", testEncryptionKey}} {
+		t.Run(tc.name, func(t *testing.T) {
+			encrypt.Init(tc.key, bifrost.NewDefaultLogger(schemas.LogLevelInfo))
+			t.Cleanup(func() { encrypt.Init(testEncryptionKey, bifrost.NewDefaultLogger(schemas.LogLevelInfo)) })
+			store := setupLegacyBootstrapStore(t)
+			config := &AuthConfig{IsEnabled: true, LocalLogin: &LocalLoginConfig{IsEnabled: true, SessionTTLSeconds: 7200, IdleTimeoutSeconds: 600}}
+			require.NoError(t, store.UpdateAuthConfig(context.Background(), config))
+			loaded, err := store.GetAuthConfig(context.Background())
+			require.NoError(t, err)
+			require.NotNil(t, loaded)
+			assert.Equal(t, config.LocalLogin, loaded.LocalLogin)
+		})
+	}
+}
+
+// TestStoredAuthPolicyKeepsSecretReferencesNotResolvedValues pins that a
+// provider secret supplied as an external reference is persisted as the
+// reference only; the resolved environment value never reaches the row.
+func TestStoredAuthPolicyKeepsSecretReferencesNotResolvedValues(t *testing.T) {
+	encrypt.Init("", bifrost.NewDefaultLogger(schemas.LogLevelInfo))
+	t.Cleanup(func() { encrypt.Init(testEncryptionKey, bifrost.NewDefaultLogger(schemas.LogLevelInfo)) })
+	t.Setenv("TEST_OIDC_CLIENT_SECRET", "resolved-secret-value")
+	store := setupLegacyBootstrapStore(t)
+	config := &AuthConfig{IsEnabled: true, OIDCProviders: []OIDCProviderConfig{{
+		ID: "entra", DisplayName: "Entra", IssuerURL: "https://login.example.test/tenant/v2.0",
+		ClientID: schemas.NewSecretVar("client-id"), ClientSecret: schemas.NewSecretVar("env.TEST_OIDC_CLIENT_SECRET"), IsEnabled: true,
+	}}}
+	require.NoError(t, store.UpdateAuthConfig(context.Background(), config))
+
+	var row tables.TableGovernanceConfig
+	require.NoError(t, store.DB().First(&row, "key = ?", tables.ConfigDashboardAuthPolicyKey).Error)
+	assert.NotContains(t, row.Value, "resolved-secret-value")
+	assert.Contains(t, row.Value, "env.TEST_OIDC_CLIENT_SECRET")
+}
+
+func TestAuthConfigExplicitLocalDisableOverridesLegacyFields(t *testing.T) {
+	config := AuthConfig{IsEnabled: true, LocalLogin: &LocalLoginConfig{IsEnabled: false},
+		AdminUserName: schemas.NewSecretVar("old-admin"), AdminPassword: schemas.NewSecretVar("old-verifier")}
+	assert.Empty(t, config.AuthenticationMethods())
+}
 
 func TestAuthConfigAuthenticationMethodsSupportLocalOIDCAndMixedModes(t *testing.T) {
 	tests := []struct {

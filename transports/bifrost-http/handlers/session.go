@@ -16,7 +16,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/identity"
-	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
 
@@ -24,6 +24,10 @@ import (
 type SessionHandler struct {
 	configStore   configstore.ConfigStore
 	wsTicketStore *WSTicketStore
+	// setupLock is the OSS setup-lock gate (see AuthMiddleware.SetupLockMiddleware). Nil
+	// when the gate is not installed (enterprise, or no config store), in which case
+	// is-auth-enabled never reports setup_required.
+	setupLock     *AuthMiddleware
 	loginThrottle *identity.LoginThrottle
 }
 
@@ -31,6 +35,7 @@ type SessionHandler struct {
 // for older dashboard clients; identity_capabilities gates newer management
 // views until the corresponding protected backend slice is implemented.
 type AuthStatusResponse struct {
+	IdentityInitialized   bool                                    `json:"identity_initialized"`
 	IsAuthEnabled         bool                                    `json:"is_auth_enabled"`
 	HasValidToken         bool                                    `json:"has_valid_token"`
 	AuthType              string                                  `json:"auth_type"`
@@ -38,6 +43,18 @@ type AuthStatusResponse struct {
 	AuthMethods           []string                                `json:"auth_methods"`
 	Providers             []oidcProviderResponse                  `json:"providers,omitempty"`
 	IdentityCapabilities  configstore.IdentityFeatureCapabilities `json:"identity_capabilities"`
+	// InferenceAuthEnforced reports enforce_auth_on_inference, which gates /v1/*
+	// separately from dashboard auth.
+	InferenceAuthEnforced bool `json:"inference_auth_enforced"`
+	SetupRequired         bool `json:"setup_required"`
+	SetupTokenConfigured  bool `json:"setup_token_configured"`
+}
+
+func (r AuthStatusResponse) withSetupState(inferenceAuthEnforced, setupRequired, setupTokenConfigured bool) AuthStatusResponse {
+	r.InferenceAuthEnforced = inferenceAuthEnforced
+	r.SetupRequired = setupRequired
+	r.SetupTokenConfigured = setupTokenConfigured
+	return r
 }
 
 func newAuthStatusResponse(isEnabled bool, hasValidToken bool) AuthStatusResponse {
@@ -86,8 +103,75 @@ func NewSessionHandler(configStore configstore.ConfigStore, wsTicketStore *WSTic
 	}
 }
 
+// SetSetupLock tells the handler the OSS setup-lock gate is installed, so is-auth-enabled
+// reports setup_required / setup_token_configured and ws-ticket issues setup-token tickets.
+func (h *SessionHandler) SetSetupLock(m *AuthMiddleware) {
+	h.setupLock = m
+}
+
+// setSetupSessionCookie writes (or, with an empty value, expires) the HttpOnly setup session
+// cookie. SameSite=Strict: it only ever needs to ride the dashboard's own requests.
+func setSetupSessionCookie(ctx *fasthttp.RequestCtx, value string, expires time.Time) {
+	cookie := fasthttp.AcquireCookie()
+	defer fasthttp.ReleaseCookie(cookie)
+	cookie.SetKey(SetupSessionCookie)
+	cookie.SetValue(value)
+	cookie.SetExpire(expires)
+	cookie.SetPath("/")
+	cookie.SetHTTPOnly(true)
+	cookie.SetSameSite(fasthttp.CookieSameSiteStrictMode)
+	if ctx.IsTLS() || string(ctx.Request.Header.Peek("X-Forwarded-Proto")) == "https" {
+		cookie.SetSecure(true)
+	}
+	ctx.Response.Header.SetCookie(cookie)
+}
+
+// startSetupSession handles POST /api/session/setup: while the OSS setup lock is active, it
+// trades the setup token (X-Bifrost-Setup-Token, checked here rather than trusting a cookie
+// so a session cannot extend itself) for an HttpOnly setup session cookie. The dashboard
+// keeps no copy of the token; the cookie authenticates its calls until it expires or
+// dashboard auth is enabled.
+func (h *SessionHandler) startSetupSession(ctx *fasthttp.RequestCtx) {
+	if store, ok := h.configStore.(configstore.DashboardIdentityStateStore); ok {
+		state, err := store.GetDashboardIdentityState(ctx)
+		if err != nil {
+			SendError(ctx, 503, "Authentication state unavailable")
+			return
+		}
+		if state.Initialized {
+			SendError(ctx, 409, "Setup is already complete")
+			return
+		}
+	}
+	if h.setupLock == nil || h.setupLock.IsDashboardAuthActive() {
+		SendError(ctx, fasthttp.StatusConflict, "the setup lock is not active")
+		return
+	}
+	if !h.setupLock.CheckConfiguredSetupToken(string(ctx.Request.Header.Peek(SetupTokenHeader))) {
+		SendError(ctx, fasthttp.StatusForbidden, "invalid setup token")
+		return
+	}
+	value, expires, err := h.setupLock.IssueSetupSession(time.Now())
+	if err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, "failed to start setup session")
+		return
+	}
+	setSetupSessionCookie(ctx, value, expires)
+	SendJSON(ctx, map[string]any{"expires_at": expires.UTC().Format(time.RFC3339)})
+}
+
+// setupLockState reports whether the setup-lock gate is currently locking the API and
+// whether the operator configured a setup token.
+func (h *SessionHandler) setupLockState() (setupRequired bool, setupTokenConfigured bool) {
+	if h.setupLock == nil {
+		return false, false
+	}
+	return !h.setupLock.IsDashboardAuthActive(), h.setupLock.HasSetupToken()
+}
+
 // RegisterRoutes registers the session-related routes
 func (h *SessionHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
+	r.POST("/api/session/setup-admin", lib.ChainMiddlewares(h.setupAdmin, middlewares...))
 	r.POST("/api/session/login", lib.ChainMiddlewares(h.login, middlewares...))
 	r.POST("/api/session/logout", lib.ChainMiddlewares(h.logout, middlewares...))
 	r.GET("/api/session/is-auth-enabled", lib.ChainMiddlewares(h.isAuthEnabled, middlewares...))
@@ -97,13 +181,38 @@ func (h *SessionHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 	r.POST("/api/session/logout-all", lib.ChainMiddlewares(h.logoutAll, middlewares...))
 	r.DELETE("/api/session/sessions/{id}", lib.ChainMiddlewares(h.revokeOwnedSession, middlewares...))
 	r.POST("/api/session/change-password", lib.ChainMiddlewares(h.changePassword, middlewares...))
+	r.POST("/api/session/setup", lib.ChainMiddlewares(h.startSetupSession, middlewares...))
 }
 
 // isAuthEnabled handles GET /api/session/is-auth-enabled - Check if auth is enabled
 func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
+	setupRequired, setupTokenConfigured := h.setupLockState()
+	initialized := false
+	if store, ok := h.configStore.(configstore.DashboardIdentityStateStore); ok {
+		state, err := store.GetDashboardIdentityState(ctx)
+		if err != nil {
+			SendError(ctx, 503, "Authentication state unavailable")
+			return
+		}
+		initialized = state.Initialized
+		// Initialization only ever closes setup. Whether setup is offered at all
+		// stays with the setup-lock gate, which is absent when another edition
+		// owns first-run setup.
+		if initialized {
+			setupRequired = false
+		}
+	}
 	if h.configStore == nil {
-		SendJSON(ctx, newAuthStatusResponse(false, false))
+		SendJSON(ctx, newAuthStatusResponse(false, false).withSetupState(false, setupRequired, setupTokenConfigured))
 		return
+	}
+	// inference_auth_enforced reports enforce_auth_on_inference - a separate toggle from
+	// dashboard auth (this endpoint's main subject) that gates /v1/* instead of the
+	// dashboard/admin API. Surfaced here so a locked dashboard doesn't look like the whole
+	// gateway is secured when this second, easily-missed control is still off.
+	inferenceAuthEnforced := false
+	if clientConfig, err := h.configStore.GetClientConfig(ctx); err == nil && clientConfig != nil {
+		inferenceAuthEnforced = clientConfig.EnforceAuthOnInference
 	}
 	authConfig, err := h.configStore.GetAuthConfig(ctx)
 	if err != nil {
@@ -111,7 +220,7 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if authConfig == nil {
-		SendJSON(ctx, newAuthStatusResponse(false, false))
+		SendJSON(ctx, newAuthStatusResponse(false, false).withSetupState(inferenceAuthEnforced, setupRequired, setupTokenConfigured))
 		return
 	}
 	// Check if the header has a token and is valid (Authorization header or cookie)
@@ -127,9 +236,11 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 		_, _, hasValidToken = validateDashboardSession(h.configStore, token, sessionPolicyForAuthConfig(authConfig))
 	}
 	response := newAuthStatusResponse(authConfig.IsEnabled, hasValidToken)
+	response.IdentityInitialized = initialized
 	response.AuthenticationMethods = authConfig.AuthenticationMethods()
 	response.AuthMethods = append([]string(nil), response.AuthenticationMethods...)
 	response.AuthType = dashboardAuthTypeForMethods(response.AuthenticationMethods)
+	response = response.withSetupState(inferenceAuthEnforced, setupRequired, setupTokenConfigured)
 	for _, provider := range authConfig.EnabledOIDCProviders() {
 		response.Providers = append(response.Providers, oidcProviderResponse{ID: provider.ID, DisplayName: provider.DisplayName})
 	}
@@ -301,6 +412,9 @@ func (h *SessionHandler) logout(ctx *fasthttp.RequestCtx) {
 	}
 
 	clearSessionCookie(ctx)
+	// Drop any setup session as well, so a later return to the setup lock (auth disabled
+	// again) cannot be re-entered with a cookie from before.
+	setSetupSessionCookie(ctx, "", time.Now().Add(-time.Hour))
 
 	// Revoke canonical sessions so the audit/session-management view retains a
 	// bounded record. Old ownerless rows keep the legacy delete behavior until
@@ -333,7 +447,37 @@ func (h *SessionHandler) currentUser(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusUnauthorized, "Unauthorized")
 		return
 	}
-	SendJSON(ctx, configstore.NewUserProfile(*user))
+	roles, err := h.configStore.GetUserRoleAssignments(ctx, user.ID)
+	if err != nil {
+		SendError(ctx, 503, "User permissions unavailable")
+		return
+	}
+	isSuperAdmin := false
+	for _, role := range roles {
+		if role.RoleID == tables.RoleIDSuperAdmin {
+			isSuperAdmin = true
+		}
+	}
+	hasPassword := false
+	if store, ok := h.configStore.(interface {
+		ListCredentialsByUserID(context.Context, string) ([]tables.TableCredential, error)
+	}); ok {
+		credentials, err := store.ListCredentialsByUserID(ctx, user.ID)
+		if err != nil {
+			SendError(ctx, 503, "Account credentials unavailable")
+			return
+		}
+		for _, credential := range credentials {
+			if credential.IsActive && (credential.Kind == tables.CredentialKindPassword || credential.Kind == tables.CredentialKindLegacyPassword) {
+				hasPassword = true
+			}
+		}
+	}
+	SendJSON(ctx, struct {
+		configstore.UserProfile
+		IsSuperAdmin     bool `json:"is_super_admin"`
+		HasLocalPassword bool `json:"has_local_password"`
+	}{configstore.NewUserProfile(*user), isSuperAdmin, hasPassword})
 }
 
 // listSessions returns safe metadata for the authenticated user's devices.

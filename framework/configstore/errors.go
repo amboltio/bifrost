@@ -13,9 +13,19 @@ var ErrLastAuthenticationMethod = errors.New("operation would remove the last ac
 var ErrRoleImmutable = errors.New("role is immutable")
 var ErrRoleInUse = errors.New("role is assigned to users")
 var ErrInvalidPermission = errors.New("role contains an unknown permission")
+var ErrRoleDelegationDenied = errors.New("actor cannot delegate the requested role permissions")
 var ErrBusinessUnitInUse = errors.New("business unit has active memberships")
 var ErrAccessProfileInUse = errors.New("access profile has active assignments")
 var ErrProjectInUse = errors.New("project has active members")
+
+// ErrRoutingRulePriorityTaken is returned when a routing rule's priority is already used by another
+// rule in the same scope and scope ID. It wraps ErrAlreadyExists and reads the same, so callers that
+// only ask whether something already exists are unaffected; callers that advise changing the
+// priority check for it, since a duplicate name surfaces as ErrAlreadyExists too.
+var ErrRoutingRulePriorityTaken = fmt.Errorf("%w", ErrAlreadyExists)
+
+// ErrInvalidAgentGrant marks malformed Agent grant input supplied by a caller.
+var ErrInvalidAgentGrant = errors.New("invalid agent grant")
 
 // ErrMCPEndpointSlugExists is returned when a create resolves an endpoint slug already used by a
 // Virtual MCP or an MCP client. Both serve at /mcp/<slug>, so the slug namespace is shared; callers

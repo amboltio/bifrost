@@ -184,8 +184,15 @@ func (s *RDBConfigStore) CreateInitialSuperAdmin(ctx context.Context, user *tabl
 			return err
 		}
 
+		state, err := dashboardIdentityState(tx)
+		if err != nil {
+			return err
+		}
+		if state.Initialized {
+			return ErrAlreadyExists
+		}
 		var activeUsers int64
-		if err := tx.Model(&tables.TableUser{}).Where("status = ?", tables.UserStatusActive).Count(&activeUsers).Error; err != nil {
+		if err := tx.Model(&tables.TableUser{}).Count(&activeUsers).Error; err != nil {
 			return err
 		}
 		if activeUsers != 0 {
@@ -200,9 +207,16 @@ func (s *RDBConfigStore) CreateInitialSuperAdmin(ctx context.Context, user *tabl
 				return err
 			}
 		}
-		return s.AssignRole(ctx, &tables.TableRoleAssignment{
+		if err := s.AssignRole(ctx, &tables.TableRoleAssignment{
 			ID: uuid.NewString(), UserID: user.ID, RoleID: role.ID,
-		}, tx)
+		}, tx); err != nil {
+			return err
+		}
+		policy := &AuthConfig{IsEnabled: true, LocalLogin: &LocalLoginConfig{IsEnabled: true}}
+		if err := writeDashboardPolicy(tx, policy, 1); err != nil {
+			return err
+		}
+		return markDashboardInitialized(tx)
 	})
 	if err != nil {
 		return nil, err

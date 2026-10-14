@@ -23,6 +23,7 @@ func setupIdentityTestStore(t *testing.T, dsn string) *RDBConfigStore {
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
+		&tables.TableGovernanceConfig{},
 		&tables.TableUser{},
 		&tables.TableCredential{},
 		&tables.TableExternalIdentity{},
@@ -55,6 +56,23 @@ func setupIdentityTestStore(t *testing.T, dsn string) *RDBConfigStore {
 }
 
 func ptr(value string) *string { return &value }
+
+func TestInitialAdminCreatesDurablePolicyAndCannotReopenSetup(t *testing.T) {
+	store := setupIdentityTestStore(t, ":memory:")
+	ctx := context.Background()
+	user, err := store.CreateInitialSuperAdmin(ctx, &tables.TableUser{Email: ptr("admin@example.test"), Status: tables.UserStatusActive}, &tables.TableCredential{Kind: tables.CredentialKindPassword, SecretHash: "test-verifier", IsActive: true})
+	require.NoError(t, err)
+	state, err := store.GetDashboardIdentityState(ctx)
+	require.NoError(t, err)
+	require.True(t, state.Initialized)
+	policy, err := store.GetAuthConfig(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, policy)
+	assert.Equal(t, []string{"local"}, policy.AuthenticationMethods())
+	require.NoError(t, store.DB().Model(user).Update("status", tables.UserStatusDisabled).Error)
+	_, err = store.CreateInitialSuperAdmin(ctx, &tables.TableUser{Email: ptr("attacker@example.test")}, nil)
+	require.ErrorIs(t, err, ErrAlreadyExists)
+}
 
 // TestIdentityMigrationCreatesCanonicalTablesAndSuperAdminRole protects the
 // migration boundary before authentication code starts depending on it. The

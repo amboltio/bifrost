@@ -292,6 +292,21 @@ func (s *RDBConfigStore) createManagedUser(ctx context.Context, tx *gorm.DB, use
 	if err := requireKnownRoles(tx, roleIDs); err != nil {
 		return err
 	}
+	var actor *tables.TableUser
+	if user.CreatedByUserID != nil {
+		actorID := strings.TrimSpace(*user.CreatedByUserID)
+		if actorID == "" {
+			return ErrRoleDelegationDenied
+		}
+		var err error
+		actor, err = lockedUser(tx, actorID)
+		if err != nil {
+			return err
+		}
+	}
+	if err := requireDelegatedRoleGrants(tx, actor, roleIDs); err != nil {
+		return err
+	}
 	if err := s.CreateUser(ctx, user, tx); err != nil {
 		return err
 	}
@@ -375,7 +390,7 @@ func (s *RDBConfigStore) ReplaceUserRoleAssignmentsAudited(ctx context.Context, 
 }
 
 func (s *RDBConfigStore) replaceUserRoleAssignments(tx *gorm.DB, userID string, roleIDs []string, assignedByUserID *string) error {
-	user, err := lockedUser(tx, userID)
+	user, actor, err := lockRoleAssignmentUsers(tx, userID, assignedByUserID)
 	if err != nil {
 		return err
 	}
@@ -383,6 +398,9 @@ func (s *RDBConfigStore) replaceUserRoleAssignments(tx *gorm.DB, userID string, 
 		return err
 	}
 	if err := requireKnownRoles(tx, roleIDs); err != nil {
+		return err
+	}
+	if err := requireDelegatedRoleGrants(tx, actor, roleIDs); err != nil {
 		return err
 	}
 	var current []tables.TableRoleAssignment
@@ -422,6 +440,82 @@ func normalizedRoleIDs(roleIDs []string) []string {
 		result = append(result, roleID)
 	}
 	return result
+}
+
+func lockRoleAssignmentUsers(tx *gorm.DB, targetUserID string, assignedByUserID *string) (*tables.TableUser, *tables.TableUser, error) {
+	actorID := ""
+	if assignedByUserID != nil {
+		actorID = strings.TrimSpace(*assignedByUserID)
+		if actorID == "" {
+			return nil, nil, ErrRoleDelegationDenied
+		}
+	}
+	userIDs := []string{targetUserID}
+	if actorID != "" && actorID != targetUserID {
+		userIDs = append(userIDs, actorID)
+		slices.Sort(userIDs)
+	}
+	var target, actor *tables.TableUser
+	for _, userID := range userIDs {
+		user, err := lockedUser(tx, userID)
+		if err != nil {
+			if userID == actorID {
+				return nil, nil, ErrRoleDelegationDenied
+			}
+			return nil, nil, err
+		}
+		if userID == targetUserID {
+			target = user
+		}
+		if userID == actorID {
+			actor = user
+		}
+	}
+	return target, actor, nil
+}
+
+func requireDelegatedRoleGrants(tx *gorm.DB, actor *tables.TableUser, roleIDs []string) error {
+	if actor == nil {
+		return nil // Trusted system or legacy-admin operation without a canonical actor.
+	}
+	if actor.Status != tables.UserStatusActive {
+		return ErrRoleDelegationDenied
+	}
+	var actorRoles []tables.TableRole
+	if err := dbForUpdate(tx).Model(&tables.TableRole{}).
+		Joins("JOIN identity_role_assignments ON identity_role_assignments.role_id = identity_roles.id").
+		Where("identity_role_assignments.user_id = ?", actor.ID).
+		Order("identity_roles.id ASC").
+		Find(&actorRoles).Error; err != nil {
+		return err
+	}
+	actorPermissions := make(map[string]struct{})
+	for _, role := range actorRoles {
+		if role.ID == tables.RoleIDSuperAdmin {
+			return nil
+		}
+		for _, permission := range role.Permissions {
+			actorPermissions[permission] = struct{}{}
+		}
+	}
+	if _, allowed := actorPermissions[string(authorization.PermissionUsersAssignRoles)]; !allowed {
+		return ErrRoleDelegationDenied
+	}
+	var targetRoles []tables.TableRole
+	if err := dbForUpdate(tx).Where("id IN ?", roleIDs).Order("id ASC").Find(&targetRoles).Error; err != nil {
+		return err
+	}
+	for _, role := range targetRoles {
+		if role.ID == tables.RoleIDSuperAdmin {
+			return ErrRoleDelegationDenied
+		}
+		for _, permission := range role.Permissions {
+			if _, allowed := actorPermissions[permission]; !allowed {
+				return ErrRoleDelegationDenied
+			}
+		}
+	}
+	return nil
 }
 
 func requireKnownRoles(tx *gorm.DB, roleIDs []string) error {

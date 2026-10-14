@@ -310,8 +310,8 @@ func containsString(values []string, want string) bool {
 }
 
 func (c AuthConfig) localLoginEnabled() bool {
-	if c.LocalLogin != nil && c.LocalLogin.IsEnabled {
-		return true
+	if c.LocalLogin != nil {
+		return c.LocalLogin.IsEnabled
 	}
 	return hasConfiguredSecret(c.AdminUserName) && hasConfiguredSecret(c.AdminPassword)
 }

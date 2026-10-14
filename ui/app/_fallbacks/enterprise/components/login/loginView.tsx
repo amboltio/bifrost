@@ -54,7 +54,7 @@ export default function LoginView() {
 		setErrorMessage("");
 		try {
 			await login({ email: identifier, username: identifier, password }).unwrap();
-			navigate({ to: "/workspace" });
+			navigate({ href: getLoginGotoFromSearch(window.location.search) ?? DEFAULT_POST_LOGIN_PATH });
 		} catch (error) {
 			const message = getErrorMessage(error);
 			setErrorMessage(message);
