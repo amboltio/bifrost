@@ -86,7 +86,10 @@ func (s *RDBConfigStore) BootstrapLegacyAdmin(ctx context.Context, input LegacyA
 		var markerRow tables.TableGovernanceConfig
 		err := dbForUpdate(tx).First(&markerRow, "key = ?", tables.ConfigIdentityLegacyBootstrapKey).Error
 		if err == nil {
-			return s.loadLegacyBootstrapMarker(ctx, tx, markerRow, now, result)
+			if err := s.loadLegacyBootstrapMarker(ctx, tx, markerRow, now, result); err != nil {
+				return err
+			}
+			return initializeImportedDashboard(tx)
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -141,12 +144,34 @@ func (s *RDBConfigStore) BootstrapLegacyAdmin(ctx context.Context, input LegacyA
 		result.User = user
 		result.Imported = true
 		result.BoundSessions = bound
-		return nil
+		return initializeImportedDashboard(tx)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func initializeImportedDashboard(tx *gorm.DB) error {
+	state, err := dashboardIdentityState(tx)
+	if err != nil || state.Initialized {
+		return err
+	}
+	policy, err := readDashboardPolicy(tx)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		policy = &DashboardAuthPolicy{Revision: 1, AuthConfig: AuthConfig{}}
+	} else if err != nil {
+		return err
+	}
+	policy.AuthConfig.IsEnabled = true
+	if policy.AuthConfig.LocalLogin == nil {
+		policy.AuthConfig.LocalLogin = &LocalLoginConfig{IsEnabled: true}
+	}
+	policy.AuthConfig.AdminUserName, policy.AuthConfig.AdminPassword = nil, nil
+	if err := writeDashboardPolicy(tx, &policy.AuthConfig, policy.Revision); err != nil {
+		return err
+	}
+	return markDashboardInitialized(tx)
 }
 
 func (s *RDBConfigStore) loadLegacyBootstrapMarker(ctx context.Context, tx *gorm.DB, row tables.TableGovernanceConfig, now time.Time, result *LegacyAdminBootstrapResult) error {

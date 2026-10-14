@@ -5751,7 +5751,7 @@ func preserveSecretVar(source *schemas.SecretVar, value string) *schemas.SecretV
 // File config (configData) always takes precedence over DB config.
 func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData) error {
 	hasFileConfig := configData != nil && (configData.AuthConfig != nil || (configData.Governance != nil && configData.Governance.AuthConfig != nil))
-	if !hasFileConfig && (config.GovernanceConfig == nil || config.GovernanceConfig.AuthConfig == nil) {
+	if !hasFileConfig && config.ConfigStore == nil && (config.GovernanceConfig == nil || config.GovernanceConfig.AuthConfig == nil) {
 		return nil
 	}
 	// Ensure GovernanceConfig is initialized
@@ -5761,8 +5761,7 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 	fileAuthConfig := authConfigFromConfigData(configData)
 	if fileAuthConfig != nil {
 		if err := fileAuthConfig.Validate(); err != nil {
-			logger.Warn("invalid auth config from file: %v", err)
-			return nil
+			return fmt.Errorf("invalid auth config from file: %w", err)
 		}
 		normalized := fileAuthConfig.Normalized()
 		fileAuthConfig = &normalized
@@ -5778,6 +5777,22 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 	dbAuthConfig, err := config.ConfigStore.GetAuthConfig(ctx)
 	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return fmt.Errorf("failed to get auth config from store: %w", err)
+	}
+	if store, ok := config.ConfigStore.(configstore.DashboardIdentityStateStore); ok {
+		state, err := store.GetDashboardIdentityState(ctx)
+		if err != nil {
+			return err
+		}
+		if state.Initialized {
+			if dbAuthConfig == nil || !dbAuthConfig.IsEnabled {
+				return fmt.Errorf("initialized dashboard requires a login policy")
+			}
+			config.GovernanceConfig.AuthConfig = dbAuthConfig
+			if hasFileConfig {
+				logger.Warn("Dashboard user access is initialized; manage login policy in Security Settings. Legacy file credentials are ignored.")
+			}
+			return nil
+		}
 	}
 	// If no file config, use DB config and return (no write needed)
 	if !hasFileConfig {
@@ -5796,7 +5811,7 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 	// an unrelated plaintext row.
 	if authConfig.AdminPassword == nil || authConfig.AdminUserName == nil {
 		config.GovernanceConfig.AuthConfig = authConfig
-		return nil
+		return config.ConfigStore.UpdateAuthConfig(ctx, authConfig)
 	}
 	// Fail-closed: if env/vault reference is unresolved, don't persist empty credentials.
 	if authConfig.AdminUserName != nil && authConfig.AdminUserName.GetValue() == "" && authConfig.AdminUserName.IsFromSecret() {

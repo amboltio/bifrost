@@ -6082,15 +6082,17 @@
       "properties": {
         "admin_username": {
           "type": "string",
-          "description": "Admin username"
+          "description": "Legacy admin username, imported once into a canonical user. Not used for dashboard access after initialization.",
+          "deprecated": true
         },
         "admin_password": {
           "type": "string",
-          "description": "Admin password"
+          "description": "Legacy admin password for one-time migration. Manage user passwords through Users or account security after initialization.",
+          "deprecated": true
         },
         "is_enabled": {
           "type": "boolean",
-          "description": "Whether authentication is enabled"
+          "description": "Whether authentication is enabled. Must remain true after canonical dashboard initialization. Disable a login method through local_login instead."
         },
         "local_login": {
           "type": "object",

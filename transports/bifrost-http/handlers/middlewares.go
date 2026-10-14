@@ -1261,6 +1261,9 @@ func validateDashboardSession(store configstore.ConfigStore, token string, polic
 		}
 		return principal, true, true
 	}
+	if _, canonical := store.(identity.CanonicalUserLookupStore); canonical {
+		return identity.Principal{}, true, false
+	}
 	return identity.Principal{}, false, session.IsActiveAt(time.Now())
 }
 
@@ -1395,13 +1398,14 @@ func virtualKeyFromHeaders(ctx *fasthttp.RequestCtx) string {
 
 // AuthMiddleware is a middleware that handles authentication for the API.
 type AuthMiddleware struct {
-	store             configstore.ConfigStore
-	whitelistedRoutes atomic.Pointer[[]string]
-	allowedOrigins    atomic.Pointer[[]string] // client_config.allowed_origins; read while auth is disabled
-	authConfig        atomic.Pointer[configstore.AuthConfig]
-	wsTicketStore     *WSTicketStore
-	tempTokensService *temptoken.Service // optional; when nil, temp-token fallback is disabled
-	tempTokensEnabled atomic.Bool
+	identityInitialized atomic.Bool
+	store               configstore.ConfigStore
+	whitelistedRoutes   atomic.Pointer[[]string]
+	allowedOrigins      atomic.Pointer[[]string] // client_config.allowed_origins; read while auth is disabled
+	authConfig          atomic.Pointer[configstore.AuthConfig]
+	wsTicketStore       *WSTicketStore
+	tempTokensService   *temptoken.Service // optional; when nil, temp-token fallback is disabled
+	tempTokensEnabled   atomic.Bool
 	// bootstrapToken gates creation of the very first admin account. It is sourced
 	// from operator config (config.json setup_token or the BIFROST_SETUP_TOKEN env
 	// var) — never generated in-memory — so every node in a multi-node deployment
@@ -1945,6 +1949,40 @@ func (m *AuthMiddleware) SetupLockMiddleware() schemas.BifrostHTTPMiddleware {
 	}
 	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 		return func(ctx *fasthttp.RequestCtx) {
+			if lifecycle, canonical := m.store.(configstore.DashboardIdentityStateStore); canonical {
+				if !m.identityInitialized.Load() {
+					state, err := lifecycle.GetDashboardIdentityState(ctx)
+					if err != nil {
+						SendError(ctx, 503, "Authentication state unavailable")
+						return
+					}
+					m.identityInitialized.Store(state.Initialized)
+				}
+				path := string(ctx.Request.URI().PathOriginal())
+				if m.identityInitialized.Load() {
+					if path == "/api/session/setup" || path == "/api/session/setup-admin" {
+						SendError(ctx, 409, "Setup is already complete")
+						return
+					}
+					next(ctx)
+					return
+				}
+				if path == "/api/session/is-auth-enabled" || path == "/api/session/setup" {
+					next(ctx)
+					return
+				}
+				if path != "/api/session/setup-admin" {
+					SendError(ctx, 403, "Create the first administrator to finish setup")
+					return
+				}
+				if !m.CheckConfiguredSetupToken(string(ctx.Request.Header.Peek(SetupTokenHeader))) && !m.validSetupSession(string(ctx.Request.Header.Cookie(SetupSessionCookie)), time.Now()) {
+					SendError(ctx, 403, "Invalid setup proof")
+					return
+				}
+				ctx.SetUserValue(schemas.BifrostContextKeySetupTokenAuthenticated, true)
+				next(ctx)
+				return
+			}
 			if m.IsDashboardAuthActive() {
 				next(ctx)
 				return
@@ -1998,6 +2036,18 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 			authConfig := m.authConfig.Load()
 			// Match the whitelist against the RAW request path (PathOriginal); see the comment below.
 			url := string(ctx.Request.URI().PathOriginal())
+			_, canonical := m.store.(identity.CanonicalUserLookupStore)
+			canonicalManagement := canonical && !allowVirtualKeyAuth
+			if canonicalManagement {
+				if url == "/api/session/setup" || url == "/api/session/setup-admin" {
+					next(ctx)
+					return
+				}
+				if !shouldSkip(authConfig, url) && (authConfig == nil || !authConfig.IsEnabled) {
+					SendError(ctx, 401, "User authentication is required")
+					return
+				}
+			}
 			if authConfig == nil || !authConfig.IsEnabled {
 				// logger.Debug("auth middleware is disabled because auth config is not present or not enabled")
 				// The open management API is still not a cross-origin one: a browser
@@ -2115,6 +2165,10 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 			}
 			// Checking basic auth for inference calls
 			if scheme == "Basic" {
+				if canonicalManagement {
+					SendError(ctx, 401, "Sign in with a user session")
+					return
+				}
 				// Decode the base64 token
 				decodedBytes, err := base64.StdEncoding.DecodeString(token)
 				if err != nil {
@@ -2155,6 +2209,10 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 
 				// Verify the session
 				if !m.authenticateDashboardSession(ctx, token, authConfig) {
+					if canonicalManagement {
+						SendError(ctx, 401, "Unauthorized")
+						return
+					}
 					// Here we will check if its the base64 of username:password
 					// This is for backward compatibility with the old auth system
 					decodedBytes, err := base64.StdEncoding.DecodeString(token)

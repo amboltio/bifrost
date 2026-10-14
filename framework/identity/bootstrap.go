@@ -27,6 +27,15 @@ func BootstrapLegacyAdmin(ctx context.Context, store configstore.LegacyAdminBoot
 	if store == nil {
 		return nil, fmt.Errorf("legacy bootstrap store is required")
 	}
+	if lifecycle, ok := store.(configstore.DashboardIdentityStateStore); ok {
+		state, err := lifecycle.GetDashboardIdentityState(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if state.Initialized {
+			return &BootstrapResult{}, nil
+		}
+	}
 	authConfig, err := store.GetAuthConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load legacy admin configuration: %w", err)

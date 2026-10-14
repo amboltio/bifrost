@@ -35,6 +35,7 @@ type SessionHandler struct {
 // for older dashboard clients; identity_capabilities gates newer management
 // views until the corresponding protected backend slice is implemented.
 type AuthStatusResponse struct {
+	IdentityInitialized   bool                                    `json:"identity_initialized"`
 	IsAuthEnabled         bool                                    `json:"is_auth_enabled"`
 	HasValidToken         bool                                    `json:"has_valid_token"`
 	AuthType              string                                  `json:"auth_type"`
@@ -131,6 +132,17 @@ func setSetupSessionCookie(ctx *fasthttp.RequestCtx, value string, expires time.
 // keeps no copy of the token; the cookie authenticates its calls until it expires or
 // dashboard auth is enabled.
 func (h *SessionHandler) startSetupSession(ctx *fasthttp.RequestCtx) {
+	if store, ok := h.configStore.(configstore.DashboardIdentityStateStore); ok {
+		state, err := store.GetDashboardIdentityState(ctx)
+		if err != nil {
+			SendError(ctx, 503, "Authentication state unavailable")
+			return
+		}
+		if state.Initialized {
+			SendError(ctx, 409, "Setup is already complete")
+			return
+		}
+	}
 	if h.setupLock == nil || h.setupLock.IsDashboardAuthActive() {
 		SendError(ctx, fasthttp.StatusConflict, "the setup lock is not active")
 		return
@@ -159,6 +171,7 @@ func (h *SessionHandler) setupLockState() (setupRequired bool, setupTokenConfigu
 
 // RegisterRoutes registers the session-related routes
 func (h *SessionHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
+	r.POST("/api/session/setup-admin", lib.ChainMiddlewares(h.setupAdmin, middlewares...))
 	r.POST("/api/session/login", lib.ChainMiddlewares(h.login, middlewares...))
 	r.POST("/api/session/logout", lib.ChainMiddlewares(h.logout, middlewares...))
 	r.GET("/api/session/is-auth-enabled", lib.ChainMiddlewares(h.isAuthEnabled, middlewares...))
@@ -174,6 +187,16 @@ func (h *SessionHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 // isAuthEnabled handles GET /api/session/is-auth-enabled - Check if auth is enabled
 func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 	setupRequired, setupTokenConfigured := h.setupLockState()
+	initialized := false
+	if store, ok := h.configStore.(configstore.DashboardIdentityStateStore); ok {
+		state, err := store.GetDashboardIdentityState(ctx)
+		if err != nil {
+			SendError(ctx, 503, "Authentication state unavailable")
+			return
+		}
+		initialized = state.Initialized
+		setupRequired = !initialized
+	}
 	if h.configStore == nil {
 		SendJSON(ctx, newAuthStatusResponse(false, false).withSetupState(false, setupRequired, setupTokenConfigured))
 		return
@@ -208,6 +231,7 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 		_, _, hasValidToken = validateDashboardSession(h.configStore, token, sessionPolicyForAuthConfig(authConfig))
 	}
 	response := newAuthStatusResponse(authConfig.IsEnabled, hasValidToken)
+	response.IdentityInitialized = initialized
 	response.AuthenticationMethods = authConfig.AuthenticationMethods()
 	response.AuthMethods = append([]string(nil), response.AuthenticationMethods...)
 	response.AuthType = dashboardAuthTypeForMethods(response.AuthenticationMethods)
@@ -418,7 +442,37 @@ func (h *SessionHandler) currentUser(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusUnauthorized, "Unauthorized")
 		return
 	}
-	SendJSON(ctx, configstore.NewUserProfile(*user))
+	roles, err := h.configStore.GetUserRoleAssignments(ctx, user.ID)
+	if err != nil {
+		SendError(ctx, 503, "User permissions unavailable")
+		return
+	}
+	isSuperAdmin := false
+	for _, role := range roles {
+		if role.RoleID == tables.RoleIDSuperAdmin {
+			isSuperAdmin = true
+		}
+	}
+	hasPassword := false
+	if store, ok := h.configStore.(interface {
+		ListCredentialsByUserID(context.Context, string) ([]tables.TableCredential, error)
+	}); ok {
+		credentials, err := store.ListCredentialsByUserID(ctx, user.ID)
+		if err != nil {
+			SendError(ctx, 503, "Account credentials unavailable")
+			return
+		}
+		for _, credential := range credentials {
+			if credential.IsActive && (credential.Kind == tables.CredentialKindPassword || credential.Kind == tables.CredentialKindLegacyPassword) {
+				hasPassword = true
+			}
+		}
+	}
+	SendJSON(ctx, struct {
+		configstore.UserProfile
+		IsSuperAdmin     bool `json:"is_super_admin"`
+		HasLocalPassword bool `json:"has_local_password"`
+	}{configstore.NewUserProfile(*user), isSuperAdmin, hasPassword})
 }
 
 // listSessions returns safe metadata for the authenticated user's devices.

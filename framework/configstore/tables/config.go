@@ -3,9 +3,11 @@ package tables
 import "github.com/maximhq/bifrost/core/network"
 
 const (
-	ConfigAdminUsernameKey = "admin_username"
-	ConfigAdminPasswordKey = "admin_password"
-	ConfigIsAuthEnabledKey = "is_auth_enabled"
+	ConfigDashboardAuthPolicyKey  = "dashboard_auth_policy_v1"
+	ConfigDashboardInitializedKey = "dashboard_identity_initialized_v1"
+	ConfigAdminUsernameKey        = "admin_username"
+	ConfigAdminPasswordKey        = "admin_password"
+	ConfigIsAuthEnabledKey        = "is_auth_enabled"
 	// ConfigIdentityLegacyBootstrapKey records the canonical user created from
 	// the pre-identity admin configuration. It contains only a user ID and
 	// timestamp, never a username, password, or verifier.

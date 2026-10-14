@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -9,6 +10,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAuthConfigPersistenceKeepsLoginPolicyWithoutGlobalCredentials(t *testing.T) {
+	store := setupLegacyBootstrapStore(t)
+	config := &AuthConfig{IsEnabled: true, LocalLogin: &LocalLoginConfig{
+		IsEnabled: true, SessionTTLSeconds: 7200, IdleTimeoutSeconds: 600,
+	}}
+	require.NoError(t, store.UpdateAuthConfig(context.Background(), config))
+	loaded, err := store.GetAuthConfig(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, config.LocalLogin, loaded.LocalLogin)
+	assert.Nil(t, loaded.AdminUserName)
+	assert.Nil(t, loaded.AdminPassword)
+}
+
+func TestAuthConfigExplicitLocalDisableOverridesLegacyFields(t *testing.T) {
+	config := AuthConfig{IsEnabled: true, LocalLogin: &LocalLoginConfig{IsEnabled: false},
+		AdminUserName: schemas.NewSecretVar("old-admin"), AdminPassword: schemas.NewSecretVar("old-verifier")}
+	assert.Empty(t, config.AuthenticationMethods())
+}
 
 func TestAuthConfigAuthenticationMethodsSupportLocalOIDCAndMixedModes(t *testing.T) {
 	tests := []struct {

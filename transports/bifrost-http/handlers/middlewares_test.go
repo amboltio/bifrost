@@ -1702,6 +1702,24 @@ func TestAuthMiddleware_APIMiddleware_VirtualKeyDoesNotBypass(t *testing.T) {
 	}
 }
 
+func TestCanonicalDashboardRejectsLegacyBearer(t *testing.T) {
+	hash, err := encrypt.Hash("legacy-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &canonicalSessionAuthStoreStub{}
+	am := &AuthMiddleware{store: store}
+	am.UpdateAuthConfig(&configstore.AuthConfig{IsEnabled: true, AdminUserName: schemas.NewSecretVar("admin"), AdminPassword: schemas.NewSecretVar(string(hash))})
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/config")
+	ctx.Request.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString([]byte("admin:legacy-password")))
+	called := false
+	am.APIMiddleware()(func(*fasthttp.RequestCtx) { called = true })(ctx)
+	if called || ctx.Response.StatusCode() != fasthttp.StatusUnauthorized {
+		t.Fatalf("legacy bearer accepted: %d", ctx.Response.StatusCode())
+	}
+}
+
 func TestAuthMiddlewareCanonicalSessionStampsPrincipalAndLimitsAdminBypass(t *testing.T) {
 	now := time.Now().UTC()
 	userID := "canonical-user"
