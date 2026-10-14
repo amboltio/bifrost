@@ -195,7 +195,12 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		initialized = state.Initialized
-		setupRequired = !initialized
+		// Initialization only ever closes setup. Whether setup is offered at all
+		// stays with the setup-lock gate, which is absent when another edition
+		// owns first-run setup.
+		if initialized {
+			setupRequired = false
+		}
 	}
 	if h.configStore == nil {
 		SendJSON(ctx, newAuthStatusResponse(false, false).withSetupState(false, setupRequired, setupTokenConfigured))

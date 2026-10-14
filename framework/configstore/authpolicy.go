@@ -112,10 +112,14 @@ func writeDashboardPolicy(tx *gorm.DB, config *AuthConfig, revision uint64) erro
 		return err
 	}
 	stored := storedDashboardPolicy{Payload: string(payload)}
-	if encrypted, err := encrypt.Encrypt(stored.Payload); err == nil {
+	// Without an encryption key Encrypt returns the plaintext unchanged, so the
+	// row must not be flagged encrypted or Decrypt would reject it on read.
+	if encrypt.IsEnabled() {
+		encrypted, err := encrypt.Encrypt(stored.Payload)
+		if err != nil {
+			return err
+		}
 		stored.Payload, stored.Encrypted = encrypted, true
-	} else if !errors.Is(err, encrypt.ErrEncryptionKeyNotInitialized) {
-		return err
 	}
 	data, err := json.Marshal(stored)
 	if err != nil {

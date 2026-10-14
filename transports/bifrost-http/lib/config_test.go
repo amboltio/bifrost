@@ -21272,7 +21272,11 @@ func TestLoadAuthConfigFromFile_OIDCOnlyConfiguresRuntimeWithoutLegacyAdminCrede
 	require.Len(t, config.GovernanceConfig.AuthConfig.OIDCProviders, 1)
 	assert.Equal(t, "entra", config.GovernanceConfig.AuthConfig.OIDCProviders[0].ID)
 	assert.Equal(t, []string{"oidc"}, config.GovernanceConfig.AuthConfig.AuthenticationMethods())
-	assert.Nil(t, mockStore.authConfig, "OIDC client secrets must not be persisted through legacy auth config rows")
+	require.NotNil(t, mockStore.authConfig, "SSO-only policy must be persisted so it survives a restart without the file")
+	persisted := mockStore.authConfig.OIDCProviders[0]
+	assert.Equal(t, "env.ENTRA_CLIENT_SECRET", persisted.ClientSecret.GetRawRef(), "client secret must stay an external reference")
+	assert.Nil(t, mockStore.authConfig.AdminUserName)
+	assert.Nil(t, mockStore.authConfig.AdminPassword)
 }
 
 func TestConfigDataUnmarshalRejectsConflictingAuthConfigAliases(t *testing.T) {

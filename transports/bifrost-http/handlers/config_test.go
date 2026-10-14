@@ -322,12 +322,13 @@ func TestStartSetupSession_IssuesHttpOnlyCookie(t *testing.T) {
 		return h, am
 	}
 	post := func(h *SessionHandler, header string) *fasthttp.RequestCtx {
-		ctx := &fasthttp.RequestCtx{}
-		ctx.Request.Header.SetMethod("POST")
-		ctx.Request.SetRequestURI("/api/session/setup")
+		var req fasthttp.Request
+		req.Header.SetMethod("POST")
+		req.SetRequestURI("/api/session/setup")
 		if header != "" {
-			ctx.Request.Header.Set(SetupTokenHeader, header)
+			req.Header.Set(SetupTokenHeader, header)
 		}
+		ctx := initCtx(&req)
 		h.startSetupSession(ctx)
 		return ctx
 	}
@@ -348,10 +349,11 @@ func TestStartSetupSession_IssuesHttpOnlyCookie(t *testing.T) {
 	})
 	t.Run("forwarded https sets Secure", func(t *testing.T) {
 		h, _ := newLocked()
-		ctx := &fasthttp.RequestCtx{}
-		ctx.Request.Header.SetMethod("POST")
-		ctx.Request.Header.Set(SetupTokenHeader, token)
-		ctx.Request.Header.Set("X-Forwarded-Proto", "https")
+		var req fasthttp.Request
+		req.Header.SetMethod("POST")
+		req.Header.Set(SetupTokenHeader, token)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		ctx := initCtx(&req)
 		h.startSetupSession(ctx)
 		require.Equal(t, 200, ctx.Response.StatusCode())
 		cookie := fasthttp.AcquireCookie()
