@@ -3,6 +3,7 @@ package configstore
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +85,52 @@ func TestUserManagementStoreCreatesUsersWithKnownRolesOnly(t *testing.T) {
 	assert.False(t, errors.Is(err, ErrLastSuperAdmin))
 }
 
+func TestUserManagementStoreEnforcesDelegatedRolePermissions(t *testing.T) {
+	store := setupIdentityTestStore(t, ":memory:")
+	ctx := context.Background()
+	seedUserManagementRoles(t, store)
+
+	manager := &tables.TableUser{ID: uuid.NewString(), Email: ptr("manager@example.test"), Status: tables.UserStatusActive}
+	target := &tables.TableUser{ID: uuid.NewString(), Email: ptr("target@example.test"), Status: tables.UserStatusActive}
+	require.NoError(t, store.CreateUser(ctx, manager))
+	require.NoError(t, store.CreateUser(ctx, target))
+	require.NoError(t, store.AssignRole(ctx, &tables.TableRoleAssignment{UserID: manager.ID, RoleID: authorization.RoleIDUserManager}))
+	require.NoError(t, store.AssignRole(ctx, &tables.TableRoleAssignment{UserID: target.ID, RoleID: authorization.RoleIDViewer}))
+	require.NoError(t, store.DB().Create(&tables.TableRole{
+		ID: "project-admin", Name: "project-admin", DisplayName: "Project administrator",
+		Permissions: []string{string(authorization.PermissionProjectsDelete)},
+	}).Error)
+
+	managerID := manager.ID
+	require.NoError(t, store.ReplaceUserRoleAssignments(ctx, target.ID, []string{authorization.RoleIDViewer}, &managerID))
+	permitted := &tables.TableUser{ID: uuid.NewString(), Email: ptr("permitted@example.test"), CreatedByUserID: &managerID}
+	_, err := store.CreateManagedUser(ctx, permitted, &tables.TableCredential{SecretHash: "argon2id$test"}, []string{authorization.RoleIDViewer})
+	require.NoError(t, err)
+
+	audit, outbox := roleAuditFixtures()
+	err = store.ReplaceUserRoleAssignmentsAudited(ctx, target.ID, []string{"project-admin"}, &managerID, audit, outbox)
+	require.ErrorIs(t, err, ErrRoleDelegationDenied)
+	var auditCount int64
+	require.NoError(t, store.DB().Model(&tables.TableAuditEvent{}).Count(&auditCount).Error)
+	assert.Zero(t, auditCount, "a denied role grant must roll back its audit event")
+	roles, err := store.GetRolesByUserID(ctx, target.ID)
+	require.NoError(t, err)
+	require.Len(t, roles, 1)
+	assert.Equal(t, authorization.RoleIDViewer, roles[0].ID)
+
+	err = store.ReplaceUserRoleAssignments(ctx, target.ID, []string{tables.RoleIDSuperAdmin}, &managerID)
+	require.ErrorIs(t, err, ErrRoleDelegationDenied)
+
+	created := &tables.TableUser{
+		ID: uuid.NewString(), Email: ptr("delegated@example.test"), CreatedByUserID: &managerID,
+	}
+	_, err = store.CreateManagedUser(ctx, created, &tables.TableCredential{SecretHash: "argon2id$test"}, []string{"project-admin"})
+	require.ErrorIs(t, err, ErrRoleDelegationDenied)
+	var count int64
+	require.NoError(t, store.DB().Model(&tables.TableUser{}).Where("id = ?", created.ID).Count(&count).Error)
+	assert.Zero(t, count, "rejected delegation must roll back user creation")
+}
+
 func TestAuditedUserManagementCreateWritesStateJournalAndOutboxTogether(t *testing.T) {
 	store := setupIdentityTestStore(t, ":memory:")
 	ctx := context.Background()
@@ -109,4 +156,74 @@ func TestAuditedUserManagementCreateWritesStateJournalAndOutboxTogether(t *testi
 	assert.Equal(t, int64(1), credentials)
 	assert.Equal(t, int64(1), audits)
 	assert.Equal(t, int64(1), outbox)
+}
+
+func TestUserManagementStoreSerializesParallelLastSuperAdminChanges(t *testing.T) {
+	removals := map[string]func(*RDBConfigStore, context.Context, string) error{
+		"disable": func(store *RDBConfigStore, ctx context.Context, userID string) error {
+			return store.DisableUser(ctx, userID, time.Now())
+		},
+		"demote": func(store *RDBConfigStore, ctx context.Context, userID string) error {
+			return store.ReplaceUserRoleAssignments(ctx, userID, []string{authorization.RoleIDViewer}, nil)
+		},
+	}
+	for firstName, first := range removals {
+		for secondName, second := range removals {
+			t.Run(firstName+" and "+secondName, func(t *testing.T) {
+				// A single shared-cache connection serializes SQLite writers the way
+				// PostgreSQL's role row lock does, while both callers still start together.
+				store := setupIdentityTestStore(t, "file:last-admin-"+firstName+"-"+secondName+"?mode=memory&cache=shared")
+				sqlDB, err := store.DB().DB()
+				require.NoError(t, err)
+				sqlDB.SetMaxOpenConns(1)
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				ctx := context.Background()
+				seedUserManagementRoles(t, store)
+				require.NoError(t, store.DB().AutoMigrate(&tables.SessionsTable{}))
+
+				admins := make([]*tables.TableUser, 2)
+				for i := range admins {
+					admins[i] = &tables.TableUser{ID: uuid.NewString(), Email: ptr(uuid.NewString() + "@example.test")}
+					require.NoError(t, store.CreateUser(ctx, admins[i]))
+					require.NoError(t, store.AssignRole(ctx, &tables.TableRoleAssignment{UserID: admins[i].ID, RoleID: tables.RoleIDSuperAdmin}))
+				}
+
+				start := make(chan struct{})
+				errs := make(chan error, 2)
+				var group sync.WaitGroup
+				for i, remove := range []func(*RDBConfigStore, context.Context, string) error{first, second} {
+					group.Add(1)
+					go func() {
+						defer group.Done()
+						<-start
+						errs <- remove(store, ctx, admins[i].ID)
+					}()
+				}
+				close(start)
+				group.Wait()
+				close(errs)
+
+				var succeeded, protected int
+				for err := range errs {
+					switch {
+					case err == nil:
+						succeeded++
+					case errors.Is(err, ErrLastSuperAdmin):
+						protected++
+					default:
+						t.Fatalf("unexpected concurrent super-admin removal error: %v", err)
+					}
+				}
+				assert.Equal(t, 1, succeeded)
+				assert.Equal(t, 1, protected)
+
+				var remaining int64
+				require.NoError(t, store.DB().Model(&tables.TableUser{}).
+					Joins("JOIN identity_role_assignments ON identity_role_assignments.user_id = identity_users.id").
+					Where("identity_users.status = ? AND identity_role_assignments.role_id = ?", tables.UserStatusActive, tables.RoleIDSuperAdmin).
+					Count(&remaining).Error)
+				assert.Equal(t, int64(1), remaining, "exactly one active super-admin must survive")
+			})
+		}
+	}
 }

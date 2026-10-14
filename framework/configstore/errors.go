@@ -13,6 +13,7 @@ var ErrLastAuthenticationMethod = errors.New("operation would remove the last ac
 var ErrRoleImmutable = errors.New("role is immutable")
 var ErrRoleInUse = errors.New("role is assigned to users")
 var ErrInvalidPermission = errors.New("role contains an unknown permission")
+var ErrRoleDelegationDenied = errors.New("actor cannot delegate the requested role permissions")
 var ErrBusinessUnitInUse = errors.New("business unit has active memberships")
 var ErrAccessProfileInUse = errors.New("access profile has active assignments")
 var ErrProjectInUse = errors.New("project has active members")

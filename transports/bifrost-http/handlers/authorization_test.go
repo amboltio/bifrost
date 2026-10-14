@@ -50,6 +50,10 @@ func TestIdentityAuthorizationMiddlewareDeniesUnmappedCanonicalManagementRoutes(
 		{name: "key manager lists key users", method: fasthttp.MethodGet, path: "/api/governance/virtual-keys/key-1/users", roles: []tables.TableRole{{ID: "keys", Permissions: []string{string(authorization.PermissionVirtualKeysAssign)}}}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
 		{name: "viewer reads own analytics", method: fasthttp.MethodGet, path: "/api/governance/users/user/analytics", roles: []tables.TableRole{viewer}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
 		{name: "analytics write is unmapped", method: fasthttp.MethodPost, path: "/api/governance/users/user/analytics", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
+		{name: "viewer cannot preview another user's effective access", method: fasthttp.MethodGet, path: "/api/governance/users/someone-else/effective-access", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
+		{name: "viewer cannot manage another user's sessions", method: fasthttp.MethodPost, path: "/api/governance/users/someone-else/revoke-sessions", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
+		{name: "viewer cannot reset another user's password", method: fasthttp.MethodPost, path: "/api/governance/users/someone-else/reset-password", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
+		{name: "viewer cannot assign roles", method: fasthttp.MethodPut, path: "/api/governance/users/user/roles", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "viewer cannot create users", method: fasthttp.MethodPost, path: "/api/governance/users", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "viewer cannot access unmapped route", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{viewer}, userID: "user", wantStatus: fasthttp.StatusForbidden},
 		{name: "super admin retains management access", method: fasthttp.MethodGet, path: "/api/config", roles: []tables.TableRole{superAdmin}, userID: "user", wantCalled: true, wantStatus: fasthttp.StatusOK},
@@ -94,4 +98,45 @@ func TestIdentityAuthorizationMiddlewareFailsClosedWhenRoleLookupFails(t *testin
 
 	assert.False(t, called)
 	assert.Equal(t, fasthttp.StatusForbidden, ctx.Response.StatusCode())
+}
+
+func TestIdentityAuthorizationMiddlewareIgnoresForgedClientIdentityHeaders(t *testing.T) {
+	viewer := tables.TableRole{ID: authorization.RoleIDViewer, Permissions: []string{string(authorization.PermissionUsersRead)}}
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+	ctx.Request.SetRequestURI("/api/governance/users/user/roles")
+	for _, header := range []string{"X-Bf-User-Id", "X-User-Id", "X-Bf-Is-Local-Admin", "X-Bf-Auth-Bypassed"} {
+		ctx.Request.Header.Set(header, "admin")
+	}
+	ctx.SetUserValue(schemas.BifrostContextKeyUserID, "user")
+	called := false
+	NewIdentityAuthorizationMiddleware(roleResolverStub{roles: map[string][]tables.TableRole{"user": {viewer}}})(func(*fasthttp.RequestCtx) {
+		called = true
+	})(ctx)
+
+	assert.False(t, called)
+	assert.Equal(t, fasthttp.StatusForbidden, ctx.Response.StatusCode())
+}
+
+func TestIdentityAuthorizationMiddlewareResolvesRolesForThePrincipalOnly(t *testing.T) {
+	var resolved []string
+	resolver := roleResolverFunc(func(userID string) []tables.TableRole {
+		resolved = append(resolved, userID)
+		return nil
+	})
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodGet)
+	ctx.Request.SetRequestURI("/api/governance/users/victim")
+	ctx.SetUserValue(schemas.BifrostContextKeyUserID, "attacker")
+
+	NewIdentityAuthorizationMiddleware(resolver)(func(*fasthttp.RequestCtx) {})(ctx)
+
+	assert.Equal(t, []string{"attacker"}, resolved)
+	assert.Equal(t, fasthttp.StatusForbidden, ctx.Response.StatusCode())
+}
+
+type roleResolverFunc func(userID string) []tables.TableRole
+
+func (f roleResolverFunc) GetRolesByUserID(_ context.Context, userID string) ([]tables.TableRole, error) {
+	return f(userID), nil
 }

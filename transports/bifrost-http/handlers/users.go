@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net/mail"
 	"strconv"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/fasthttp/router"
 	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/authorization"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/identity"
@@ -67,6 +69,10 @@ type managedUserResponse struct {
 	configstore.UserProfile
 	Roles []managedRoleResponse `json:"roles"`
 }
+
+// The plan requires fresh authentication for super-admin grants but does not
+// define the maximum session age; five minutes is the chosen threshold.
+const superAdminAssignmentFreshAuthWindow = 5 * time.Minute
 
 // NewUsersHandler returns nil when persistence does not implement the
 // canonical identity contracts. That keeps deployments using a reduced custom
@@ -339,6 +345,9 @@ func (h *UsersHandler) createRole(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
 		return
 	}
+	if !h.authorizeRoleDelegation(ctx, nil, request.Permissions, true) {
+		return
+	}
 	role := &tables.TableRole{ID: strings.TrimSpace(request.ID), Name: strings.TrimSpace(request.Name), DisplayName: strings.TrimSpace(request.DisplayName), Permissions: request.Permissions}
 	if role.ID == "" {
 		role.ID = uuid.NewString()
@@ -384,6 +393,9 @@ func (h *UsersHandler) updateRole(ctx *fasthttp.RequestCtx) {
 	if request.Permissions != nil {
 		permissions = request.Permissions
 	}
+	if !h.authorizeRoleDelegation(ctx, nil, permissions, true) {
+		return
+	}
 	auditEvent, outboxEvent := h.roleAudit(ctx, role.ID, "identity.role.updated", map[string]any{"permissions": permissions})
 	updated, err := h.roleStore.UpdateRoleAudited(ctx, role.ID, displayName, permissions, auditEvent, outboxEvent)
 	if h.writeRoleStoreError(ctx, err) {
@@ -414,6 +426,9 @@ func (h *UsersHandler) updateRolePermissions(ctx *fasthttp.RequestCtx) {
 	}{}
 	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if !h.authorizeRoleDelegation(ctx, nil, request.Permissions, true) {
 		return
 	}
 	auditEvent, outboxEvent := h.roleAudit(ctx, role.ID, "identity.role.permissions_updated", map[string]any{"permissions": request.Permissions})
@@ -469,6 +484,9 @@ func (h *UsersHandler) createUser(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
 		return
 	}
+	if !h.authorizeRoleDelegation(ctx, request.RoleIDs, nil, true) {
+		return
+	}
 	email, ok := validManagedUserEmail(request.Email)
 	if !ok {
 		SendError(ctx, fasthttp.StatusBadRequest, "A valid email address is required")
@@ -507,6 +525,9 @@ func (h *UsersHandler) updateUser(ctx *fasthttp.RequestCtx) {
 	if !ok {
 		return
 	}
+	if !h.authorizeTargetUser(ctx, user.ID) {
+		return
+	}
 	request := struct {
 		DisplayName *string `json:"display_name"`
 	}{}
@@ -537,6 +558,9 @@ func (h *UsersHandler) disableUser(ctx *fasthttp.RequestCtx) {
 	if !ok {
 		return
 	}
+	if !h.authorizeTargetUser(ctx, user.ID) {
+		return
+	}
 	disabledAt := h.now().UTC()
 	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.disabled", map[string]any{"status": tables.UserStatusDisabled})
 	if err := h.store.DisableUserAudited(ctx, user.ID, disabledAt, auditEvent, outboxEvent); h.writeStoreError(ctx, err) {
@@ -552,6 +576,9 @@ func (h *UsersHandler) resetPassword(ctx *fasthttp.RequestCtx) {
 	}
 	user, ok := h.requiredUser(ctx)
 	if !ok {
+		return
+	}
+	if !h.authorizeTargetUser(ctx, user.ID) {
 		return
 	}
 	if user.Status != tables.UserStatusActive {
@@ -577,6 +604,9 @@ func (h *UsersHandler) revokeSessions(ctx *fasthttp.RequestCtx) {
 	if !ok {
 		return
 	}
+	if !h.authorizeTargetUser(ctx, user.ID) {
+		return
+	}
 	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.sessions_revoked", nil)
 	revoked, err := h.store.RevokeAllUserSessionsAudited(ctx, user.ID, h.now().UTC(), auditEvent, outboxEvent)
 	if h.writeStoreError(ctx, err) {
@@ -594,11 +624,17 @@ func (h *UsersHandler) replaceRoles(ctx *fasthttp.RequestCtx) {
 	if !ok {
 		return
 	}
+	if !h.authorizeTargetUser(ctx, user.ID) {
+		return
+	}
 	request := struct {
 		RoleIDs []string `json:"role_ids"`
 	}{}
 	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil || len(request.RoleIDs) == 0 {
 		SendError(ctx, fasthttp.StatusBadRequest, "role_ids is required")
+		return
+	}
+	if !h.authorizeRoleDelegation(ctx, request.RoleIDs, nil, true) {
 		return
 	}
 	auditEvent, outboxEvent := h.userAudit(ctx, user.ID, "identity.user.roles_updated", map[string]any{"role_ids": request.RoleIDs})
@@ -685,6 +721,153 @@ func canonicalActorUserID(ctx *fasthttp.RequestCtx) *string {
 	return &actor
 }
 
+// authorizeRoleDelegation prevents a caller with user-management access from
+// granting permissions they do not hold themselves. Trusted local admins and
+// users already assigned super-admin retain the administrative bypass.
+func (h *UsersHandler) authorizeRoleDelegation(ctx *fasthttp.RequestCtx, roleIDs, proposedPermissions []string, requireAssignmentPermission bool) bool {
+	for _, roleID := range roleIDs {
+		if strings.TrimSpace(roleID) == tables.RoleIDSuperAdmin && !h.authorizeFreshSuperAdminAssignment(ctx) {
+			return false
+		}
+	}
+	if authBypassed(ctx) || isTrustedLocalAdmin(ctx) {
+		return true
+	}
+	actorID := canonicalActorUserID(ctx)
+	if actorID == nil {
+		SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
+		return false
+	}
+	actorRoles, err := h.store.GetRolesByUserID(ctx, *actorID)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to resolve role delegation for user %s: %v", *actorID, err))
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to verify role delegation")
+		return false
+	}
+	actorPermissions := make(map[string]struct{})
+	for _, actorRole := range actorRoles {
+		if actorRole.ID == tables.RoleIDSuperAdmin {
+			return true
+		}
+		for _, permission := range actorRole.Permissions {
+			actorPermissions[permission] = struct{}{}
+		}
+	}
+	if requireAssignmentPermission {
+		if _, allowed := actorPermissions[string(authorization.PermissionUsersAssignRoles)]; !allowed {
+			SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
+			return false
+		}
+	}
+	for _, permission := range proposedPermissions {
+		if _, allowed := actorPermissions[permission]; !allowed {
+			SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
+			return false
+		}
+	}
+	if len(roleIDs) == 0 {
+		return true
+	}
+	roles, err := h.store.ListRoles(ctx)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to load role catalog for delegation: %v", err))
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to verify role delegation")
+		return false
+	}
+	rolesByID := make(map[string]tables.TableRole, len(roles))
+	for _, role := range roles {
+		rolesByID[role.ID] = role
+	}
+	for _, roleID := range roleIDs {
+		roleID = strings.TrimSpace(roleID)
+		if roleID == tables.RoleIDSuperAdmin {
+			SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
+			return false
+		}
+		role, exists := rolesByID[roleID]
+		if !exists {
+			continue // The store returns its established not-found error.
+		}
+		for _, permission := range role.Permissions {
+			if _, allowed := actorPermissions[permission]; !allowed {
+				SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// authorizeTargetUser keeps super-admin accounts out of reach of delegated
+// user managers. Without it, a holder of users.reset_password could issue a
+// recovery token for a super-admin and sign in as them. Trusted local admins
+// and super-admin actors retain full authority over every account.
+func (h *UsersHandler) authorizeTargetUser(ctx *fasthttp.RequestCtx, targetUserID string) bool {
+	if authBypassed(ctx) || isTrustedLocalAdmin(ctx) {
+		return true
+	}
+	targetRoles, err := h.store.GetRolesByUserID(ctx, targetUserID)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to resolve roles for target user %s: %v", targetUserID, err))
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to verify target user")
+		return false
+	}
+	if !slices.ContainsFunc(targetRoles, func(role tables.TableRole) bool { return role.ID == tables.RoleIDSuperAdmin }) {
+		return true
+	}
+	if actorID := canonicalActorUserID(ctx); actorID != nil {
+		actorRoles, err := h.store.GetRolesByUserID(ctx, *actorID)
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to resolve roles for user %s: %v", *actorID, err))
+			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to verify target user")
+			return false
+		}
+		if slices.ContainsFunc(actorRoles, func(role tables.TableRole) bool { return role.ID == tables.RoleIDSuperAdmin }) {
+			return true
+		}
+	}
+	SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
+	return false
+}
+
+func (h *UsersHandler) authorizeFreshSuperAdminAssignment(ctx *fasthttp.RequestCtx) bool {
+	actorID := canonicalActorUserID(ctx)
+	token, _ := ctx.UserValue(schemas.BifrostContextKeySessionToken).(string)
+	if actorID == nil || strings.TrimSpace(token) == "" {
+		SendError(ctx, fasthttp.StatusForbidden, "Recent authentication is required to assign super-admin")
+		return false
+	}
+	sessionStore, ok := h.store.(interface {
+		GetSession(context.Context, string) (*tables.SessionsTable, error)
+	})
+	if !ok {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Recent authentication cannot be verified")
+		return false
+	}
+	session, err := sessionStore.GetSession(ctx, token)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to verify recent authentication for user %s: %v", *actorID, err))
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to verify recent authentication")
+		return false
+	}
+	now := h.now().UTC()
+	if session == nil || session.UserID == nil || *session.UserID != *actorID || !session.IsActiveAt(now) || session.CreatedAt.After(now) || now.Sub(session.CreatedAt) > superAdminAssignmentFreshAuthWindow {
+		SendError(ctx, fasthttp.StatusForbidden, "Recent authentication is required to assign super-admin")
+		return false
+	}
+	user, err := h.store.GetUser(ctx, *actorID)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to verify current user state for super-admin assignment: %v", err))
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to verify recent authentication")
+		return false
+	}
+	if user == nil || user.Status != tables.UserStatusActive || user.AuthVersion != session.AuthVersion {
+		SendError(ctx, fasthttp.StatusForbidden, "Recent authentication is required to assign super-admin")
+		return false
+	}
+	return true
+}
+
 func (h *UsersHandler) userAudit(ctx *fasthttp.RequestCtx, targetUserID, action string, changedFields map[string]any) (*tables.TableAuditEvent, *tables.TableOutboxEvent) {
 	eventID := uuid.NewString()
 	actorPrincipal := "legacy:local_admin"
@@ -736,6 +919,8 @@ func (h *UsersHandler) writeStoreError(ctx *fasthttp.RequestCtx, err error) bool
 		SendError(ctx, fasthttp.StatusConflict, "A user with that email already exists")
 	case errors.Is(err, configstore.ErrLastSuperAdmin):
 		SendError(ctx, fasthttp.StatusConflict, "At least one active super-admin is required")
+	case errors.Is(err, configstore.ErrRoleDelegationDenied):
+		SendError(ctx, fasthttp.StatusForbidden, "Forbidden")
 	default:
 		logger.Error(fmt.Sprintf("user administration operation failed: %v", err))
 		SendError(ctx, fasthttp.StatusInternalServerError, "User administration operation failed")
