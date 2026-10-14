@@ -1,12 +1,47 @@
 package openai
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/valyala/fasthttp"
 )
+
+func TestRealtimeWebRTCUpstreamErrorPreservesProviderResponse(t *testing.T) {
+	t.Parallel()
+
+	provider := &OpenAIProvider{}
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	var resp fasthttp.Response
+	resp.SetStatusCode(fasthttp.StatusUnauthorized)
+	resp.SetBodyString(`{"error":{"message":"Invalid realtime token","type":"invalid_request_error","code":"invalid_realtime_token","param":"token"}}`)
+
+	bifrostErr := provider.realtimeWebRTCUpstreamError(ctx, &resp)
+	if bifrostErr.StatusCode == nil || *bifrostErr.StatusCode != fasthttp.StatusUnauthorized {
+		t.Fatalf("status = %v, want %d", bifrostErr.StatusCode, fasthttp.StatusUnauthorized)
+	}
+	if bifrostErr.Error == nil || bifrostErr.Error.Message != "Invalid realtime token" {
+		t.Fatalf("error = %#v", bifrostErr.Error)
+	}
+	if bifrostErr.Error.Type == nil || *bifrostErr.Error.Type != "invalid_request_error" {
+		t.Fatalf("error type = %v", bifrostErr.Error.Type)
+	}
+	if bifrostErr.Error.Code == nil || *bifrostErr.Error.Code != "invalid_realtime_token" {
+		t.Fatalf("error code = %v", bifrostErr.Error.Code)
+	}
+	if bifrostErr.ExtraFields.RoutingInfo.Provider != schemas.OpenAI || bifrostErr.ExtraFields.RequestType != schemas.RealtimeRequest {
+		t.Fatalf("extra fields = %#v", bifrostErr.ExtraFields)
+	}
+	if bifrostErr.ExtraFields.Provider != schemas.OpenAI { //nolint:staticcheck // deprecated field must stay in sync for backward compatibility
+		t.Fatalf("deprecated provider = %v, want %v", bifrostErr.ExtraFields.Provider, schemas.OpenAI)
+	}
+	if bifrostErr.ExtraFields.RawResponse != nil {
+		t.Fatalf("raw response = %#v, want nil", bifrostErr.ExtraFields.RawResponse)
+	}
+}
 
 func TestExtractRealtimeTurnUsageSupportsTranscriptionCompletion(t *testing.T) {
 	t.Parallel()
@@ -801,5 +836,31 @@ func TestInputAudioBufferAppendRoundtrip(t *testing.T) {
 	}
 	if audioStr != b64Audio {
 		t.Fatalf("audio = %q, want %q", audioStr, b64Audio)
+	}
+}
+
+func TestRealtimeWebRTCUpstreamErrorCarriesRetryHint(t *testing.T) {
+	t.Parallel()
+
+	var resp fasthttp.Response
+	resp.SetStatusCode(fasthttp.StatusTooManyRequests)
+	resp.Header.Set("Retry-After", "7")
+	resp.SetBodyString(`{"error":{"message":"slow down"}}`)
+
+	provider := &OpenAIProvider{}
+	bifrostErr := provider.realtimeWebRTCUpstreamError(schemas.NewBifrostContext(nil, schemas.NoDeadline), &resp)
+	// The upstream status is carried through as ParseOpenAIError read it, so the retry
+	// hint sits beside the 429 that gave it meaning rather than a synthetic 502.
+	if bifrostErr.StatusCode == nil {
+		t.Fatalf("StatusCode = nil, want 429")
+	}
+	if *bifrostErr.StatusCode != fasthttp.StatusTooManyRequests {
+		t.Fatalf("StatusCode = %d, want 429", *bifrostErr.StatusCode)
+	}
+	if bifrostErr.Error == nil || bifrostErr.Error.Message != "slow down" {
+		t.Fatalf("Message = %+v, want upstream message", bifrostErr.Error)
+	}
+	if bifrostErr.ExtraFields.RetryAfter != 7000 {
+		t.Fatalf("RetryAfter = %d, want 7000", bifrostErr.ExtraFields.RetryAfter)
 	}
 }

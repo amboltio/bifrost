@@ -11,7 +11,7 @@ import {
 } from "@/lib/types/config";
 import { DefaultNetworkConfig, DefaultPerformanceConfig } from "@/lib/constants/config";
 import { SecretVar } from "@/lib/types/schemas";
-import { toSecretVarFormValue } from "@/lib/utils/secretVarForm";
+import { isSecretVarSet, toSecretVarFormValue } from "@/lib/utils/secretVarForm";
 import { isRedacted } from "@/lib/utils/validation";
 
 /**
@@ -124,7 +124,7 @@ export const maskSecret = (secret: SecretVar | undefined): string => {
 	return `${value.slice(0, 4)}****${value.slice(-4)}`;
 };
 
-export const isSecretVarSet = (secret: SecretVar | undefined): boolean => Boolean(secret?.value?.trim() || secret?.ref?.trim());
+export { isSecretVarSet };
 
 /** True when a secret came back from the API as a masked placeholder and cannot be re-sent. */
 const isMaskedLiteral = (secret: SecretVar | undefined): boolean => {
@@ -214,11 +214,13 @@ const buildProviderSettings = (source: ModelProvider, warnings: string[]): Updat
 		const extra_headers = stripAuthorizationHeader(net.extra_headers);
 		if (extra_headers) network_config.extra_headers = extra_headers;
 		if (net.insecure_skip_verify !== undefined) network_config.insecure_skip_verify = net.insecure_skip_verify;
-		if (net.stream_idle_timeout_in_seconds !== undefined) network_config.stream_idle_timeout_in_seconds = net.stream_idle_timeout_in_seconds;
+		if (net.stream_idle_timeout_in_seconds !== undefined)
+			network_config.stream_idle_timeout_in_seconds = net.stream_idle_timeout_in_seconds;
 		if (net.keep_alive_timeout_in_seconds !== undefined) network_config.keep_alive_timeout_in_seconds = net.keep_alive_timeout_in_seconds;
 		if (net.max_conns_per_host !== undefined) network_config.max_conns_per_host = net.max_conns_per_host;
 		if (net.enforce_http2 !== undefined) network_config.enforce_http2 = net.enforce_http2;
-		if (net.http2_ping_interval_in_seconds !== undefined) network_config.http2_ping_interval_in_seconds = net.http2_ping_interval_in_seconds;
+		if (net.http2_ping_interval_in_seconds !== undefined)
+			network_config.http2_ping_interval_in_seconds = net.http2_ping_interval_in_seconds;
 		if (net.beta_header_overrides !== undefined) network_config.beta_header_overrides = net.beta_header_overrides;
 		if (net.allow_private_network !== undefined) network_config.allow_private_network = net.allow_private_network;
 		const caCert = portableSecret(net.ca_cert_pem, "The provider CA certificate", warnings);
@@ -246,6 +248,7 @@ const buildProviderSettings = (source: ModelProvider, warnings: string[]): Updat
 	if (source.send_back_raw_request !== undefined) settings.send_back_raw_request = source.send_back_raw_request;
 	if (source.send_back_raw_response !== undefined) settings.send_back_raw_response = source.send_back_raw_response;
 	if (source.store_raw_request_response !== undefined) settings.store_raw_request_response = source.store_raw_request_response;
+	if (source.ignore_provider_cost !== undefined) settings.ignore_provider_cost = source.ignore_provider_cost;
 	return settings;
 };
 
@@ -609,6 +612,7 @@ export const runDatabricksMigration = async (
 				send_back_raw_request: provider.send_back_raw_request,
 				send_back_raw_response: provider.send_back_raw_response,
 				store_raw_request_response: provider.store_raw_request_response,
+				ignore_provider_cost: provider.ignore_provider_cost,
 				custom_provider_config: provider.custom_provider_config,
 			}),
 		);

@@ -17,9 +17,9 @@ import (
 	ws "github.com/fasthttp/websocket"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
-	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
-	bfws "github.com/maximhq/bifrost/transports/bifrost-http/websocket"
+	"github.com/maximhq/bifrost/transports/v2/bifrost-http/integrations"
+	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
+	bfws "github.com/maximhq/bifrost/transports/v2/bifrost-http/websocket"
 	"github.com/valyala/fasthttp"
 )
 
@@ -69,6 +69,7 @@ func (h *WSRealtimeHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 	}
 }
 
+// Close closes active realtime connections.
 func (h *WSRealtimeHandler) Close() {
 	if h == nil || h.sessions == nil {
 		return
@@ -76,15 +77,21 @@ func (h *WSRealtimeHandler) Close() {
 	h.sessions.CloseAll()
 }
 
+// handleUpgrade authenticates a realtime connection before opening its provider session.
 func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 	path := string(ctx.Path())
 	modelParam := string(ctx.QueryArgs().Peek("model"))
 	deploymentParam := string(ctx.QueryArgs().Peek("deployment"))
 	auth := captureAuthHeaders(ctx)
-	// OpenAI's SDK sends the API key via WebSocket subprotocol: "openai-insecure-api-key.<key>".
-	// Extract it into the auth headers so downstream processing recognizes it.
+	// Browser clients carry native credentials in a subprotocol because their
+	// WebSocket API cannot set Authorization. Retain explicit header precedence.
 	if auth.authorization == "" {
-		if token := extractRealtimeSubprotocolAPIKey(ctx); token != "" {
+		token, err := extractRealtimeSubprotocolAPIKey(ctx)
+		if err != nil {
+			SendBifrostError(ctx, newRealtimeWireBifrostError(400, "invalid_request_error", err.Error()))
+			return
+		}
+		if token != "" {
 			auth.authorization = "Bearer " + token
 		}
 	}
@@ -101,6 +108,7 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 		upgrader := h.websocketUpgrader("")
 		upgradeErr := upgrader.Upgrade(ctx, func(conn *ws.Conn) {
 			defer conn.Close()
+			defer recoverWebSocketSession(conn)
 			clientConn := newRealtimeClientConn(conn)
 			clientConn.writeRealtimeError(newRealtimeWireBifrostError(500, "server_error", "failed to create request context"))
 		})
@@ -125,7 +133,6 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 	// and paths the deployment accepts, without ever presenting a credential.
 	if authErr := refuseUnauthenticatedRealtime(
 		h.config.ClientConfig.EnforceAuthOnInference,
-		h.handlerStore.GetKVStore(),
 		preReqCtx,
 		auth.authorization,
 	); authErr != nil {
@@ -140,12 +147,23 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	// Resolve any Bifrost-minted ephemeral token mapping before the per-request pipeline runs,
+	// so governance resolves the originating virtual key rather than the opaque token string.
+	// This is what lets the resolution check below refuse a mapped token whose virtual key has
+	// since been revoked, instead of deferring that refusal to the first turn.
+	token := extractRealtimeTokenFromAuth(auth)
+	preMapping, preMapped := lookupRealtimeEphemeralKeyMapping(h.handlerStore.GetKVStore(), token)
+	if preMapped {
+		applyRealtimeEphemeralKeyMapping(preReqCtx, preMapping)
+	}
+
 	providerKey, model, err := resolveRealtimeTarget(ctx, h.config, path, modelParam, deploymentParam)
 	if err != nil {
 		preReqCancel()
 		upgrader := h.websocketUpgrader("")
 		upgradeErr := upgrader.Upgrade(ctx, func(conn *ws.Conn) {
 			defer conn.Close()
+			defer recoverWebSocketSession(conn)
 			clientConn := newRealtimeClientConn(conn)
 			clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", err.Error()))
 		})
@@ -164,6 +182,20 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 		},
 	}
 	h.client.RunPreRequestHooks(preReqCtx, preReq)
+	// Second admission question, now that the pipeline has resolved the request's access: a
+	// presented credential that resolved to nothing (forged or revoked sk-bf-*) is refused with
+	// a plain 401 before the upgrade, before a session slot is allocated, and before an
+	// upstream session opens on the operator's key.
+	if authErr := refuseUnresolvedRealtimeCredential(
+		h.config.ClientConfig.EnforceAuthOnInference,
+		preReqCtx,
+		token,
+		preMapped && preMapping.VirtualKey != "",
+	); authErr != nil {
+		preReqCancel()
+		SendBifrostError(ctx, authErr)
+		return
+	}
 	routedProvider, routedModel, _ := preReq.GetRequestFields()
 	if routedProvider == "" {
 		// Mirror the empty-provider check in core handleRequest. No routing layer
@@ -172,6 +204,7 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 		upgrader := h.websocketUpgrader("")
 		upgradeErr := upgrader.Upgrade(ctx, func(conn *ws.Conn) {
 			defer conn.Close()
+			defer recoverWebSocketSession(conn)
 			clientConn := newRealtimeClientConn(conn)
 			clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", fmt.Sprintf("no provider could be resolved for model %q (set as provider/model or configure the model catalog)", model)))
 		})
@@ -193,6 +226,7 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 		upgrader := h.websocketUpgrader("")
 		upgradeErr := upgrader.Upgrade(ctx, func(conn *ws.Conn) {
 			defer conn.Close()
+			defer recoverWebSocketSession(conn)
 			clientConn := newRealtimeClientConn(conn)
 			clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", "provider does not support realtime: "+string(providerKey)))
 		})
@@ -212,6 +246,7 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 	upgrader := h.websocketUpgrader(rtProvider.RealtimeWebSocketSubprotocol())
 	err = upgrader.Upgrade(ctx, func(conn *ws.Conn) {
 		defer conn.Close()
+		defer recoverWebSocketSession(conn)
 		clientConn := newRealtimeClientConn(conn)
 
 		session, sessionErr := h.sessions.Create(conn)
@@ -228,6 +263,7 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 	}
 }
 
+// populateRealtimeRequestContext carries transport metadata into the realtime request pipeline.
 func populateRealtimeRequestContext(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext) {
 	allHeaders := make(map[string]string)
 	ctx.Request.Header.All()(func(key, value []byte) bool {
@@ -245,6 +281,7 @@ func populateRealtimeRequestContext(ctx *fasthttp.RequestCtx, bifrostCtx *schema
 	}
 }
 
+// handleTranscriptionUpgrade discovers the transcription model before entering the governed realtime session.
 func (h *WSRealtimeHandler) handleTranscriptionUpgrade(
 	ctx *fasthttp.RequestCtx,
 	preReqCtx *schemas.BifrostContext,
@@ -255,6 +292,10 @@ func (h *WSRealtimeHandler) handleTranscriptionUpgrade(
 	upgrader := h.websocketUpgrader("realtime")
 	err := upgrader.Upgrade(ctx, func(conn *ws.Conn) {
 		defer conn.Close()
+		defer recoverWebSocketSession(conn)
+		// Every exit below cancels the pre-request context itself; this covers the one a
+		// recovered panic takes, which would otherwise leave it open for its lifetime.
+		defer preReqCancel()
 		clientConn := newRealtimeClientConn(conn)
 
 		frames, rawModel, bootstrapErr := bufferRealtimeTranscriptionBootstrap(clientConn)
@@ -265,6 +306,13 @@ func (h *WSRealtimeHandler) handleTranscriptionUpgrade(
 		}
 
 		providerKey, model := schemas.ParseModelString(rawModel, realtimeDefaultProviderForPath(path))
+		// Same pre-pipeline mapping resolution as the main upgrade path: a Bifrost-minted
+		// token's virtual key must be on the context before governance resolves access.
+		token := extractRealtimeTokenFromAuth(auth)
+		mapping, mapped := lookupRealtimeEphemeralKeyMapping(h.handlerStore.GetKVStore(), token)
+		if mapped {
+			applyRealtimeEphemeralKeyMapping(preReqCtx, mapping)
+		}
 		preReq := &schemas.BifrostRequest{
 			RequestType: schemas.RealtimeRequest,
 			ResponsesRequest: &schemas.BifrostResponsesRequest{
@@ -273,6 +321,19 @@ func (h *WSRealtimeHandler) handleTranscriptionUpgrade(
 			},
 		}
 		h.client.RunPreRequestHooks(preReqCtx, preReq)
+		// The transcription model arrives in-band after the upgrade, so the resolution check
+		// necessarily runs post-upgrade here. It still runs before the session slot and the
+		// upstream connection, so an unresolved credential spends nothing beyond the socket.
+		if authErr := refuseUnresolvedRealtimeCredential(
+			h.config.ClientConfig.EnforceAuthOnInference,
+			preReqCtx,
+			token,
+			mapped && mapping.VirtualKey != "",
+		); authErr != nil {
+			clientConn.writeRealtimeError(authErr)
+			preReqCancel()
+			return
+		}
 		providerKey, model, _ = preReq.GetRequestFields()
 		if providerKey == "" || strings.TrimSpace(model) == "" {
 			clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", fmt.Sprintf("no provider could be resolved for model %q (set as provider/model or configure the model catalog)", model)))
@@ -301,6 +362,7 @@ func (h *WSRealtimeHandler) handleTranscriptionUpgrade(
 	}
 }
 
+// bufferRealtimeTranscriptionBootstrap retains bounded bootstrap frames until the transcription model is known.
 func bufferRealtimeTranscriptionBootstrap(clientConn *realtimeClientConn) ([]realtimeWebSocketFrame, string, error) {
 	if err := clientConn.conn.SetReadDeadline(time.Now().Add(realtimeTranscriptionBootstrapTimeout)); err != nil {
 		return nil, "", err
@@ -329,6 +391,7 @@ func bufferRealtimeTranscriptionBootstrap(clientConn *realtimeClientConn) ([]rea
 	return nil, "", errors.New("transcription bootstrap exceeded 16 frames before session.update supplied a model")
 }
 
+// discoverRealtimeTranscriptionModel reads an explicit transcription model from a session update.
 func discoverRealtimeTranscriptionModel(message []byte) string {
 	var event struct {
 		Type    string `json:"type"`
@@ -348,6 +411,7 @@ func discoverRealtimeTranscriptionModel(message []byte) string {
 	return strings.TrimSpace(event.Session.Audio.Input.Transcription.Model)
 }
 
+// websocketUpgrader applies configured origin policy and the provider subprotocol.
 func (h *WSRealtimeHandler) websocketUpgrader(subprotocol string) ws.FastHTTPUpgrader {
 	upgrader := ws.FastHTTPUpgrader{
 		ReadBufferSize:  4096,
@@ -366,6 +430,7 @@ func (h *WSRealtimeHandler) websocketUpgrader(subprotocol string) ws.FastHTTPUpg
 	return upgrader
 }
 
+// runRealtimeSession restores mapped identity and connects the selected realtime provider.
 func (h *WSRealtimeHandler) runRealtimeSession(
 	clientConn *realtimeClientConn,
 	session *bfws.Session,
@@ -397,13 +462,10 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 	// that everything the connection presented is on it.
 	lib.SettleIdentity(bifrostCtx)
 
-	// Resolve ephemeral key mapping to restore virtual key context.
-	token := extractRealtimeBearerTokenFromHeader(auth.authorization)
-	if isRealtimeEphemeralToken(token) {
-		mapping, ok := lookupRealtimeEphemeralKeyMapping(h.handlerStore.GetKVStore(), token)
-		if ok {
-			applyRealtimeEphemeralKeyMapping(bifrostCtx, mapping)
-		}
+	token := extractRealtimeTokenFromAuth(auth)
+	mapping, mapped := lookupRealtimeEphemeralKeyMapping(h.handlerStore.GetKVStore(), token)
+	if mapped {
+		applyRealtimeEphemeralKeyMapping(bifrostCtx, mapping)
 	}
 
 	bifrostCtx.SetValue(schemas.BifrostContextKeyHTTPRequestType, schemas.RealtimeRequest)
@@ -423,10 +485,23 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 		return
 	}
 
-	key, err := h.client.SelectKeyForProviderRequestType(bifrostCtx, schemas.RealtimeRequest, providerKey, model)
-	if err != nil {
-		clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", err.Error()))
-		return
+	var key schemas.Key
+	if isRealtimeEphemeralToken(token) && !mapped {
+		bifrostCtx.ClearValue(schemas.BifrostContextKeyAPIKeyID)
+		bifrostCtx.ClearValue(schemas.BifrostContextKeyAPIKeyName)
+		bifrostCtx.ClearValue(schemas.BifrostContextKeySelectedKeyID)
+		bifrostCtx.ClearValue(schemas.BifrostContextKeySelectedKeyName)
+		key = schemas.Key{Value: *schemas.NewSecretVar(token)}
+	} else {
+		var err error
+		key, err = h.client.SelectKeyForProviderRequestType(bifrostCtx, schemas.RealtimeRequest, providerKey, model)
+		if err != nil {
+			clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", err.Error()))
+			return
+		}
+		if mapped && mapping.ProviderToken != "" {
+			key.Value = *schemas.NewSecretVar(mapping.ProviderToken)
+		}
 	}
 
 	// Resolve model alias so the provider receives the actual model identifier.
@@ -467,24 +542,39 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 	}
 	defer h.pool.Discard(upstream)
 
-	errCh := make(chan error, 2)
-	go func() {
-		errCh <- h.relayClientToRealtimeProvider(clientConn, session, upstream, rtProvider, bifrostCtx, providerKey, model, key, intent == "transcription", buffered)
-	}()
-	go func() {
-		errCh <- h.relayRealtimeProviderToClient(clientConn, session, upstream, rtProvider, bifrostCtx, providerKey, model, key, intent == "transcription")
-	}()
-
-	firstErr := <-errCh
-	_ = upstream.Close()
-	_ = clientConn.Close()
-	secondErr := <-errCh
-
-	if logErr := selectRealtimeRelayError(firstErr, secondErr); logErr != nil {
+	logErr := runRealtimeRelays(clientConn.conn,
+		func() error {
+			return h.relayClientToRealtimeProvider(clientConn, session, upstream, rtProvider, bifrostCtx, providerKey, model, key, intent == "transcription", buffered)
+		},
+		func() error {
+			return h.relayRealtimeProviderToClient(clientConn, session, upstream, rtProvider, bifrostCtx, providerKey, model, key, intent == "transcription")
+		},
+		func() {
+			_ = upstream.Close()
+			_ = clientConn.Close()
+		})
+	if logErr != nil {
 		logger.Warn("realtime websocket relay ended for %s/%s on %s: %v", providerKey, model, path, logErr)
 	}
 }
 
+// runRealtimeRelays runs the two relays of a realtime session, each on its own goroutine, and
+// ends the session when the first one returns: closeBoth tears down both connections, which
+// releases the other relay from its blocking read, and its error is collected before returning.
+// A panic inside a relay ends the session the same way (see runWebSocketRelay). The result is
+// the error worth logging, if any (see selectRealtimeRelayError).
+func runRealtimeRelays(conn *ws.Conn, toProvider, toClient func() error, closeBoth func()) error {
+	errCh := make(chan error, 2)
+	go func() { errCh <- runWebSocketRelay(conn, toProvider) }()
+	go func() { errCh <- runWebSocketRelay(conn, toClient) }()
+
+	firstErr := <-errCh
+	closeBoth()
+	secondErr := <-errCh
+	return selectRealtimeRelayError(firstErr, secondErr)
+}
+
+// relayClientToRealtimeProvider forwards client frames through the realtime turn pipeline.
 func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 	clientConn *realtimeClientConn,
 	session *bfws.Session,
@@ -527,6 +617,7 @@ func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 	}
 }
 
+// processRealtimeClientMessage parses and governs client events before provider serialization.
 func (h *WSRealtimeHandler) processRealtimeClientMessage(
 	clientConn *realtimeClientConn,
 	session *bfws.Session,
@@ -632,6 +723,7 @@ func (h *WSRealtimeHandler) processRealtimeClientMessage(
 	return false, nil
 }
 
+// pinRealtimeTranscriptionModel keeps transcription updates bound to the selected routing model.
 func pinRealtimeTranscriptionModel(event *schemas.BifrostRealtimeEvent, model string, transcriptionSession bool) error {
 	if !transcriptionSession || event == nil || event.Type != schemas.RTEventSessionUpdate || event.Session == nil || strings.TrimSpace(model) == "" {
 		return nil
@@ -685,6 +777,7 @@ func pinRealtimeTranscriptionModel(event *schemas.BifrostRealtimeEvent, model st
 	return err
 }
 
+// realtimeTurnFinalEvent chooses the actual completion event for the session mode.
 func realtimeTurnFinalEvent(provider schemas.RealtimeProvider, transcriptionSession bool) schemas.RealtimeEventType {
 	if transcriptionSession {
 		return schemas.RTEventInputAudioTransCompleted
@@ -692,6 +785,7 @@ func realtimeTurnFinalEvent(provider schemas.RealtimeProvider, transcriptionSess
 	return provider.RealtimeTurnFinalEvent()
 }
 
+// realtimeTurnCompletionContent collects completed output without losing pending input attribution.
 func realtimeTurnCompletionContent(session *bfws.Session, event *schemas.BifrostRealtimeEvent, transcriptionSession bool) (string, string, string) {
 	inputItemID, inputSummary := pendingRealtimeInputUpdate(event)
 	contentOverride := session.ConsumeRealtimeOutputText()
@@ -701,6 +795,7 @@ func realtimeTurnCompletionContent(session *bfws.Session, event *schemas.Bifrost
 	return inputItemID, inputSummary, contentOverride
 }
 
+// relayRealtimeProviderToClient processes provider events and forwards their native payloads.
 func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 	clientConn *realtimeClientConn,
 	session *bfws.Session,
@@ -853,6 +948,7 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 	}
 }
 
+// resolveRealtimeTarget resolves explicit model or deployment selectors using the route default.
 func resolveRealtimeTarget(_ *fasthttp.RequestCtx, _ *lib.Config, path, modelParam, deploymentParam string) (schemas.ModelProvider, string, error) {
 	defaultProvider := realtimeDefaultProviderForPath(path)
 
@@ -877,6 +973,7 @@ func resolveRealtimeTarget(_ *fasthttp.RequestCtx, _ *lib.Config, path, modelPar
 	return provider, model, nil
 }
 
+// realtimeDefaultProviderForPath supplies the OpenAI integration default without overriding generic routes.
 func realtimeDefaultProviderForPath(path string) schemas.ModelProvider {
 	if strings.HasPrefix(path, "/openai/") {
 		return schemas.OpenAI
@@ -884,10 +981,12 @@ func realtimeDefaultProviderForPath(path string) schemas.ModelProvider {
 	return ""
 }
 
+// isNormalWebSocketClosure recognizes protocol close codes that do not indicate relay failure.
 func isNormalWebSocketClosure(err error) bool {
 	return ws.IsCloseError(err, ws.CloseNormalClosure, ws.CloseGoingAway, ws.CloseNoStatusReceived)
 }
 
+// isExpectedRealtimeRelayShutdown ignores normal transport errors caused by paired connection teardown.
 func isExpectedRealtimeRelayShutdown(err error) bool {
 	if err == nil {
 		return true
@@ -900,6 +999,7 @@ func isExpectedRealtimeRelayShutdown(err error) bool {
 	return strings.Contains(err.Error(), "use of closed network connection")
 }
 
+// selectRealtimeRelayError prefers actionable errors over expected teardown errors.
 func selectRealtimeRelayError(errs ...error) error {
 	for _, err := range errs {
 		if err != nil && !isExpectedRealtimeRelayShutdown(err) {
@@ -931,6 +1031,7 @@ type realtimeClientConn struct {
 	heartbeatDone    chan struct{}
 }
 
+// newRealtimeClientConn initializes synchronized writes and heartbeat lifecycle state.
 func newRealtimeClientConn(conn *ws.Conn) *realtimeClientConn {
 	return &realtimeClientConn{
 		conn:          conn,
@@ -940,6 +1041,7 @@ func newRealtimeClientConn(conn *ws.Conn) *realtimeClientConn {
 	}
 }
 
+// ReadMessage refreshes the heartbeat deadline after a successful client read.
 func (c *realtimeClientConn) ReadMessage() (messageType int, p []byte, err error) {
 	messageType, p, err = c.conn.ReadMessage()
 	if err == nil {
@@ -948,6 +1050,7 @@ func (c *realtimeClientConn) ReadMessage() (messageType int, p []byte, err error
 	return messageType, p, err
 }
 
+// WriteMessage serializes writes with a bounded write deadline.
 func (c *realtimeClientConn) WriteMessage(messageType int, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -960,6 +1063,7 @@ func (c *realtimeClientConn) WriteMessage(messageType int, data []byte) error {
 	return c.conn.SetWriteDeadline(time.Time{})
 }
 
+// startHeartbeat starts at most one ping loop for the client connection.
 func (c *realtimeClientConn) startHeartbeat() {
 	c.installPongHandler()
 	c.refreshReadDeadline()
@@ -1004,16 +1108,19 @@ func (c *realtimeClientConn) stopHeartbeat() {
 	}
 }
 
+// installPongHandler refreshes the read deadline when a client answers a heartbeat.
 func (c *realtimeClientConn) installPongHandler() {
 	c.conn.SetPongHandler(func(string) error {
 		return c.refreshReadDeadline()
 	})
 }
 
+// refreshReadDeadline bounds how long a silent client can retain its connection.
 func (c *realtimeClientConn) refreshReadDeadline() error {
 	return c.conn.SetReadDeadline(time.Now().Add(realtimeWSPongTimeout))
 }
 
+// writePing serializes bounded heartbeat writes with data writes.
 func (c *realtimeClientConn) writePing() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -1026,37 +1133,26 @@ func (c *realtimeClientConn) writePing() error {
 	return c.conn.SetWriteDeadline(time.Time{})
 }
 
+// closeDone signals shutdown once across concurrent relay exits.
 func (c *realtimeClientConn) closeDone() {
 	c.closeOnce.Do(func() {
 		close(c.done)
 	})
 }
 
+// writeRealtimeError sends the canonical wire error without changing its status.
 func (c *realtimeClientConn) writeRealtimeError(bifrostErr *schemas.BifrostError) {
 	payload := newRealtimeTurnErrorEventPayload(bifrostErr)
 	_ = c.WriteMessage(ws.TextMessage, payload)
 }
 
+// Close closes active realtime connections.
 func (c *realtimeClientConn) Close() error {
 	c.closeDone()
 	return c.conn.Close()
 }
 
-const realtimeSubprotocolAPIKeyPrefix = "openai-insecure-api-key."
-
-// extractRealtimeSubprotocolAPIKey extracts an API key from the Sec-WebSocket-Protocol
-// header. The OpenAI SDK sends: "realtime, openai-insecure-api-key.<key>".
-func extractRealtimeSubprotocolAPIKey(ctx *fasthttp.RequestCtx) string {
-	header := string(ctx.Request.Header.Peek("Sec-WebSocket-Protocol"))
-	for _, proto := range strings.Split(header, ",") {
-		proto = strings.TrimSpace(proto)
-		if strings.HasPrefix(proto, realtimeSubprotocolAPIKeyPrefix) {
-			return strings.TrimPrefix(proto, realtimeSubprotocolAPIKeyPrefix)
-		}
-	}
-	return ""
-}
-
+// mapToHTTPHeader converts provider headers for the upstream WebSocket dial.
 func mapToHTTPHeader(headers map[string]string) http.Header {
 	merged := http.Header{}
 	for key, value := range headers {
@@ -1065,6 +1161,7 @@ func mapToHTTPHeader(headers map[string]string) http.Header {
 	return merged
 }
 
+// newRealtimeWireBifrostError constructs a realtime error with an explicit HTTP status.
 func newRealtimeWireBifrostError(status int, code, message string) *schemas.BifrostError {
 	errType := code
 	return &schemas.BifrostError{
@@ -1088,6 +1185,21 @@ func newRealtimeWireBifrostError(status int, code, message string) *schemas.Bifr
 // Values already explicitly set by createBifrostContextFromAuth (VK, parent request ID,
 // request headers, extra headers) are preserved — middleware values do not overwrite them
 // since createBifrostContextFromAuth runs first.
+func extractRealtimeTokenFromAuth(auth *authHeaders) string {
+	if auth == nil {
+		return ""
+	}
+	if token := extractRealtimeBearerTokenFromHeader(auth.authorization); token != "" {
+		return token
+	}
+	for _, token := range []string{auth.virtualKey, auth.apiKey, auth.googAPIKey} {
+		if token = strings.TrimSpace(token); token != "" {
+			return token
+		}
+	}
+	return ""
+}
+
 // realtimeMiddlewareKeys lists the BifrostContext keys that TransportInterceptorMiddleware
 // copies from the governance plugin's context onto individual fasthttp UserValue slots.
 // We snapshot exactly these keys before the WebSocket upgrade so the long-lived session
@@ -1144,6 +1256,7 @@ func snapshotRealtimeMiddlewareValuesWithContext(ctx *fasthttp.RequestCtx, bifro
 	return snapshotRealtimeMiddlewareValues(ctx)
 }
 
+// snapshotRealtimeMiddlewareValues retains transport middleware values for the upgraded session.
 func snapshotRealtimeMiddlewareValues(ctx *fasthttp.RequestCtx) map[any]any {
 	result := make(map[any]any)
 	for _, key := range realtimeMiddlewareKeys {
@@ -1157,6 +1270,7 @@ func snapshotRealtimeMiddlewareValues(ctx *fasthttp.RequestCtx) map[any]any {
 	return result
 }
 
+// applyRealtimeMiddlewareValues restores saved middleware values to the realtime session context.
 func applyRealtimeMiddlewareValues(ctx *schemas.BifrostContext, middlewareValues map[any]any) {
 	if ctx == nil || len(middlewareValues) == 0 {
 		return
