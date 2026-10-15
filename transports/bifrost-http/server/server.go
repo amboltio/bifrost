@@ -2927,7 +2927,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	pluginsHandler := handlers.NewPluginsHandler(callbacks, s.Config.ConfigStore)
 	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore)
 	authSettingsHandler := handlers.NewAuthSettingsHandler(s.Config.ConfigStore, s.AuthMiddleware)
-	authSettingsHandler.RegisterRoutes(router, apiMiddlewares...)
+	authSettingsHandler.RegisterRoutes(s.Router, middlewares...)
 	oidcHandler := handlers.NewOIDCHandler(s.Config.ConfigStore)
 	usersHandler := handlers.NewUsersHandler(s.Config.ConfigStore)
 	businessUnitsHandler := handlers.NewBusinessUnitsHandler(s.Config.ConfigStore)
