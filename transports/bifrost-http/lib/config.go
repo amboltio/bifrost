@@ -596,6 +596,10 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 			}
 		}
 	}
+	if temp.AuthConfig != nil && temp.Governance != nil && temp.Governance.AuthConfig != nil &&
+		!temp.AuthConfig.Equivalent(*temp.Governance.AuthConfig) {
+		return fmt.Errorf("conflicting auth_config definitions: use governance.auth_config as the canonical configuration")
+	}
 	cd.presentMCPSections = nil
 	if rawMCP, ok := raw["mcp"]; ok && len(rawMCP) > 0 {
 		var rawMCPFields map[string]json.RawMessage
@@ -5747,17 +5751,25 @@ func preserveSecretVar(source *schemas.SecretVar, value string) *schemas.SecretV
 // File config (configData) always takes precedence over DB config.
 func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData) error {
 	hasFileConfig := configData != nil && (configData.AuthConfig != nil || (configData.Governance != nil && configData.Governance.AuthConfig != nil))
-	if !hasFileConfig && (config.GovernanceConfig == nil || config.GovernanceConfig.AuthConfig == nil) {
+	if !hasFileConfig && config.ConfigStore == nil && (config.GovernanceConfig == nil || config.GovernanceConfig.AuthConfig == nil) {
 		return nil
 	}
 	// Ensure GovernanceConfig is initialized
 	if config.GovernanceConfig == nil {
 		config.GovernanceConfig = &configstore.GovernanceConfig{}
 	}
+	fileAuthConfig := authConfigFromConfigData(configData)
+	if fileAuthConfig != nil {
+		if err := fileAuthConfig.Validate(); err != nil {
+			return fmt.Errorf("invalid auth config from file: %w", err)
+		}
+		normalized := fileAuthConfig.Normalized()
+		fileAuthConfig = &normalized
+	}
 	if config.ConfigStore == nil {
 		logger.Warn("config store is required to load auth config from file")
-		if hasFileConfig {
-			config.GovernanceConfig.AuthConfig = configData.AuthConfig
+		if fileAuthConfig != nil {
+			config.GovernanceConfig.AuthConfig = fileAuthConfig
 		}
 		return nil
 	}
@@ -5766,6 +5778,22 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return fmt.Errorf("failed to get auth config from store: %w", err)
 	}
+	if store, ok := config.ConfigStore.(configstore.DashboardIdentityStateStore); ok {
+		state, err := store.GetDashboardIdentityState(ctx)
+		if err != nil {
+			return err
+		}
+		if state.Initialized {
+			if dbAuthConfig == nil || !dbAuthConfig.IsEnabled {
+				return fmt.Errorf("initialized dashboard requires a login policy")
+			}
+			config.GovernanceConfig.AuthConfig = dbAuthConfig
+			if hasFileConfig {
+				logger.Warn("Dashboard user access is initialized; manage login policy in Security Settings. Legacy file credentials are ignored.")
+			}
+			return nil
+		}
+	}
 	// If no file config, use DB config and return (no write needed)
 	if !hasFileConfig {
 		if dbAuthConfig != nil {
@@ -5773,14 +5801,17 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 		}
 		return nil
 	}
-	var authConfig *configstore.AuthConfig
-	if configData.Governance != nil && configData.Governance.AuthConfig != nil {
-		authConfig = configData.Governance.AuthConfig
-	} else if configData.AuthConfig != nil {
-		authConfig = configData.AuthConfig
-	}
-	if authConfig == nil {
+	if fileAuthConfig == nil {
 		return nil
+	}
+	authConfig := fileAuthConfig
+	// The legacy config-store representation has only username, password and
+	// enabled rows. OIDC configuration remains file-owned until the encrypted
+	// provider store is introduced, rather than serializing client secrets into
+	// an unrelated plaintext row.
+	if authConfig.AdminPassword == nil || authConfig.AdminUserName == nil {
+		config.GovernanceConfig.AuthConfig = authConfig
+		return config.ConfigStore.UpdateAuthConfig(ctx, authConfig)
 	}
 	// Fail-closed: if env/vault reference is unresolved, don't persist empty credentials.
 	if authConfig.AdminUserName != nil && authConfig.AdminUserName.GetValue() == "" && authConfig.AdminUserName.IsFromSecret() {
@@ -5808,11 +5839,9 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 		}
 		if usernameMatch && passwordMatch && boolsMatch {
 			// DB matches file -- use DB hash but preserve file env var references
-			config.GovernanceConfig.AuthConfig = &configstore.AuthConfig{
-				AdminUserName: authConfig.AdminUserName,
-				AdminPassword: preserveSecretVar(authConfig.AdminPassword, dbAuthConfig.AdminPassword.GetValue()),
-				IsEnabled:     authConfig.IsEnabled,
-			}
+			loaded := *authConfig
+			loaded.AdminPassword = preserveSecretVar(authConfig.AdminPassword, dbAuthConfig.AdminPassword.GetValue())
+			config.GovernanceConfig.AuthConfig = &loaded
 			return nil
 		}
 		if !passwordMatch {
@@ -5832,16 +5861,24 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 		}
 	}
 	// Build auth config with hashed password but preserve env var references
-	config.GovernanceConfig.AuthConfig = &configstore.AuthConfig{
-		AdminUserName: authConfig.AdminUserName,
-		AdminPassword: preserveSecretVar(authConfig.AdminPassword, hashedPassword),
-		IsEnabled:     authConfig.IsEnabled,
-	}
+	loaded := *authConfig
+	loaded.AdminPassword = preserveSecretVar(authConfig.AdminPassword, hashedPassword)
+	config.GovernanceConfig.AuthConfig = &loaded
 	// Persist to config store
 	if err := config.ConfigStore.UpdateAuthConfig(ctx, config.GovernanceConfig.AuthConfig); err != nil {
 		return fmt.Errorf("failed to update auth config: %w", err)
 	}
 	return nil
+}
+
+func authConfigFromConfigData(configData *ConfigData) *configstore.AuthConfig {
+	if configData == nil {
+		return nil
+	}
+	if configData.Governance != nil && configData.Governance.AuthConfig != nil {
+		return configData.Governance.AuthConfig
+	}
+	return configData.AuthConfig
 }
 
 // loadPlugins loads and merges plugins from file

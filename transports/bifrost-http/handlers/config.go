@@ -22,6 +22,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
@@ -1136,6 +1137,18 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 				logger.Warn("failed to update auth config: %v", err)
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to update auth config: %v", err))
 				return
+			}
+			// Login resolves canonical identities only, so the first admin must be
+			// imported now rather than at the next server start. The bootstrap is
+			// idempotent and does nothing once a canonical user exists.
+			if authConfig == nil {
+				if bootstrapStore, ok := h.store.ConfigStore.(configstore.LegacyAdminBootstrapStore); ok {
+					if _, err := identity.BootstrapLegacyAdmin(ctx, bootstrapStore); err != nil {
+						logger.Error("failed to import the initial admin into canonical identity storage: %v", err)
+						SendError(ctx, fasthttp.StatusInternalServerError, "Failed to create the initial admin identity")
+						return
+					}
+				}
 			}
 		} else if authConfig != nil {
 			// Auth is being disabled (or kept disabled) over an existing config - preserve the

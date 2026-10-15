@@ -25,6 +25,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/openapimcp"
@@ -2925,6 +2926,23 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	configHandler := handlers.NewConfigHandler(callbacks, s.Config)
 	pluginsHandler := handlers.NewPluginsHandler(callbacks, s.Config.ConfigStore)
 	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore)
+	authSettingsHandler := handlers.NewAuthSettingsHandler(s.Config.ConfigStore, s.AuthMiddleware)
+	authSettingsHandler.RegisterRoutes(router, apiMiddlewares...)
+	oidcHandler := handlers.NewOIDCHandler(s.Config.ConfigStore)
+	usersHandler := handlers.NewUsersHandler(s.Config.ConfigStore)
+	businessUnitsHandler := handlers.NewBusinessUnitsHandler(s.Config.ConfigStore)
+	var effectiveAccessResolver handlers.EffectiveAccessResolver
+	if accessResolver, accessErr := s.getGovernancePlugin(); accessErr == nil {
+		effectiveAccessResolver = accessResolver
+	}
+	accessProfilesHandler := handlers.NewAccessProfilesHandler(s.Config.ConfigStore, effectiveAccessResolver)
+	projectsHandler := handlers.NewProjectsHandler(s.Config.ConfigStore)
+	userVirtualKeysHandler := handlers.NewUserVirtualKeysHandler(s.Config.ConfigStore)
+	var roleResolver handlers.UserRoleResolver
+	if candidate, ok := s.Config.ConfigStore.(handlers.UserRoleResolver); ok {
+		roleResolver = candidate
+	}
+	rbacHandler := handlers.NewRBACHandler(roleResolver)
 	if s.setupLockInstalled && s.AuthMiddleware != nil {
 		sessionHandler.SetSetupLock(s.AuthMiddleware)
 	}
@@ -2959,6 +2977,27 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	if sessionHandler != nil {
 		sessionHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if oidcHandler != nil {
+		oidcHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if usersHandler != nil {
+		usersHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if businessUnitsHandler != nil {
+		businessUnitsHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if accessProfilesHandler != nil {
+		accessProfilesHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if projectsHandler != nil {
+		projectsHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if userVirtualKeysHandler != nil {
+		userVirtualKeysHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if rbacHandler != nil {
+		rbacHandler.RegisterRoutes(s.Router, middlewares...)
 	}
 	if promptsHandler != nil {
 		promptsHandler.RegisterRoutes(s.Router, middlewares...)
@@ -3393,6 +3432,15 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		// let it through.
 		apiMiddlewares = append(apiMiddlewares, handlers.AuthBypassedMiddleware(s.Config.ClientConfig.AllowedOrigins, s.Config.ClientConfig.WhitelistedRoutes))
 	} else {
+		if bootstrapStore, ok := s.Config.ConfigStore.(configstore.LegacyAdminBootstrapStore); ok {
+			bootstrapResult, bootstrapErr := identity.BootstrapLegacyAdmin(s.Ctx, bootstrapStore)
+			if bootstrapErr != nil {
+				return fmt.Errorf("legacy admin identity bootstrap failed: %w", bootstrapErr)
+			}
+			if bootstrapResult.Imported {
+				logger.Info("imported legacy dashboard administrator into canonical identity storage")
+			}
+		}
 		// Use a signed (stateless) ticket store when an encryption key is configured
 		// so tickets are verifiable across nodes; otherwise fall back to in-memory.
 		// NewSignedWSTicketStore handles empty key by degrading to in-memory mode.
@@ -3445,6 +3493,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 			// every request through.
 			apiMiddlewares = append(apiMiddlewares, s.AuthMiddleware.SetupLockMiddleware(), s.AuthMiddleware.APIMiddleware())
 			s.setupLockInstalled = true
+			if roleResolver, ok := s.Config.ConfigStore.(configstore.UserManagementStore); ok {
+				apiMiddlewares = append(apiMiddlewares, handlers.NewIdentityAuthorizationMiddleware(roleResolver))
+			} else {
+				logger.Warn("canonical identity authorization is unavailable because the config store does not implement user management")
+			}
 		}
 	}
 	// Add semantic cache plugin embedding request executor if it exists

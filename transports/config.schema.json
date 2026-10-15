@@ -6078,19 +6078,147 @@
     },
     "auth_config": {
       "type": "object",
-      "description": "Authentication configuration. Deprecated: Use governance.auth_config instead.",
+      "description": "Dashboard authentication configuration. At the top level this block is deprecated; use governance.auth_config as the canonical location.",
       "properties": {
         "admin_username": {
           "type": "string",
-          "description": "Admin username"
+          "description": "Legacy admin username, imported once into a canonical user. Not used for dashboard access after initialization.",
+          "deprecated": true
         },
         "admin_password": {
           "type": "string",
-          "description": "Admin password"
+          "description": "Legacy admin password for one-time migration. Manage user passwords through Users or account security after initialization.",
+          "deprecated": true
         },
         "is_enabled": {
           "type": "boolean",
-          "description": "Whether authentication is enabled"
+          "description": "Whether authentication is enabled. Must remain true after canonical dashboard initialization. Disable a login method through local_login instead."
+        },
+        "local_login": {
+          "type": "object",
+          "description": "Local email/password login. Public registration is intentionally unsupported.",
+          "properties": {
+            "is_enabled": {
+              "type": "boolean",
+              "description": "Whether local email/password sign-in is available"
+            },
+            "session_ttl_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 43200,
+              "description": "Absolute local-login session lifetime in seconds. Defaults to 12 hours."
+            },
+            "idle_timeout_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1800,
+              "description": "Idle local-login session timeout in seconds. Defaults to 30 minutes and cannot exceed session_ttl_seconds."
+            },
+            "allow_registration": {
+              "type": "boolean",
+              "const": false,
+              "default": false,
+              "description": "Must remain false. Users are created by authorized administrators."
+            }
+          },
+          "required": ["is_enabled", "allow_registration"],
+          "additionalProperties": false
+        },
+        "oidc_providers": {
+          "type": "array",
+          "description": "OpenID Connect providers. Each stable ID is used by callback and directory lifecycle records.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                "description": "Stable provider identifier"
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Login-page label for this provider"
+              },
+              "type": {
+                "type": "string",
+                "enum": ["generic", "okta", "entra", "keycloak", "zitadel", "google_workspace", "auth0"],
+                "default": "generic",
+                "description": "Named OIDC provider preset. Presets share the generic discovery and token-validation engine."
+              },
+              "issuer_url": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://",
+                "description": "HTTPS OpenID Connect issuer URL"
+              },
+              "client_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "OIDC client ID. Supports env. and vault. secret references."
+              },
+              "client_secret": {
+                "type": "string",
+                "minLength": 1,
+                "description": "OIDC client secret. Supports env. and vault. secret references and is never returned in management responses."
+              },
+              "scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true,
+                "description": "Additional OIDC scopes requested with the required openid scope"
+              },
+              "allowed_audiences": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true,
+                "description": "Additional accepted JWT audiences. The client_id is always accepted."
+              },
+              "claim_mappings": {
+                "type": "object",
+                "description": "Optional dot-notated claim paths for providers with non-standard identity claims.",
+                "properties": {
+                  "email": {"type": "string", "minLength": 1},
+                  "email_verified": {"type": "string", "minLength": 1},
+                  "name": {"type": "string", "minLength": 1},
+                  "groups": {"type": "string", "minLength": 1},
+                  "roles": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
+              },
+              "allow_jit_provisioning": {
+                "type": "boolean",
+                "default": false,
+                "description": "Allow a verified OIDC email to create a new viewer user when no external identity is linked"
+              },
+              "allowed_email_domains": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9.-]+$"
+                },
+                "uniqueItems": true,
+                "description": "Optional verified email domains accepted from this provider"
+              },
+              "is_enabled": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether this provider is offered for sign-in"
+              }
+            },
+            "required": ["id", "display_name", "issuer_url", "client_id", "client_secret"],
+            "additionalProperties": false
+          }
         },
         "disable_auth_on_inference": {
           "type": "boolean",
@@ -6098,7 +6226,47 @@
           "description": "Deprecated and ignored. Use client_config.enforce_auth_on_inference instead."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_enabled": {
+                "const": true
+              }
+            },
+            "required": ["is_enabled"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": ["admin_username", "admin_password"]
+              },
+              {
+                "required": ["local_login"],
+                "properties": {
+                  "local_login": {
+                    "required": ["is_enabled"],
+                    "properties": {
+                      "is_enabled": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["oidc_providers"],
+                "properties": {
+                  "oidc_providers": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
     },
     "pricing_config": {
       "type": "object",

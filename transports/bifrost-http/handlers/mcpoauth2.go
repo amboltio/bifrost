@@ -14,6 +14,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/oauth2"
 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
@@ -159,7 +160,10 @@ func (h *OAuthHandler) handleCallbackError(ctx *fasthttp.RequestCtx, state, erro
 // in the dashboard, route end users to chrome-less landings.
 func perUserCallbackRedirect(ctx *fasthttp.RequestCtx, store configstore.ConfigStore, userMsg string, success bool) string {
 	cookieToken := string(ctx.Request.Header.Cookie("token"))
-	authenticated := cookieToken != "" && validateSession(ctx, store, cookieToken)
+	authenticated := false
+	if cookieToken != "" {
+		_, _, authenticated = validateDashboardSession(store, cookieToken, identity.SessionPolicy{})
+	}
 	if success {
 		if authenticated {
 			return "/workspace/mcp-sessions?completed=1"

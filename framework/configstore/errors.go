@@ -8,6 +8,15 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrAlreadyExists = errors.New("already exists")
+var ErrLastSuperAdmin = errors.New("operation would remove the last active super-admin")
+var ErrLastAuthenticationMethod = errors.New("operation would remove the last active authentication method")
+var ErrRoleImmutable = errors.New("role is immutable")
+var ErrRoleInUse = errors.New("role is assigned to users")
+var ErrInvalidPermission = errors.New("role contains an unknown permission")
+var ErrRoleDelegationDenied = errors.New("actor cannot delegate the requested role permissions")
+var ErrBusinessUnitInUse = errors.New("business unit has active memberships")
+var ErrAccessProfileInUse = errors.New("access profile has active assignments")
+var ErrProjectInUse = errors.New("project has active members")
 
 // ErrRoutingRulePriorityTaken is returned when a routing rule's priority is already used by another
 // rule in the same scope and scope ID. It wraps ErrAlreadyExists and reads the same, so callers that

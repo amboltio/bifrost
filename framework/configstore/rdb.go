@@ -7380,6 +7380,11 @@ func (s *RDBConfigStore) updateComplexityAnalyzerConfigWithTx(ctx context.Contex
 
 // GetAuthConfig retrieves the auth configuration from the database.
 func (s *RDBConfigStore) GetAuthConfig(ctx context.Context) (*AuthConfig, error) {
+	if policy, err := readDashboardPolicy(s.DB().WithContext(ctx)); err == nil {
+		return &policy.AuthConfig, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
 	var username *string
 	var password *string
 	var isEnabled bool
@@ -7411,6 +7416,16 @@ func (s *RDBConfigStore) GetAuthConfig(ctx context.Context) (*AuthConfig, error)
 // UpdateAuthConfig updates the auth configuration in the database.
 func (s *RDBConfigStore) UpdateAuthConfig(ctx context.Context, config *AuthConfig) error {
 	return s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		state, err := dashboardIdentityState(tx)
+		if err != nil {
+			return err
+		}
+		if state.Initialized {
+			return fmt.Errorf("initialized dashboard policy must be changed through auth settings")
+		}
+		if err := writeDashboardPolicy(tx, config, 1); err != nil {
+			return err
+		}
 		if err := tx.Save(&tables.TableGovernanceConfig{
 			Key:   tables.ConfigAdminUsernameKey,
 			Value: config.AdminUserName.GetValue(),

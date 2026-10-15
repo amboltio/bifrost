@@ -71,6 +71,9 @@ type LogManager interface {
 	// GetModelRankings returns models ranked by usage with trend comparison
 	GetModelRankings(ctx context.Context, filters *logstore.SearchFilters) (*logstore.ModelRankingResult, error)
 
+	// GetUserRankings returns users ranked by usage with trend comparison
+	GetUserRankings(ctx context.Context, filters *logstore.SearchFilters) (*logstore.UserRankingResult, error)
+
 	// GetDimensionRankings returns entities ranked by usage grouped by the given dimension
 	GetDimensionRankings(ctx context.Context, filters *logstore.SearchFilters, dimension logstore.RankingDimension) (*logstore.DimensionRankingResult, error)
 
@@ -309,6 +312,13 @@ func (p *PluginLogManager) GetModelRankings(ctx context.Context, filters *logsto
 		return nil, fmt.Errorf("filters cannot be nil")
 	}
 	return p.plugin.GetModelRankings(ctx, *filters)
+}
+
+func (p *PluginLogManager) GetUserRankings(ctx context.Context, filters *logstore.SearchFilters) (*logstore.UserRankingResult, error) {
+	if filters == nil {
+		return nil, fmt.Errorf("filters cannot be nil")
+	}
+	return p.plugin.GetUserRankings(ctx, *filters)
 }
 
 func (p *PluginLogManager) GetDimensionRankings(ctx context.Context, filters *logstore.SearchFilters, dimension logstore.RankingDimension) (*logstore.DimensionRankingResult, error) {

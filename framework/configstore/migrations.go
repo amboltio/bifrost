@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/authorization"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/migrator"
@@ -573,6 +574,490 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_client_config_enforce_vk_object_ownership_column"}, run: migrationAddClientConfigEnforceVKObjectOwnershipColumn},
 	{IDs: []string{"add_mcp_client_openapi_spec_column"}, run: migrationAddMCPClientOpenAPISpecColumn},
 	{IDs: []string{"add_mcp_client_openapi_config_json_column"}, run: migrationAddMCPClientOpenAPIConfigJSONColumn},
+	{IDs: []string{"add_identity_tables"}, run: migrationAddIdentityTables},
+	{IDs: []string{"add_identity_audit_tables"}, run: migrationAddIdentityAuditTables},
+	{IDs: []string{"add_identity_session_fields"}, run: migrationAddIdentitySessionFields},
+	{IDs: []string{"add_identity_recovery_tokens"}, run: migrationAddRecoveryTokens},
+	{IDs: []string{"add_identity_role_permissions"}, run: migrationAddIdentityRolePermissions},
+	{IDs: []string{"add_identity_user_analytics_permission"}, run: migrationAddIdentityUserAnalyticsPermission},
+	{IDs: []string{"add_identity_oidc_transactions"}, run: migrationAddOIDCTransactions},
+	{IDs: []string{"add_identity_user_team_memberships"}, run: migrationAddIdentityUserTeamMemberships},
+	{IDs: []string{"add_identity_business_units"}, run: migrationAddIdentityBusinessUnits},
+	{IDs: []string{"add_identity_access_profiles"}, run: migrationAddIdentityAccessProfiles},
+	{IDs: []string{"add_identity_role_access_profiles"}, run: migrationAddIdentityRoleAccessProfiles},
+	{IDs: []string{"add_identity_access_profile_provider_configs"}, run: migrationAddIdentityAccessProfileProviderConfigs},
+	{IDs: []string{"add_identity_projects"}, run: migrationAddIdentityProjects},
+	{IDs: []string{"add_identity_user_virtual_key_assignments"}, run: migrationAddIdentityUserVirtualKeyAssignments},
+}
+
+// migrationAddIdentityTables creates the canonical identity boundary. It is
+// additive: old admin configuration and sessions remain readable until their
+// dedicated migration imports them into these tables.
+func migrationAddIdentityTables(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_tables"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			for _, model := range []any{
+				&tables.TableUser{},
+				&tables.TableCredential{},
+				&tables.TableExternalIdentity{},
+				&tables.TableRole{},
+				&tables.TableRoleAssignment{},
+			} {
+				if !mg.HasTable(model) {
+					if err := mg.CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+
+			return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&tables.TableRole{
+				ID:          tables.RoleIDSuperAdmin,
+				Name:        tables.RoleNameSuperAdmin,
+				DisplayName: "Super administrator",
+				IsSystem:    true,
+				IsImmutable: true,
+			}).Error
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: deleting canonical user and credential records would permanently invalidate identities", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityAuditTables creates the durable audit journal and
+// transactional outbox after canonical identities are available. It is
+// additive and deliberately non-rollbackable because removing audit evidence
+// or pending invalidations would create a silent security gap.
+func migrationAddIdentityAuditTables(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_audit_tables"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			for _, model := range []any{&tables.TableAuditEvent{}, &tables.TableOutboxEvent{}} {
+				if !mg.HasTable(model) {
+					if err := mg.CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: deleting security journal records or pending invalidations is unsafe", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentitySessionFields extends the legacy dashboard-session row
+// in place. Existing token and expires_at columns remain readable for one
+// release while the bootstrap binds their unambiguous owner after importing
+// the legacy admin account.
+func migrationAddIdentitySessionFields(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_session_fields"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if !mg.HasTable(&tables.SessionsTable{}) {
+				return fmt.Errorf("sessions table is missing: run add_sessions_table before %s", migrationName)
+			}
+			for _, field := range []string{
+				"UserID", "AuthMethod", "ProviderID", "LastSeenAt",
+				"AbsoluteExpiresAt", "IdleExpiresAt", "RevokedAt", "AuthVersion",
+			} {
+				if err := addColumnIfNotExists(tx, logger, &tables.SessionsTable{}, field); err != nil {
+					return fmt.Errorf("add sessions.%s: %w", field, err)
+				}
+			}
+			for _, field := range []string{"UserID", "AuthMethod", "ProviderID", "LastSeenAt", "AbsoluteExpiresAt", "IdleExpiresAt", "RevokedAt"} {
+				if !mg.HasIndex(&tables.SessionsTable{}, field) {
+					if err := mg.CreateIndex(&tables.SessionsTable{}, field); err != nil {
+						return fmt.Errorf("create sessions index for %s: %w", field, err)
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing identity ownership can reactivate revoked sessions", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddRecoveryTokens adds digest-only enrollment and reset credentials.
+func migrationAddRecoveryTokens(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_recovery_tokens"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if tx.Migrator().HasTable(&tables.TableRecoveryToken{}) {
+				return nil
+			}
+			return tx.Migrator().CreateTable(&tables.TableRecoveryToken{})
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: deleting recovery-token consumption history weakens account forensics", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityRolePermissions expands the bootstrap-only role catalog
+// into typed permission-bearing rows. The super-admin role is updated in place
+// because it is immutable; missing system templates are inserted without
+// overwriting any later operator customization.
+func migrationAddIdentityRolePermissions(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_role_permissions"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableRole{}) {
+				return fmt.Errorf("identity_roles is missing: run add_identity_tables before %s", migrationName)
+			}
+			if err := addColumnIfNotExists(tx, logger, &tables.TableRole{}, "Permissions"); err != nil {
+				return fmt.Errorf("add identity_roles.permissions: %w", err)
+			}
+			for _, role := range authorization.SeededRoles() {
+				if role.ID == tables.RoleIDSuperAdmin {
+					if err := tx.Clauses(clause.OnConflict{
+						Columns:   []clause.Column{{Name: "id"}},
+						DoUpdates: clause.AssignmentColumns([]string{"permissions"}),
+					}).Create(&role).Error; err != nil {
+						return err
+					}
+					continue
+				}
+				if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&role).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing permission policy could expose management routes", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityUserAnalyticsPermission grants the new self-analytics
+// read permission to the built-in viewer and user-manager roles. It appends
+// only this permission so existing operator-customized grants remain intact.
+func migrationAddIdentityUserAnalyticsPermission(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_user_analytics_permission"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableRole{}) {
+				return fmt.Errorf("identity_roles is missing: run add_identity_tables before %s", migrationName)
+			}
+			for _, roleID := range []string{authorization.RoleIDViewer, authorization.RoleIDUserManager} {
+				var role tables.TableRole
+				if err := tx.First(&role, "id = ?", roleID).Error; err != nil {
+					return fmt.Errorf("load seeded identity role %s: %w", roleID, err)
+				}
+				if slices.Contains(role.Permissions, string(authorization.PermissionUserAnalyticsRead)) {
+					continue
+				}
+				role.Permissions = append(role.Permissions, string(authorization.PermissionUserAnalyticsRead))
+				permissionsJSON, err := json.Marshal(role.Permissions)
+				if err != nil {
+					return fmt.Errorf("marshal permissions for role %s: %w", roleID, err)
+				}
+				if err := tx.Model(&tables.TableRole{}).Where("id = ?", roleID).Updates(map[string]any{
+					"permissions": string(permissionsJSON),
+					"updated_at":  time.Now().UTC(),
+				}).Error; err != nil {
+					return fmt.Errorf("grant user analytics permission to role %s: %w", roleID, err)
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing role permissions can unexpectedly revoke operator grants", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddOIDCTransactions creates durable, one-time callback state for
+// dashboard OIDC authentication. Deleting this table would make outstanding
+// logins ambiguous, so it is intentionally non-rollbackable.
+func migrationAddOIDCTransactions(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_oidc_transactions"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableUser{}) {
+				return fmt.Errorf("identity_users is missing: run add_identity_tables before %s", migrationName)
+			}
+			if err := addColumnIfNotExists(tx, logger, &tables.TableUser{}, "EmailVerified"); err != nil {
+				return fmt.Errorf("add identity_users.email_verified: %w", err)
+			}
+			if tx.Migrator().HasTable(&tables.TableOIDCTransaction{}) {
+				if err := addColumnIfNotExists(tx, logger, &tables.TableOIDCTransaction{}, "LinkUserID"); err != nil {
+					return fmt.Errorf("add identity_oidc_transactions.link_user_id: %w", err)
+				}
+			}
+			if tx.Migrator().HasTable(&tables.TableOIDCTransaction{}) {
+				return nil
+			}
+			return tx.Migrator().CreateTable(&tables.TableOIDCTransaction{})
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing durable callback replay protection is unsafe", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityUserTeamMemberships creates source-aware organization
+// assignments for canonical users. The source column makes later directory
+// reconciliation additive and prevents it from deleting manual grants.
+func migrationAddIdentityUserTeamMemberships(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_user_team_memberships"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableUser{}) || !tx.Migrator().HasTable(&tables.TableTeam{}) {
+				return fmt.Errorf("identity users and governance teams are required before %s", migrationName)
+			}
+			if tx.Migrator().HasTable(&tables.TableUserTeamMembership{}) {
+				return nil
+			}
+			return tx.Migrator().CreateTable(&tables.TableUserTeamMembership{})
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing organization assignments would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityBusinessUnits adds the organization hierarchy and its
+// source-aware user/team membership tables. Existing customers and teams remain
+// valid because both parent references are nullable.
+func migrationAddIdentityBusinessUnits(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_business_units"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			for _, model := range []any{
+				&tables.TableBusinessUnit{},
+				&tables.TableUserBusinessUnitMembership{},
+				&tables.TableTeamBusinessUnitMembership{},
+			} {
+				if !tx.Migrator().HasTable(model) {
+					if err := tx.Migrator().CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing business-unit memberships would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+// migrationAddIdentityAccessProfiles adds reusable governance policies and
+// source-aware user assignments. The tables are additive and do not alter
+// existing virtual-key or model-config rows.
+func migrationAddIdentityAccessProfiles(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_access_profiles"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			for _, model := range []any{&tables.TableAccessProfile{}, &tables.TableUserAccessProfileAssignment{}} {
+				if !tx.Migrator().HasTable(model) {
+					if err := tx.Migrator().CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing access-profile assignments would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+func migrationAddIdentityRoleAccessProfiles(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_role_access_profiles"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			model := &tables.TableRoleAccessProfileAssignment{}
+			if !tx.Migrator().HasTable(model) {
+				return tx.Migrator().CreateTable(model)
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing role access-profile assignments would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+func migrationAddIdentityAccessProfileProviderConfigs(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_access_profile_provider_configs"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			model := &tables.TableAccessProfile{}
+			if !tx.Migrator().HasTable(model) {
+				return tx.Migrator().CreateTable(model)
+			}
+			if !tx.Migrator().HasColumn(model, "ProviderConfigs") {
+				return tx.Migrator().AddColumn(model, "ProviderConfigs")
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing provider key restrictions could widen access", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+func migrationAddIdentityProjects(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_projects"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			for _, model := range []any{&tables.TableProject{}, &tables.TableProjectMember{}} {
+				if !tx.Migrator().HasTable(model) {
+					if err := tx.Migrator().CreateTable(model); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing project memberships would lose governance provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
+}
+
+func migrationAddIdentityUserVirtualKeyAssignments(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	const migrationName = "add_identity_user_virtual_key_assignments"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasTable(&tables.TableUserVirtualKeyAssignment{}) {
+				return tx.Migrator().CreateTable(&tables.TableUserVirtualKeyAssignment{})
+			}
+			return nil
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: removing key ownership history would lose audit provenance", migrationName)
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running %s migration: %w", migrationName, err)
+	}
+	return nil
 }
 
 // warpLogEmbeddingColumns are the semantic-search configuration columns added

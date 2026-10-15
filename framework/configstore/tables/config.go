@@ -3,10 +3,16 @@ package tables
 import "github.com/maximhq/bifrost/core/network"
 
 const (
-	ConfigAdminUsernameKey = "admin_username"
-	ConfigAdminPasswordKey = "admin_password"
-	ConfigIsAuthEnabledKey = "is_auth_enabled"
-	ConfigProxyKey         = "proxy_config"
+	ConfigDashboardAuthPolicyKey  = "dashboard_auth_policy_v1"
+	ConfigDashboardInitializedKey = "dashboard_identity_initialized_v1"
+	ConfigAdminUsernameKey        = "admin_username"
+	ConfigAdminPasswordKey        = "admin_password"
+	ConfigIsAuthEnabledKey        = "is_auth_enabled"
+	// ConfigIdentityLegacyBootstrapKey records the canonical user created from
+	// the pre-identity admin configuration. It contains only a user ID and
+	// timestamp, never a username, password, or verifier.
+	ConfigIdentityLegacyBootstrapKey = "identity_legacy_bootstrap_v1"
+	ConfigProxyKey                   = "proxy_config"
 	// ConfigComplexityAnalyzerConfigKey stores the persisted analyzer config JSON.
 	//
 	// This row is also the rollback-compatibility surface: it is written in a
@@ -59,8 +65,8 @@ const (
 	//
 	// Written under a distributed lock because every node updates the same row.
 	ConfigComplexitySemanticGenerationsKey = "complexity_semantic_generations"
-	ConfigRestartRequiredKey              = "restart_required"
-	ConfigHeaderFilterKey                 = "header_filter_config"
+	ConfigRestartRequiredKey               = "restart_required"
+	ConfigHeaderFilterKey                  = "header_filter_config"
 	// ConfigProxyHashKey stores the hash of the proxy_config config.json last applied. It is its own
 	// row because the proxy row is saved whole by the dashboard, which would wipe a hash kept inside it.
 	ConfigProxyHashKey = "proxy_config_hash"

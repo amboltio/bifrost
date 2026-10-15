@@ -260,6 +260,13 @@ type PricingOverridesQueryParams struct {
 
 // ConfigStore is the interface for the config store.
 type ConfigStore interface {
+	UserStore
+	CredentialStore
+	ExternalIdentityStore
+	AuditStore
+	OutboxStore
+	AuditedChangeStore
+
 	// Health check
 	Ping(ctx context.Context) error
 

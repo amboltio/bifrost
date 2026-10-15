@@ -3,12 +3,25 @@ import { beginLogout, endLogout } from "@/lib/utils/logoutState";
 import { baseApi, clearAuthStorage } from "./baseApi";
 
 export interface LoginRequest {
-	username: string;
+	/** Canonical local login identifier. */
+	email?: string;
+	/** Compatibility field for the legacy configured admin login. */
+	username?: string;
 	password: string;
 }
 
 export interface LoginResponse {
 	message: string;
+}
+
+export interface IdentityFeatureCapabilities {
+	local_users: boolean;
+	oidc_login: boolean;
+	organizations: boolean;
+	roles: boolean;
+	access_profiles: boolean;
+	projects: boolean;
+	user_analytics: boolean;
 }
 
 export interface IsAuthEnabledResponse {
@@ -20,10 +33,27 @@ export interface IsAuthEnabledResponse {
 	setup_required?: boolean;
 	// Whether the operator configured a setup token (setup_token / BIFROST_SETUP_TOKEN).
 	setup_token_configured?: boolean;
+	authentication_methods?: string[];
+	auth_methods?: string[];
+	providers?: OIDCProviderSummary[];
+	identity_capabilities?: IdentityFeatureCapabilities;
+}
+
+export interface OIDCProviderSummary {
+	id: string;
+	name?: string;
+	display_name?: string;
 }
 
 export interface LogoutResponse {
 	message: string;
+}
+
+export interface CurrentUserResponse {
+	id: string;
+	email?: string;
+	display_name: string;
+	status: string;
 }
 
 export const sessionApi = baseApi.injectEndpoints({
@@ -33,6 +63,13 @@ export const sessionApi = baseApi.injectEndpoints({
 		isAuthEnabled: builder.query<IsAuthEnabledResponse, void>({
 			query: () => ({
 				url: "/session/is-auth-enabled",
+				method: "GET",
+			}),
+			providesTags: ["Sessions"],
+		}),
+		getCurrentUser: builder.query<CurrentUserResponse, void>({
+			query: () => ({
+				url: "/session/current-user",
 				method: "GET",
 			}),
 			providesTags: ["Sessions"],
@@ -94,4 +131,4 @@ export const sessionApi = baseApi.injectEndpoints({
 	}),
 });
 
-export const { useIsAuthEnabledQuery, useLoginMutation, useLogoutMutation } = sessionApi;
+export const { useIsAuthEnabledQuery, useGetCurrentUserQuery, useLoginMutation, useLogoutMutation } = sessionApi;

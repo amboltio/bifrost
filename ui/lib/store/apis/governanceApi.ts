@@ -55,6 +55,155 @@ type PricingOverrideQueryArgs = {
 	search?: string;
 };
 
+export interface BusinessUnit {
+	id: string;
+	name: string;
+	description: string;
+	customer_id?: string;
+	created_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface BusinessUnitsResponse {
+	business_units: BusinessUnit[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
+export interface AccessProfileProviderConfig {
+	provider_name: string;
+	all_models_allowed: boolean;
+	allowed_models: string[];
+	blacklisted_models: string[];
+	key_ids: string[];
+}
+
+export interface AccessProfile {
+	id: string;
+	name: string;
+	description: string;
+	enabled: boolean;
+	allow_all_providers: boolean;
+	allowed_providers: string[];
+	allowed_models: string[];
+	provider_configs: AccessProfileProviderConfig[];
+	allowed_mcp_tools: string[];
+	created_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface AccessProfilesResponse {
+	access_profiles: AccessProfile[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
+export interface UserAccessProfileAssignment {
+	id: string;
+	user_id: string;
+	access_profile_id: string;
+	source: string;
+	provider_id?: string;
+	assigned_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface RoleAccessProfileAssignment {
+	id: string;
+	role_id: string;
+	access_profile_id: string;
+	source: string;
+	assigned_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface EffectiveAccessQueryArgs {
+	userId: string;
+	provider?: string;
+	model?: string;
+	projectId?: string;
+}
+
+export interface EffectiveAccessResponse {
+	user_id: string;
+	provider?: string;
+	model?: string;
+	project_id?: string;
+	project_resolved?: boolean;
+	allowed?: boolean;
+	allow_all_providers: boolean;
+	allow_all_mcp_tools: boolean;
+	allowed_providers: string[];
+	allowed_mcp_tools: string[];
+	contributing_profile_ids: string[];
+	denied_profiles: { id: string }[];
+}
+
+export interface Project {
+	id: string;
+	name: string;
+	description: string;
+	enabled: boolean;
+	expires_at?: string;
+	access_rule: string;
+	membership_mode: string;
+	accounting_mode: string;
+	split_policy: string;
+	allow_all_providers: boolean;
+	allowed_providers: string[];
+	allowed_models: string[];
+	created_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ProjectsResponse {
+	projects: Project[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
+export interface UserVirtualKeyAssignment {
+	id: string;
+	user_id: string;
+	virtual_key_id: string;
+	source: string;
+	assigned_by_user_id?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ManagedRole {
+	id: string;
+	name: string;
+	display_name: string;
+	permissions: string[];
+	is_system: boolean;
+	is_immutable: boolean;
+}
+
+export interface ManagedUser {
+	id: string;
+	email?: string;
+	display_name: string;
+	status: string;
+	roles: ManagedRole[];
+}
+
+export interface ManagedUsersResponse {
+	users: ManagedUser[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
 export const governanceApi = baseApi.injectEndpoints({
 	endpoints: (builder) => ({
 		// Virtual Keys
@@ -260,6 +409,217 @@ export const governanceApi = baseApi.injectEndpoints({
 					// Mutation failed
 				}
 			},
+		}),
+
+		// Business units
+		getBusinessUnits: builder.query<BusinessUnitsResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/business-units",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["BusinessUnits"],
+		}),
+
+		createBusinessUnit: builder.mutation<BusinessUnit, { name: string; description?: string; customer_id?: string }>({
+			query: (data) => ({ url: "/governance/business-units", method: "POST", body: data }),
+			invalidatesTags: ["BusinessUnits"],
+		}),
+
+		updateBusinessUnit: builder.mutation<BusinessUnit, { id: string; data: { name?: string; description?: string; customer_id?: string } }>(
+			{
+				query: ({ id, data }) => ({ url: `/governance/business-units/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+				invalidatesTags: ["BusinessUnits"],
+			},
+		),
+
+		deleteBusinessUnit: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/business-units/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["BusinessUnits"],
+		}),
+
+		// Access profiles
+		getAccessProfiles: builder.query<AccessProfilesResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/access-profiles",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["AccessProfiles"],
+		}),
+
+		createAccessProfile: builder.mutation<AccessProfile, Partial<AccessProfile> & { name: string }>({
+			query: (data) => ({ url: "/governance/access-profiles", method: "POST", body: data }),
+			invalidatesTags: ["AccessProfiles"],
+		}),
+
+		updateAccessProfile: builder.mutation<AccessProfile, { id: string; data: Partial<AccessProfile> }>({
+			query: ({ id, data }) => ({ url: `/governance/access-profiles/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+			invalidatesTags: ["AccessProfiles"],
+		}),
+
+		deleteAccessProfile: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/access-profiles/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["AccessProfiles"],
+		}),
+
+		getUserAccessProfiles: builder.query<{ access_profiles: AccessProfile[]; assignments: UserAccessProfileAssignment[] }, string>({
+			query: (id) => `/governance/users/${encodeURIComponent(id)}/access-profiles`,
+			providesTags: ["AccessProfiles", "Users"],
+		}),
+
+		getRoleAccessProfiles: builder.query<{ access_profiles: AccessProfile[]; assignments: RoleAccessProfileAssignment[] }, string>({
+			query: (id) => `/governance/roles/${encodeURIComponent(id)}/access-profiles`,
+			providesTags: ["AccessProfiles", "Roles"],
+		}),
+
+		replaceRoleAccessProfiles: builder.mutation<
+			{ access_profiles: AccessProfile[]; assignments: RoleAccessProfileAssignment[] },
+			{ roleId: string; access_profile_ids: string[] }
+		>({
+			query: ({ roleId, access_profile_ids }) => ({
+				url: `/governance/roles/${encodeURIComponent(roleId)}/access-profiles`,
+				method: "PUT",
+				body: { access_profile_ids },
+			}),
+			invalidatesTags: ["AccessProfiles", "Roles"],
+		}),
+
+		replaceUserAccessProfiles: builder.mutation<
+			{ access_profiles: AccessProfile[]; assignments: unknown[] },
+			{ userId: string; access_profile_ids: string[] }
+		>({
+			query: ({ userId, access_profile_ids }) => ({
+				url: `/governance/users/${encodeURIComponent(userId)}/access-profiles`,
+				method: "PUT",
+				body: { access_profile_ids },
+			}),
+			invalidatesTags: ["AccessProfiles", "Users"],
+		}),
+
+		getUserEffectiveAccess: builder.query<EffectiveAccessResponse, EffectiveAccessQueryArgs>({
+			query: ({ userId, provider, model, projectId }) => ({
+				url: `/governance/users/${encodeURIComponent(userId)}/effective-access`,
+				params: {
+					...(provider && { provider }),
+					...(model && { model }),
+					...(projectId && { project_id: projectId }),
+				},
+			}),
+			providesTags: ["AccessProfiles", "Users"],
+		}),
+
+		// Projects
+		getProjects: builder.query<ProjectsResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/projects",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["Projects"],
+		}),
+
+		createProject: builder.mutation<Project, Partial<Project> & { name: string }>({
+			query: (data) => ({ url: "/governance/projects", method: "POST", body: data }),
+			invalidatesTags: ["Projects"],
+		}),
+
+		updateProject: builder.mutation<Project, { id: string; data: Partial<Project> }>({
+			query: ({ id, data }) => ({ url: `/governance/projects/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+			invalidatesTags: ["Projects"],
+		}),
+
+		deleteProject: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/projects/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["Projects"],
+		}),
+
+		getProjectMembers: builder.query<{ members: unknown[] }, string>({
+			query: (id) => `/governance/projects/${encodeURIComponent(id)}/members`,
+			providesTags: ["Projects", "Users"],
+		}),
+
+		replaceProjectMembers: builder.mutation<{ members: unknown[] }, { projectId: string; user_ids: string[] }>({
+			query: ({ projectId, user_ids }) => ({
+				url: `/governance/projects/${encodeURIComponent(projectId)}/members`,
+				method: "PUT",
+				body: { user_ids },
+			}),
+			invalidatesTags: ["Projects", "Users"],
+		}),
+
+		getUserVirtualKeyAssignments: builder.query<{ assignments: UserVirtualKeyAssignment[] }, string>({
+			query: (id) => `/governance/users/${encodeURIComponent(id)}/virtual-keys`,
+			providesTags: ["Users", "VirtualKeys"],
+		}),
+
+		replaceUserVirtualKeyAssignments: builder.mutation<
+			{ assignments: UserVirtualKeyAssignment[] },
+			{ userId: string; virtual_key_ids: string[] }
+		>({
+			query: ({ userId, virtual_key_ids }) => ({
+				url: `/governance/users/${encodeURIComponent(userId)}/virtual-keys`,
+				method: "PUT",
+				body: { virtual_key_ids },
+			}),
+			invalidatesTags: ["Users", "VirtualKeys"],
+		}),
+
+		// Canonical users and roles
+		getManagedUsers: builder.query<ManagedUsersResponse, { limit?: number; offset?: number; search?: string } | void>({
+			query: (params) => ({
+				url: "/governance/users",
+				params: {
+					...(params?.limit && { limit: params.limit }),
+					...(params?.offset !== undefined && { offset: params.offset }),
+					...(params?.search && { search: params.search }),
+				},
+			}),
+			providesTags: ["Users"],
+		}),
+
+		getManagedRoles: builder.query<{ roles: ManagedRole[] }, void>({
+			query: () => "/governance/roles",
+			providesTags: ["Roles"],
+		}),
+
+		getRBACPermissions: builder.query<{ permissions: { id: string; resource: string; operation: string }[] }, void>({
+			query: () => "/governance/rbac/permissions",
+			providesTags: ["Permissions"],
+		}),
+
+		createManagedRole: builder.mutation<ManagedRole, { name: string; display_name: string; permissions: string[] }>({
+			query: (data) => ({ url: "/governance/roles", method: "POST", body: data }),
+			invalidatesTags: ["Roles"],
+		}),
+
+		updateManagedRole: builder.mutation<ManagedRole, { id: string; data: { display_name?: string; permissions?: string[] } }>({
+			query: ({ id, data }) => ({ url: `/governance/roles/${encodeURIComponent(id)}`, method: "PUT", body: data }),
+			invalidatesTags: ["Roles"],
+		}),
+
+		deleteManagedRole: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/roles/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["Roles"],
+		}),
+
+		createManagedUser: builder.mutation<ManagedUser, { email: string; display_name: string; password: string; role_ids: string[] }>({
+			query: (data) => ({ url: "/governance/users", method: "POST", body: data }),
+			invalidatesTags: ["Users"],
+		}),
+
+		disableManagedUser: builder.mutation<void, string>({
+			query: (id) => ({ url: `/governance/users/${encodeURIComponent(id)}`, method: "DELETE" }),
+			invalidatesTags: ["Users"],
 		}),
 
 		// Customers
@@ -917,6 +1277,43 @@ export const {
 	useCreateTeamMutation,
 	useUpdateTeamMutation,
 	useDeleteTeamMutation,
+
+	// Business units
+	useGetBusinessUnitsQuery,
+	useCreateBusinessUnitMutation,
+	useUpdateBusinessUnitMutation,
+	useDeleteBusinessUnitMutation,
+
+	// Access profiles
+	useGetAccessProfilesQuery,
+	useCreateAccessProfileMutation,
+	useUpdateAccessProfileMutation,
+	useDeleteAccessProfileMutation,
+	useGetUserAccessProfilesQuery,
+	useReplaceUserAccessProfilesMutation,
+	useGetRoleAccessProfilesQuery,
+	useReplaceRoleAccessProfilesMutation,
+	useGetUserEffectiveAccessQuery,
+
+	// Projects
+	useGetProjectsQuery,
+	useCreateProjectMutation,
+	useUpdateProjectMutation,
+	useDeleteProjectMutation,
+	useGetProjectMembersQuery,
+	useReplaceProjectMembersMutation,
+	useGetUserVirtualKeyAssignmentsQuery,
+	useReplaceUserVirtualKeyAssignmentsMutation,
+
+	// Canonical users and roles
+	useGetManagedUsersQuery,
+	useGetManagedRolesQuery,
+	useGetRBACPermissionsQuery,
+	useCreateManagedRoleMutation,
+	useUpdateManagedRoleMutation,
+	useDeleteManagedRoleMutation,
+	useCreateManagedUserMutation,
+	useDisableManagedUserMutation,
 
 	// Customers
 	useGetCustomersQuery,
