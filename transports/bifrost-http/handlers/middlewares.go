@@ -1950,6 +1950,12 @@ func (m *AuthMiddleware) SetupLockMiddleware() schemas.BifrostHTTPMiddleware {
 	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 		return func(ctx *fasthttp.RequestCtx) {
 			if lifecycle, canonical := m.store.(configstore.DashboardIdentityStateStore); canonical {
+				path := string(ctx.Request.URI().PathOriginal())
+				// Health probes must reach the database checks before first-run setup.
+				if path == "/health" {
+					next(ctx)
+					return
+				}
 				if !m.identityInitialized.Load() {
 					state, err := lifecycle.GetDashboardIdentityState(ctx)
 					if err != nil {
@@ -1958,7 +1964,6 @@ func (m *AuthMiddleware) SetupLockMiddleware() schemas.BifrostHTTPMiddleware {
 					}
 					m.identityInitialized.Store(state.Initialized)
 				}
-				path := string(ctx.Request.URI().PathOriginal())
 				if m.identityInitialized.Load() {
 					if path == "/api/session/setup" || path == "/api/session/setup-admin" {
 						SendError(ctx, 409, "Setup is already complete")

@@ -5373,3 +5373,88 @@ func BenchmarkRequestDecompressionMiddlewareParallel(b *testing.B) {
 		})
 	}
 }
+
+type setupHealthStoreStub struct {
+	configstore.ConfigStore
+	initialized bool
+	stateErr    error
+	pingErr     error
+}
+
+func (s *setupHealthStoreStub) GetDashboardIdentityState(context.Context) (configstore.DashboardIdentityState, error) {
+	return configstore.DashboardIdentityState{Initialized: s.initialized}, s.stateErr
+}
+
+func (s *setupHealthStoreStub) Ping(context.Context) error { return s.pingErr }
+
+func TestSetupLockMiddleware_CanonicalHealth(t *testing.T) {
+	SetLogger(&mockLogger{})
+	for _, tc := range []struct {
+		name        string
+		initialized bool
+		stateErr    error
+		pingErr     error
+		wantStatus  int
+	}{
+		{name: "fresh installation", wantStatus: fasthttp.StatusOK},
+		{name: "setup complete", initialized: true, wantStatus: fasthttp.StatusOK},
+		{name: "identity state unavailable but database healthy", stateErr: errors.New("identity state unavailable"), wantStatus: fasthttp.StatusOK},
+		{name: "database unavailable", pingErr: errors.New("database unavailable"), wantStatus: fasthttp.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &setupHealthStoreStub{initialized: tc.initialized, stateErr: tc.stateErr, pingErr: tc.pingErr}
+			am := newSetupLockedAuthMiddleware("", nil)
+			am.store = store
+			health := NewHealthHandler(&lib.Config{ConfigStore: store, ClientConfig: &configstore.ClientConfig{}})
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.Header.SetMethod(fasthttp.MethodGet)
+			ctx.Request.SetRequestURI("/health")
+			am.SetupLockMiddleware()(am.APIMiddleware()(NewIdentityAuthorizationMiddleware(nil)(health.getHealth)))(ctx)
+			assert.Equal(t, tc.wantStatus, ctx.Response.StatusCode(), "body: %s", ctx.Response.Body())
+			if tc.wantStatus == fasthttp.StatusOK {
+				assert.Contains(t, string(ctx.Response.Body()), `"status":"ok"`)
+			}
+		})
+	}
+}
+
+func TestSetupLockMiddleware_CanonicalHealthDoesNotUnlockAPI(t *testing.T) {
+	SetLogger(&mockLogger{})
+	for _, path := range []string{"/api/providers", "/api/auth/settings", "/api/session/setup-admin", "/health/admin", "/health/../api/providers", "/health%2F..%2Fapi%2Fproviders"} {
+		t.Run(path, func(t *testing.T) {
+			am := newSetupLockedAuthMiddleware("", nil)
+			am.store = &setupHealthStoreStub{}
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.SetRequestURI(path)
+			assert.False(t, runOSSAPIChain(am, ctx))
+			assert.Equal(t, fasthttp.StatusForbidden, ctx.Response.StatusCode())
+		})
+	}
+}
+
+func BenchmarkSetupLockMiddleware(b *testing.B) {
+	SetLogger(&mockLogger{})
+	for _, name := range []string{"canonical_initialized", "canonical_health", "legacy_initialized"} {
+		b.Run(name, func(b *testing.B) {
+			am := newSetupLockedAuthMiddleware("", &configstore.AuthConfig{IsEnabled: true})
+			path := "/api/providers"
+			if name != "legacy_initialized" {
+				am.store = &setupHealthStoreStub{initialized: true}
+				am.identityInitialized.Store(true)
+			}
+			if name == "canonical_health" {
+				path = "/health"
+				am.identityInitialized.Store(false)
+				am.store = &setupHealthStoreStub{}
+			}
+			handler := am.SetupLockMiddleware()(func(*fasthttp.RequestCtx) {})
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.SetRequestURI(path)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				handler(ctx)
+			}
+		})
+	}
+}

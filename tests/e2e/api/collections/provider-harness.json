@@ -188358,6 +188358,40 @@
       "description": "Pins the OSS setup lock: while dashboard auth is not active (no admin account, or auth disabled), every non-public /api call needs the operator's setup token in X-Bifrost-Setup-Token. Missing header is 401, a wrong token is 403, the right token runs as the admin. is-auth-enabled stays public and reports setup_required / setup_token_configured so the dashboard can show the setup screen. The python profile sets setup_token=bifrost-e2e-setup-token and creates no admin, so this run is locked; augment-provider-harness.mjs injects the header on every row and the lockout rows remove it. Once dashboard auth is enabled the setup token stops working, so the wrong-token row then expects 401. Read-only: nothing is created or changed.",
       "item": [
         {
+          "name": "openai setup-lock health remains public before first administrator - setup token",
+          "protocolProfileBehavior": { "disableCookies": true },
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.request.headers.remove('X-Bifrost-Setup-Token');",
+                  "pm.request.headers.remove('Authorization');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('health is public while the first administrator is not configured', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
+                  "  pm.expect(pm.response.json().status, 'failed: ' + pm.response.text()).to.equal('ok');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "openai setup-lock status reports lock state - setup token",
           "request": {
             "auth": {
