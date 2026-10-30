@@ -149,11 +149,11 @@ func TestRDBAuditStoreScopesBeforePaginationAndRecoversOutboxLease(t *testing.T)
 	assert.Zero(t, total)
 	assert.Empty(t, visible)
 
-	event := &tables.TableOutboxEvent{Topic: "identity.invalidate", DeduplicationKey: "user-1:v1", Payload: map[string]any{"user_id": one, "token": "never-store"}}
+	now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	event := &tables.TableOutboxEvent{Topic: "identity.invalidate", DeduplicationKey: "user-1:v1", AvailableAt: now, Payload: map[string]any{"user_id": one, "token": "never-store"}}
 	require.NoError(t, store.CreateOutboxEvent(ctx, event))
 	assert.NotContains(t, event.PayloadJSON, "never-store")
 
-	now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
 	claimed, token, err := store.ClaimOutboxEvents(ctx, now, time.Minute, 5)
 	require.NoError(t, err)
 	require.Len(t, claimed, 1)

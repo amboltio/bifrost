@@ -1,6 +1,7 @@
 package integrations
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -51,11 +52,12 @@ var azureEndpointStarters = map[string]bool{
 	"models":      true,
 }
 
-// isAzureSDKRequest reports whether the request originates from the Azure OpenAI
-// SDK by inspecting the User-Agent header directly from the HTTP request.
+// IsAzureSDKRequest reports whether the request originates from the Azure OpenAI
+// SDK by inspecting the User-Agent header directly from the HTTP request, or arrives
+// on the /azure resource mount, whose URL already names Azure.
 // This avoids any ordering dependency on AzureEndpointPreHook.
-func isAzureSDKRequest(ctx *fasthttp.RequestCtx) bool {
-	return strings.Contains(string(ctx.UserAgent()), "AzureOpenAI")
+func IsAzureSDKRequest(ctx *fasthttp.RequestCtx) bool {
+	return strings.Contains(string(ctx.UserAgent()), "AzureOpenAI") || bytes.HasPrefix(ctx.Path(), azureOpenAIMountPrefix)
 }
 
 func hydrateOpenAIRequestFromLargePayloadMetadata(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, req interface{}) {
@@ -236,6 +238,9 @@ func AzureEndpointPreHook(handlerStore lib.HandlerStore) func(ctx *fasthttp.Requ
 
 		case *openai.OpenAIChatRequest:
 			r.Model = setModel(r.Model)
+			if deploymentProviderStr == "" || schemas.ModelProvider(deploymentProviderStr) == schemas.Azure {
+				forwardAzureDeploymentChatFields(ctx, bifrostCtx, r)
+			}
 
 		case *openai.OpenAIResponsesRequest:
 			r.Model = setModel(r.Model)
@@ -268,6 +273,34 @@ func AzureEndpointPreHook(handlerStore lib.HandlerStore) func(ctx *fasthttp.Requ
 
 		return nil
 	}
+}
+
+// forwardAzureDeploymentChatFields keeps the top-level fields of an Azure
+// deployments chat body that OpenAIChatRequest does not model (On Your Data
+// data_sources, or a field a newer Azure SDK sends) and turns on extra-params
+// passthrough, so they reach the deployment as the Azure SDK sent them instead
+// of being dropped at decode. The route is Azure's own wire, so no header is
+// needed; it is called only when the deployment resolves to Azure, since a
+// provider-prefixed path names a provider whose wire these fields are not.
+// Fields nested under extra_params (lifted by the router when the passthrough
+// header is set) win over a top-level field of the same name. A large payload
+// is streamed unparsed and is left alone.
+func forwardAzureDeploymentChatFields(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, req *openai.OpenAIChatRequest) {
+	if bifrostCtx == nil {
+		return
+	}
+	if isLargePayload, _ := bifrostCtx.Value(schemas.BifrostContextKeyLargePayloadMode).(bool); isLargePayload {
+		return
+	}
+	unknown := openai.OpenAIChatRequestUnknownFields(ctx.Request.Body())
+	if len(unknown) == 0 {
+		return
+	}
+	for name, value := range req.ExtraParams {
+		unknown[name] = value
+	}
+	req.SetExtraParams(unknown)
+	bifrostCtx.SetValue(schemas.BifrostContextKeyPassthroughExtraParams, true)
 }
 
 // openAIRawPassthrough reports whether the raw upstream bytes are already the
@@ -750,7 +783,7 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 			PreCallback: func(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, req interface{}) error {
 				hydrateOpenAIRequestFromLargePayloadMetadata(ctx, bifrostCtx, req)
 				schemas.ExtractAndSetUserAgentFromHeaders(extractHeadersFromRequest(ctx), bifrostCtx)
-				if isAzureSDKRequest(ctx) {
+				if IsAzureSDKRequest(ctx) {
 					bifrostCtx.SetValue(schemas.BifrostContextKeyIsAzureUserAgent, true)
 				}
 				return nil
@@ -955,7 +988,7 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 			PreCallback: func(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, req interface{}) error {
 				hydrateOpenAIRequestFromLargePayloadMetadata(ctx, bifrostCtx, req)
 				schemas.ExtractAndSetUserAgentFromHeaders(extractHeadersFromRequest(ctx), bifrostCtx)
-				if isAzureSDKRequest(ctx) {
+				if IsAzureSDKRequest(ctx) {
 					bifrostCtx.SetValue(schemas.BifrostContextKeyIsAzureUserAgent, true)
 				}
 				return nil
@@ -1360,7 +1393,7 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 			},
 			PreCallback: func(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, req interface{}) error {
 				hydrateOpenAIRequestFromLargePayloadMetadata(ctx, bifrostCtx, req)
-				if isAzureSDKRequest(ctx) {
+				if IsAzureSDKRequest(ctx) {
 					bifrostCtx.SetValue(schemas.BifrostContextKeyIsAzureUserAgent, true)
 				}
 				return nil
@@ -1906,7 +1939,7 @@ func CreateOpenAIBatchRouteConfigs(pathPrefix string, handlerStore lib.HandlerSt
 				// Provider is parsed from JSON body (extra_body), default to OpenAI if not set
 				if createReq, ok := req.(*schemas.BifrostBatchCreateRequest); ok {
 					if createReq.Provider == "" {
-						if isAzureSDKRequest(ctx) {
+						if IsAzureSDKRequest(ctx) {
 							createReq.Provider = schemas.Azure
 						} else {
 							createReq.Provider = schemas.OpenAI
@@ -2226,7 +2259,7 @@ func CreateOpenAIFileRouteConfigs(pathPrefix string, handlerStore lib.HandlerSto
 				// Default to OpenAI if provider not set from extra_body
 				if bifrostReq, ok := req.(*schemas.BifrostFileUploadRequest); ok {
 					if bifrostReq.Provider == "" {
-						if isAzureSDKRequest(ctx) {
+						if IsAzureSDKRequest(ctx) {
 							bifrostReq.Provider = schemas.Azure
 						} else {
 							bifrostReq.Provider = schemas.OpenAI
@@ -2458,7 +2491,7 @@ func extractBatchListQueryParams(_ lib.HandlerStore) PreRequestCallback {
 				listReq.Provider = schemas.ModelProvider(provider)
 			}
 			if listReq.Provider == "" {
-				if isAzureSDKRequest(ctx) {
+				if IsAzureSDKRequest(ctx) {
 					listReq.Provider = schemas.Azure
 				} else {
 					listReq.Provider = schemas.OpenAI
@@ -2501,7 +2534,7 @@ func extractBatchIDFromPath(_ lib.HandlerStore) PreRequestCallback {
 		// Extract provider from extra_query (for GET requests)
 		provider := schemas.ModelProvider(string(ctx.QueryArgs().Peek("provider")))
 		if provider == "" {
-			if isAzureSDKRequest(ctx) {
+			if IsAzureSDKRequest(ctx) {
 				provider = schemas.Azure
 			} else {
 				provider = schemas.OpenAI
@@ -2582,7 +2615,7 @@ func extractFileListQueryParams(_ lib.HandlerStore) PreRequestCallback {
 				listReq.Provider = schemas.ModelProvider(provider)
 			}
 			if listReq.Provider == "" {
-				if isAzureSDKRequest(ctx) {
+				if IsAzureSDKRequest(ctx) {
 					listReq.Provider = schemas.Azure
 				} else {
 					listReq.Provider = schemas.OpenAI
@@ -2686,7 +2719,7 @@ func extractFileIDFromPath(_ lib.HandlerStore) PreRequestCallback {
 		// Extract provider from extra_query
 		provider := schemas.ModelProvider(string(ctx.QueryArgs().Peek("provider")))
 		if provider == "" {
-			if isAzureSDKRequest(ctx) {
+			if IsAzureSDKRequest(ctx) {
 				provider = schemas.Azure
 			} else {
 				provider = schemas.OpenAI
@@ -2771,7 +2804,7 @@ func extractResponsesLifecycleFromPath(_ lib.HandlerStore) PreRequestCallback {
 		}
 		provider := schemas.ModelProvider(string(ctx.QueryArgs().Peek("provider")))
 		if provider == "" {
-			if isAzureSDKRequest(ctx) {
+			if IsAzureSDKRequest(ctx) {
 				provider = schemas.Azure
 			} else {
 				provider = schemas.OpenAI
