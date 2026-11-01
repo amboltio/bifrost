@@ -24,9 +24,8 @@ API_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Configuration
 COLLECTION="$API_DIR/collections/bifrost-api-management.postman_collection.json"
 REPORT_DIR="$API_DIR/newman-reports/api-management"
-# OSS setup lock: while dashboard auth is not active, /api requires the setup token.
-# Must match setup_token in the server's config.json (or its BIFROST_SETUP_TOKEN).
-SETUP_TOKEN="${BIFROST_E2E_SETUP_TOKEN:-${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}}"
+# Canonical session supplied by the caller, or obtained before Newman arguments are built.
+SESSION_AUTH_HEADER="${BIFROST_E2E_AUTH_HEADER:-}"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -72,7 +71,7 @@ EXTRA_COLLECTIONS=()
 BASE_URL="${BIFROST_E2E_BASE_URL:-${BIFROST_BASE_URL:-http://localhost:8080}}"
 ADMIN_USERNAME="${BIFROST_E2E_ADMIN_USERNAME:-admin}"
 ADMIN_PASSWORD="${BIFROST_E2E_ADMIN_PASSWORD:-Bifrost-E2E-Admin-Pass1!}"
-ADMIN_AUTH_HEADER="Bearer $(printf '%s:%s' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" | base64 | tr -d '\n')"
+ADMIN_AUTH_HEADER=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -292,10 +291,6 @@ fi
 HTTP_SERVER_DIR="$BIFROST_ROOT/examples/mcps/http-no-ping-server"
 HTTP_SERVER_BIN="$HTTP_SERVER_DIR/http-server"
 HTTP_SERVER_PID=""
-AUTH_ENABLED_BY_RUN=""
-# "1" once this run has created (or found) the admin account and restored auth to
-# disabled: the request guard suite's Dashboard auth update folder needs a stored
-# admin whose password is ADMIN_PASSWORD and only runs when told one exists.
 REQUEST_GUARDS_ADMIN_EXISTS="0"
 
 start_http_mcp_server() {
@@ -343,19 +338,10 @@ stop_http_mcp_server() {
 }
 
 cleanup() {
-    if [ "$AUTH_ENABLED_BY_RUN" = "1" ]; then
-        echo "Restoring dashboard auth to disabled..."
-        BIFROST_E2E_AUTH_HEADER="$ADMIN_AUTH_HEADER" \
-        BIFROST_E2E_BASE_URL="$BASE_URL" \
-        BIFROST_E2E_SETUP_TOKEN="$SETUP_TOKEN" \
-        BIFROST_E2E_ADMIN_USERNAME="$ADMIN_USERNAME" \
-        BIFROST_E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-            node "$SCRIPT_DIR/set-auth-config.mjs" disable >/dev/null 2>&1 || true
-    fi
     stop_http_mcp_server
 }
 
-# Register teardown so auth and the server are restored even if the script exits early
+# Stop the owned MCP fixture even if the script exits early.
 trap cleanup EXIT
 
 echo "Setting up MCP test servers..."
@@ -393,10 +379,14 @@ if [ -n "$DB_VERIFY" ]; then
     export NODE_PATH="$API_DIR/node_modules${NODE_PATH:+:$NODE_PATH}"
 fi
 
+ADMIN_AUTH_HEADER="$(BIFROST_E2E_BASE_URL="$BASE_URL" node "$SCRIPT_DIR/management-session.mjs")"
+SESSION_AUTH_HEADER="$ADMIN_AUTH_HEADER"
+export BIFROST_E2E_AUTH_HEADER="$ADMIN_AUTH_HEADER"
+
 # Build shared Newman arguments. The collection and reporter export paths are
 # supplied per pass so the unauthenticated and authenticated runs keep separate
 # reports while using identical environment/config inputs.
-newman_args=(--timeout-script 120000 --timeout 900000 -r "$REPORTERS" --env-var "base_url=$BASE_URL" --env-var "setup_token=$SETUP_TOKEN")
+newman_args=(--timeout-script 120000 --timeout 900000 -r "$REPORTERS" --env-var "base_url=$BASE_URL" --env-var "admin_auth_header=$SESSION_AUTH_HEADER")
 
 # Parsed seed env entries live here, not in the runner's shell namespace.
 # Decoupling the data keyspace from the script's own variables (PATH, COLLECTION,
@@ -535,39 +525,10 @@ run_newman_pass() {
     return $pass_exit
 }
 
-# The unauthenticated pass runs while dashboard auth is off, so the OSS setup lock
-# needs every request to carry the setup token.
-SETUP_COLLECTION="$REPORT_DIR/api-management-setup-token.postman_collection.json"
-node "$SCRIPT_DIR/add-setup-token-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
-run_newman_pass "Running unauthenticated API management tests..." "$SETUP_COLLECTION" "" ""
-EXIT_CODE=$?
-
 AUTH_COLLECTION="$REPORT_DIR/api-management-auth.postman_collection.json"
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "" | tee -a "$LOG_FILE"
-    echo -e "${GREEN}Enabling dashboard auth for authenticated API management tests...${NC}" | tee -a "$LOG_FILE"
-    set +e
-    BIFROST_E2E_BASE_URL="$BASE_URL" \
-    BIFROST_E2E_SETUP_TOKEN="$SETUP_TOKEN" \
-    BIFROST_E2E_ADMIN_USERNAME="$ADMIN_USERNAME" \
-    BIFROST_E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-        node "$SCRIPT_DIR/set-auth-config.mjs" enable 2>&1 | tee -a "$LOG_FILE"
-    AUTH_SETUP_EXIT=${PIPESTATUS[0]}
-    set -e
-    # Exit 3 means the auth pass cannot run here (fresh database, no bootstrap
-    # token). That is a coverage gap, not a test failure -- do not fail a run
-    # whose unauthenticated pass was green.
-    if [ $AUTH_SETUP_EXIT -eq 3 ]; then
-        echo -e "${YELLOW}Skipping authenticated API management pass (see message above).${NC}" | tee -a "$LOG_FILE"
-    elif [ $AUTH_SETUP_EXIT -ne 0 ]; then
-        EXIT_CODE=$AUTH_SETUP_EXIT
-    else
-        AUTH_ENABLED_BY_RUN="1"
-        node "$SCRIPT_DIR/add-auth-header.mjs" "$COLLECTION" "$AUTH_COLLECTION"
-        run_newman_pass "Running authenticated API management tests..." "$AUTH_COLLECTION" "-auth" "1"
-        EXIT_CODE=$?
-    fi
-fi
+node "$SCRIPT_DIR/add-session-auth-header.mjs" "$COLLECTION" "$AUTH_COLLECTION"
+run_newman_pass "Running authenticated API management tests..." "$AUTH_COLLECTION" "-auth" "1"
+EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ] && [ "${BIFROST_E2E_SKIP_OBSERVABILITY:-0}" != "1" ]; then
     echo "" | tee -a "$LOG_FILE"
@@ -586,27 +547,6 @@ elif [ $EXIT_CODE -eq 0 ]; then
     echo -e "${YELLOW}Skipping local OTEL and Prometheus observability checks (BIFROST_E2E_SKIP_OBSERVABILITY=1).${NC}" | tee -a "$LOG_FILE"
 fi
 
-if [ "$AUTH_ENABLED_BY_RUN" = "1" ]; then
-    echo "" | tee -a "$LOG_FILE"
-    echo -e "${GREEN}Restoring dashboard auth to disabled...${NC}" | tee -a "$LOG_FILE"
-    set +e
-    BIFROST_E2E_AUTH_HEADER="$ADMIN_AUTH_HEADER" \
-    BIFROST_E2E_BASE_URL="$BASE_URL" \
-    BIFROST_E2E_SETUP_TOKEN="$SETUP_TOKEN" \
-    BIFROST_E2E_ADMIN_USERNAME="$ADMIN_USERNAME" \
-    BIFROST_E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-        node "$SCRIPT_DIR/set-auth-config.mjs" disable 2>&1 | tee -a "$LOG_FILE"
-    AUTH_RESTORE_EXIT=${PIPESTATUS[0]}
-    set -e
-    AUTH_ENABLED_BY_RUN=""
-    if [ $AUTH_RESTORE_EXIT -eq 0 ]; then
-        REQUEST_GUARDS_ADMIN_EXISTS="1"
-    fi
-    if [ $EXIT_CODE -eq 0 ] && [ $AUTH_RESTORE_EXIT -ne 0 ]; then
-        EXIT_CODE=$AUTH_RESTORE_EXIT
-    fi
-fi
-
 # Content-logging permutation matrix: every combination of virtual key (inherit/on/off), client
 # disable_content_logging, OTel connector disable_content_logging, the per-request override gate
 # and the x-bf-disable-content-logging header, checked in both the log store and the OTel export.
@@ -623,7 +563,7 @@ if [ $EXIT_CODE -eq 0 ] && [ "${BIFROST_E2E_SKIP_CONTENT_LOGGING_MATRIX:-0}" != 
     # The matrix reads raw log rows, so it must look at the same logs database this run was pointed
     # at: --logs-db-url and --config-path are plain shell variables here, not exported, so pass them
     # on explicitly. Unset values are left out so a caller's exported BIFROST_LOGS_DB_URL still wins.
-    matrix_env=(BIFROST_E2E_BASE_URL="$BASE_URL" BIFROST_E2E_SETUP_TOKEN="$SETUP_TOKEN")
+    matrix_env=(BIFROST_E2E_BASE_URL="$BASE_URL" BIFROST_E2E_AUTH_HEADER="$SESSION_AUTH_HEADER")
     [ -n "$LOGS_DB_URL" ] && matrix_env+=(BIFROST_LOGS_DB_URL="$LOGS_DB_URL")
     [ -n "$DB_CONFIG_PATH" ] && matrix_env+=(BIFROST_E2E_CONFIG_PATH="$DB_CONFIG_PATH")
     set +e
@@ -655,7 +595,7 @@ if [ $EXIT_CODE -eq 0 ] && [ "${BIFROST_E2E_SKIP_REQUEST_GUARDS:-0}" != "1" ]; t
     echo -e "${GREEN}Running request guard tests...${NC}" | tee -a "$LOG_FILE"
     set +e
     BIFROST_BASE_URL="$BASE_URL" \
-    BIFROST_E2E_SETUP_TOKEN="$SETUP_TOKEN" \
+    BIFROST_E2E_AUTH_HEADER="$SESSION_AUTH_HEADER" \
     BIFROST_E2E_ADMIN_USERNAME="$ADMIN_USERNAME" \
     BIFROST_E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
     BIFROST_E2E_ADMIN_EXISTS="$REQUEST_GUARDS_ADMIN_EXISTS" \
@@ -691,7 +631,7 @@ if [ $EXIT_CODE -eq 0 ] && [ "${BIFROST_E2E_SKIP_EXTRA_FIELDS_PLACEMENT:-0}" != 
     echo -e "${GREEN}Running extra fields placement tests...${NC}" | tee -a "$LOG_FILE"
     set +e
     BIFROST_BASE_URL="$BASE_URL" \
-    BIFROST_E2E_SETUP_TOKEN="$SETUP_TOKEN" \
+    BIFROST_E2E_AUTH_HEADER="$SESSION_AUTH_HEADER" \
         "$SCRIPT_DIR/individual/run-newman-extra-fields-placement-tests.sh" 2>&1 | tee -a "$LOG_FILE"
     EXTRA_FIELDS_PLACEMENT_EXIT=${PIPESTATUS[0]}
     set -e

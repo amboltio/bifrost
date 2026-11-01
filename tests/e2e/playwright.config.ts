@@ -78,13 +78,6 @@ export default defineConfig({
   ],
 
   use: {
-    // OSS setup lock: while dashboard auth is not active, every /api call needs the
-    // operator's setup token. Matches setup_token in the test server's config.json (or
-    // its BIFROST_SETUP_TOKEN). The setup-screen spec clears it with test.use().
-    extraHTTPHeaders: {
-      'X-Bifrost-Setup-Token': process.env.BIFROST_E2E_SETUP_TOKEN || process.env.BIFROST_SETUP_TOKEN || 'bifrost-e2e-setup-token',
-    },
-
     // Recording video + trace for every test is a large CPU cost. Normal runs keep
     // only failure screenshots; E2E_DEBUG_ARTIFACTS=1 (set by RERUN) records everything.
     trace: debugArtifacts ? 'retain-on-failure' : 'off',

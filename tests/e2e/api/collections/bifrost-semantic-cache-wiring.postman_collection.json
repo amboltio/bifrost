@@ -32,7 +32,7 @@
       "type": "string"
     },
     {
-      "key": "setup_token",
+      "key": "admin_auth_header",
       "value": "",
       "type": "string"
     },
@@ -57,9 +57,9 @@
           "if (!pm.collectionVariables.get('ns')) {",
           "  pm.collectionVariables.set('ns', (function scwNamespaceSuffix(runId) {\n  return String(runId || \"\").replace(/[^A-Za-z0-9]/g, \"\");\n})(pm.collectionVariables.get('run_id')));",
           "}",
-          "var setupToken = pm.variables.get('setup_token');",
-          "if (setupToken && pm.request.url.getPath().indexOf('/api/') === 0) {",
-          "  pm.request.headers.upsert({ key: 'X-Bifrost-Setup-Token', value: setupToken });",
+          "var adminAuthHeader = pm.variables.get('admin_auth_header');",
+          "if (adminAuthHeader && pm.request.url.getPath().indexOf('/api/') === 0) {",
+          "  pm.request.headers.upsert({ key: 'Authorization', value: adminAuthHeader });",
           "}"
         ]
       }

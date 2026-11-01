@@ -1,6 +1,6 @@
 // Unit tests for clean-bifrost.sh, the clean server the wiring runners boot with --binary. Run
 // directly: `node clean-bifrost.test.mjs`. A fake bifrost-http stands in for the server: it records
-// the setup token it was started with, says it started, and waits to be stopped.
+// the administrator session it was started with, says it started, and waits to be stopped.
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -23,8 +23,15 @@ const FAKE = join(WORK, "fake-bifrost");
 writeFileSync(
   FAKE,
   `#!/bin/bash
+mode="$1"
 while [ $# -gt 0 ]; do case "$1" in --app-dir) dir="$2"; shift ;; esac; shift; done
-printf '%s' "\${BIFROST_SETUP_TOKEN-<unset>}" > "$dir/token"
+if [ "$mode" = "createsuperadmin" ]; then
+  read -r password
+  [ -n "$password" ] || exit 4
+  printf 'provisioned' > "$dir/admin"
+  exit 0
+fi
+printf '%s' "\${BIFROST_E2E_AUTH_HEADER-<unset>}" > "$dir/token"
 [ -n "\${FAKE_IGNORE_TERM:-}" ] && trap '' TERM
 echo "successfully started bifrost"
 while :; do sleep 0.2; done
@@ -34,10 +41,10 @@ chmodSync(FAKE, 0o755);
 
 // Boots the fake server through boot_clean_bifrost in one shell, runs then in that shell, and stops
 // it through stop_clean_bifrost into <WORK>/report, the way a runner's EXIT trap does. env is the
-// runner's environment; BIFROST_SETUP_TOKEN is left out unless env sets it.
+// runner's environment; BIFROST_E2E_AUTH_HEADER is left out unless env sets it.
 function runClean(then, env = {}, timeout = 30000) {
   const base = { ...process.env };
-  delete base.BIFROST_SETUP_TOKEN;
+  delete base.BIFROST_E2E_AUTH_HEADER;
   const port = 20000 + Math.floor(Math.random() * 20000);
   // The fake server is killed however the shell ends, including when a timeout stops it.
   const body = `source ${JSON.stringify(SCRIPT)}
@@ -53,13 +60,13 @@ ${then}`;
   }
 }
 
-test("the clean server gets the e2e setup token when the runner has none", () => {
-  const { out } = runClean('echo "server=$(cat "$CLEAN_BIFROST_DIR/token") runner=$BIFROST_SETUP_TOKEN"; stop_clean_bifrost');
-  assert.match(out, /server=bifrost-e2e-setup-token runner=bifrost-e2e-setup-token/);
+test("the clean server provisions a canonical test administrator", () => {
+  const { out } = runClean('cat "$CLEAN_BIFROST_DIR/admin"; stop_clean_bifrost');
+  assert.match(out, /provisioned/);
 });
 
-test("a setup token the runner sets is the one the clean server gets", () => {
-  const { out } = runClean('echo "server=$(cat "$CLEAN_BIFROST_DIR/token")"; stop_clean_bifrost', { BIFROST_SETUP_TOKEN: "custom-token" });
+test("a administrator session the runner sets is the one the clean server gets", () => {
+  const { out } = runClean('echo "server=$(cat "$CLEAN_BIFROST_DIR/token")"; stop_clean_bifrost', { BIFROST_E2E_AUTH_HEADER: "custom-token" });
   assert.match(out, /server=custom-token/);
 });
 
@@ -85,6 +92,9 @@ test("a wiring runner resolves a relative --binary from the directory it was sta
   chmodSync(join(caller, "fake-bifrost"), 0o755);
   writeFileSync(join(bin, "newman"), "#!/bin/sh\nexit 0\n");
   chmodSync(join(bin, "newman"), 0o755);
+  // This case isolates binary-path resolution; login HTTP behavior has its own tests.
+  writeFileSync(join(bin, "node"), "#!/bin/sh\nprintf 'Bearer synthetic-session'\n");
+  chmodSync(join(bin, "node"), 0o755);
   for (const runner of ["run-newman-routing-wiring-tests.sh", "run-newman-model-catalog-wiring-tests.sh"]) {
     const script = join(dirname(SCRIPT), "..", "individual", runner);
     const port = String(20000 + Math.floor(Math.random() * 20000));
@@ -92,7 +102,7 @@ test("a wiring runner resolves a relative --binary from the directory it was sta
     try {
       out = execFileSync("bash", [script, "--binary", "./fake-bifrost", "--port", port], {
         cwd: caller,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        env: { ...process.env, BIFROST_E2E_AUTH_HEADER: "Bearer synthetic-session", PATH: `${bin}:${process.env.PATH}` },
         encoding: "utf8",
         timeout: 60000,
       });

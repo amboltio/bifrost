@@ -166,13 +166,8 @@ jq --arg host "$POSTGRES_HOST" --arg port "$POSTGRES_PORT" --arg user "$POSTGRES
      "logs_store":   {"enabled": true, "type": "postgres", "config": {"host": $host, "port": $port, "user": $user, "password": $pass, "db_name": $db, "ssl_mode": $ssl}}
    } | .client.skills_external_client_url = $skills_url' "$SOURCE_CONFIG" > "$MERGED_CONFIG"
 
-# The authenticated newman pass needs a first admin account. Creating it is the one
-# config write the server accepts unauthenticated, and it demands a bootstrap token
-# the server resolves at boot from BIFROST_SETUP_TOKEN. Export it here so both the
-# server process and the runner (which reads BIFROST_E2E_SETUP_TOKEN) share it;
-# without it set-auth-config skips the auth pass and the MCP/vMCP tests run nowhere.
-export BIFROST_SETUP_TOKEN="${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}"
-export BIFROST_E2E_SETUP_TOKEN="$BIFROST_SETUP_TOKEN"
+# The owned test store gets a canonical administrator before the server starts.
+node "$REPO_ROOT/tests/e2e/api/runners/management-session.mjs" --provision "$BIFROST_BINARY" "$TEMP_DIR"
 
 # Match the API management collection's synthetic canary, including local runs.
 # It must be exported before starting the gateway so env-backed fields resolve.
@@ -230,8 +225,8 @@ fi
 # The wiring collections each boot a clean server (no providers, sqlite stores):
 # routing-wiring creates the global standard providers (openai, azure, bedrock,
 # vertex), which the server above already configures from tests/config.json.
-# Both call real providers through the job's keys, and send BIFROST_SETUP_TOKEN
-# on /api calls, since their servers inherit it and have no admin.
+# Both call real providers through the job's keys, and send BIFROST_E2E_AUTH_HEADER
+# on /api calls after provisioning and logging into their own test stores.
 echo ""
 echo "🧪 Running routing-wiring newman collection..."
 "$REPO_ROOT/tests/e2e/api/runners/individual/run-newman-routing-wiring-tests.sh" --binary "$BIFROST_BINARY" --port "$((PORT + 9))"

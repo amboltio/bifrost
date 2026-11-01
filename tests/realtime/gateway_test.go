@@ -266,12 +266,8 @@ func apiCall(method, path string, body any) (int, gjson.Result, error) {
 		return 0, gjson.Result{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// The setup token opens /api while dashboard auth is off (config.json); a gateway with
-	// dashboard auth takes the admin's Authorization header instead.
-	req.Header.Set("X-Bifrost-Setup-Token", envOr("BIFROST_SETUP_TOKEN", "bifrost-realtime-setup-token"))
-	if auth := os.Getenv("BIFROST_ADMIN_AUTH"); auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
+	// Management calls use a canonical administrator session supplied by the runner.
+	req.Header.Set("Authorization", envOr("BIFROST_E2E_AUTH_HEADER", os.Getenv("BIFROST_ADMIN_AUTH")))
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		return 0, gjson.Result{}, err

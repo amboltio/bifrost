@@ -1,6 +1,5 @@
 {
   "$schema": "https://www.getbifrost.ai/schema",
-  "setup_token": "bifrost-e2e-setup-token",
   "client": {
     "enable_logging": true,
     "enforce_auth_on_inference": false,
@@ -32,27 +31,6 @@
     }
   },
   "governance": {
-    "auth_config": {
-      "admin_username": "env.BIFROST_ADMIN_USERNAME",
-      "admin_password": "env.BIFROST_ADMIN_PASSWORD",
-      "is_enabled": true
-    }
-  },
-  "providers": {
-    "openai": {
-      "keys": [
-        {
-          "name": "e2e-openai-key",
-          "value": "env.OPENAI_API_KEY",
-          "weight": 1,
-          "models": ["*"],
-          "use_for_batch_api": true
-        }
-      ],
-      "network_config": {
-        "default_request_timeout_in_seconds": 300
-      }
-    },
     "anthropic": {
       "keys": [
         {

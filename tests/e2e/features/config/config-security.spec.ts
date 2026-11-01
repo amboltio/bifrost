@@ -2,238 +2,103 @@ import { coreConfigApi } from "../../core/actions/api";
 import { expect, test } from "../../core/fixtures/base.fixture";
 import { ConfigSettingsPage, ConfigSettingsState } from "./pages/config-settings.page";
 import { DefaultCoreConfig } from "../../../../ui/lib/types/config";
-import { storageStatePath } from "../../plan";
 
-test.describe("Inference auth setup defaults", () => {
-  test.use({ skipAutoLogin: true });
+test.describe("Dashboard access and canonical user management", () => {
+  test.use({ skipAutoLogin: true, extraHTTPHeaders: {} });
 
-  for (const existing of [false, true]) {
-    test(`inference setup preserves explicit opt-out (existing admin: ${existing})`, async ({
-      page,
-    }) => {
-      // Exercise the real form without changing credentials on the shared test gateway.
-      await page.route("**/api/**", async (route) => {
-        const path = new URL(route.request().url()).pathname;
-        if (path === "/api/config") {
-          if (route.request().method() === "PUT") {
-            await route.fulfill({
-              json: {
-                status: "success",
-                message: "configuration updated successfully",
-              },
-            });
-          } else {
-            await route.fulfill({
-              json: {
-                client_config: {
-                  ...DefaultCoreConfig,
-                  enforce_auth_on_inference: false,
-                  allowed_origins: ["http://localhost:3000"],
-                },
-                auth_config: existing
-                  ? {
-                      is_enabled: true,
-                      admin_username: { value: "admin", ref: "" },
-                      admin_password: { value: "", ref: "" },
-                    }
-                  : null,
-                framework_config: {},
-                is_db_connected: true,
-                metadata: { onboarding_dismissed: true },
-              },
-            });
-          }
-        } else if (path === "/api/version") {
-          await route.fulfill({ json: "1.0.0" });
-        } else if (path === "/api/session/is-auth-enabled") {
-          await route.fulfill({
-            json: {
-              is_auth_enabled: false,
-              has_valid_token: false,
-              auth_type: "none",
-              inference_auth_enforced: false,
-            },
-          });
-        } else {
-          await route.fulfill({ json: {} });
-        }
-      });
-      await page.goto("/workspace/config/security");
-      const inference = page.getByTestId("enforce-auth-on-inference-switch");
-      const dashboard = page.locator("#auth-enabled");
-      await expect(inference).not.toBeChecked();
-      if (!existing) {
-        await dashboard.click();
-        await expect(inference).toBeChecked();
-        await inference.click();
-      }
-      await expect(
-        page.getByTestId("inference-auth-off-warning"),
-      ).toBeVisible();
-      // Toggling dashboard auth again must not undo the operator's explicit choice.
-      await dashboard.click();
-      await dashboard.click();
-      await expect(inference).not.toBeChecked();
-      await page.locator("#admin-username").fill("admin");
-      await page.locator("#admin-password").fill("StrongPassword1!");
-      if (!existing)
-        await page.locator("#setup-token").fill("test-setup-token");
-      const submitted = page.waitForRequest(
-        (r) =>
-          new URL(r.url()).pathname === "/api/config" && r.method() === "PUT",
-      );
-      await page.getByRole("button", { name: /Save/i }).click();
-      expect(
-        (await submitted).postDataJSON().client_config
-          .enforce_auth_on_inference,
-      ).toBe(false);
-    });
-  }
-
-  test("inference setup preserves a choice made before enabling dashboard auth", async ({
-    page,
-  }) => {
+  test("an empty instance explains terminal provisioning without fetching management data", async ({ page }) => {
+    const managementCalls: string[] = [];
     await page.route("**/api/**", async (route) => {
       const path = new URL(route.request().url()).pathname;
-      await route.fulfill({
-        json:
-          path === "/api/config"
-            ? {
-                client_config: {
-                  ...DefaultCoreConfig,
-                  enforce_auth_on_inference: false,
-                },
-                auth_config: null,
-                framework_config: {},
-                is_db_connected: true,
-                metadata: { onboarding_dismissed: true },
-              }
-            : path === "/api/version"
-              ? "1.0.0"
-              : path === "/api/session/is-auth-enabled"
-                ? { is_auth_enabled: false, auth_type: "none" }
-                : {},
-      });
-    });
-    await page.goto("/workspace/config/security");
-    const inference = page.getByTestId("enforce-auth-on-inference-switch");
-    await inference.click();
-    await inference.click();
-    await page.locator("#auth-enabled").click();
-    await expect(inference).not.toBeChecked();
-    await expect(page.getByTestId("inference-auth-off-warning")).toBeVisible();
-  });
-
-  test("canceling first-time dashboard auth restores the stored inference setting", async ({
-    page,
-  }) => {
-    await page.route("**/api/**", async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      await route.fulfill({
-        json:
-          path === "/api/config"
-            ? {
-                client_config: {
-                  ...DefaultCoreConfig,
-                  enforce_auth_on_inference: false,
-                },
-                auth_config: null,
-                framework_config: {},
-                is_db_connected: true,
-                metadata: { onboarding_dismissed: true },
-              }
-            : path === "/api/version"
-              ? "1.0.0"
-              : path === "/api/session/is-auth-enabled"
-                ? { is_auth_enabled: false, auth_type: "none" }
-                : {},
-      });
-    });
-    await page.goto("/workspace/config/security");
-    const inference = page.getByTestId("enforce-auth-on-inference-switch");
-    const dashboard = page.locator("#auth-enabled");
-    await dashboard.click();
-    await expect(inference).toBeChecked();
-    // The switch mirrors the client_config value Save sends, so an unchecked switch means cancel did not persist inference auth.
-    await dashboard.click();
-    await expect(inference).not.toBeChecked();
-  });
-
-  test("provider object ownership switch reads an omitted setting as on", async ({
-    page,
-  }) => {
-    // A gateway that predates the setting omits it; the server treats that as enforced,
-    // so the switch must not show it as off and an unrelated save must not turn it off.
-    const { enforce_vk_object_ownership: _omitted, ...withoutOwnership } =
-      DefaultCoreConfig;
-    await page.route("**/api/**", async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      await route.fulfill({
-        json:
-          path === "/api/config"
-            ? {
-                client_config: withoutOwnership,
-                auth_config: null,
-                framework_config: {},
-                is_db_connected: true,
-                metadata: { onboarding_dismissed: true },
-              }
-            : path === "/api/version"
-              ? "1.0.0"
-              : path === "/api/session/is-auth-enabled"
-                ? { is_auth_enabled: false, auth_type: "none" }
-                : {},
-      });
-    });
-    await page.goto("/workspace/config/security");
-    await expect(
-      page.getByTestId("security-enforce-vk-object-ownership-switch"),
-    ).toBeChecked();
-  });
-
-  test("setup toggles stay disabled when the stored config failed to load", async ({
-    page,
-  }) => {
-    // The dashboard shell loads GET /api/config?from_db=false, while the config layout gates the from_db=true copy
-    // on loading only, not on error. With just that copy failing the form rendered with no config, and a toggle made
-    // then was overwritten by a later successful refetch, saving dashboard auth on and inference auth off.
-    await page.route("**/api/**", async (route) => {
-      const url = new URL(route.request().url());
-      if (
-        url.pathname === "/api/config" &&
-        url.searchParams.get("from_db") === "true"
-      ) {
-        await route.fulfill({
-          status: 500,
-          json: { error: { message: "config store unavailable" } },
-        });
+      if (path === "/api/session/is-auth-enabled") {
+        await route.fulfill({ json: { is_auth_enabled: false, has_valid_token: false, admin_provisioning_required: true } });
         return;
       }
-      await route.fulfill({
-        json:
-          url.pathname === "/api/config"
-            ? {
-                client_config: {
-                  ...DefaultCoreConfig,
-                  enforce_auth_on_inference: false,
-                },
-                auth_config: null,
-                framework_config: {},
-                is_db_connected: true,
-                metadata: { onboarding_dismissed: true },
-              }
-            : url.pathname === "/api/version"
-              ? "1.0.0"
-              : url.pathname === "/api/session/is-auth-enabled"
-                ? { is_auth_enabled: false, auth_type: "none" }
-                : {},
-      });
+      managementCalls.push(path);
+      await route.fulfill({ status: 403, json: { error: { message: "Administrator provisioning required" } } });
+    });
+    await page.goto("/login?goto=%2Fworkspace%2Fgovernance%2Fusers");
+    await expect(page.getByTestId("admin-provisioning-view")).toBeVisible();
+    await expect(page.getByTestId("admin-provisioning-instructions")).toContainText("/app/main createsuperadmin --app-dir /app/data");
+    await expect(page.locator("form")).toHaveCount(0);
+    expect(managementCalls).toEqual([]);
+    await expect(page).toHaveURL(/\/login\?/);
+  });
+
+  test("check again detects an administrator created by the CLI and permits ordinary sign-in", async ({ page }) => {
+    let provisioned = false;
+    const logins: unknown[] = [];
+    await page.route("**/api/**", async (route) => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (path === "/api/session/is-auth-enabled") {
+        await route.fulfill({ json: { is_auth_enabled: provisioned, has_valid_token: false, admin_provisioning_required: !provisioned, authentication_methods: provisioned ? ["local"] : [] } });
+      } else if (path === "/api/session/login") {
+        logins.push(request.postDataJSON());
+        await route.fulfill({ status: 401, json: { error: { message: "Invalid credentials" } } });
+      } else {
+        await route.fulfill({ json: {} });
+      }
+    });
+    await page.goto("/login");
+    await expect(page.getByTestId("admin-provisioning-view")).toBeVisible();
+    provisioned = true;
+    await page.getByTestId("admin-provisioning-refresh").click();
+    await expect(page.getByTestId("admin-provisioning-view")).toHaveCount(0);
+    await expect(page.locator("#username")).toBeVisible();
+    await page.locator("#username").fill("operator@example.com");
+    await page.locator("#password").fill("An-incorrect-password-1!");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page.getByText("Invalid credentials", { exact: true })).toBeVisible();
+    expect(logins).toEqual([{ email: "operator@example.com", username: "operator@example.com", password: "An-incorrect-password-1!" }]);
+  });
+
+  test("disabled authentication never redirects a visitor into the dashboard", async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ json: { is_auth_enabled: false, has_valid_token: false, admin_provisioning_required: false, authentication_methods: [] } }));
+    await page.goto("/login");
+    await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+    await expect(page).toHaveURL(/\/login$/);
+  });
+
+  test("an unavailable auth status keeps visitors on the login page", async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ status: 503, json: { error: { message: "Temporarily unavailable" } } }));
+    await page.goto("/login?goto=%2Fworkspace%2Fgovernance%2Fusers");
+    await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+    await expect(page).toHaveURL(/\/login\?/);
+    await expect(page.getByTestId("admin-provisioning-view")).toHaveCount(0);
+  });
+
+  test("initialized instances retain configured SSO sign-in", async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ json: {
+      is_auth_enabled: true, has_valid_token: false, admin_provisioning_required: false,
+      authentication_methods: ["oidc"], providers: [{ id: "company", display_name: "Company SSO" }],
+    } }));
+    await page.goto("/login");
+    await expect(page.getByTestId("login-oidc-provider-company")).toHaveText("Company SSO");
+    await expect(page.locator("#password")).toHaveCount(0);
+    await expect(page.getByTestId("admin-provisioning-view")).toHaveCount(0);
+  });
+
+  test("security settings link to Users and keep inference changes independent of legacy credentials", async ({ page }) => {
+    await page.route("**/api/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      await route.fulfill({ json: path === "/api/config" ? {
+        client_config: { ...DefaultCoreConfig, enforce_auth_on_inference: false },
+        auth_config: { is_enabled: true, admin_username: { value: "legacy" }, admin_password: { value: "" } },
+        framework_config: {}, is_db_connected: true, metadata: { onboarding_dismissed: true },
+      } : path === "/api/version" ? "1.0.0" : path === "/api/session/is-auth-enabled" ? { is_auth_enabled: true, has_valid_token: true, admin_provisioning_required: false } : {} });
     });
     await page.goto("/workspace/config/security");
-    await expect(page.locator("#auth-enabled")).toBeDisabled();
-    await expect(
-      page.getByTestId("enforce-auth-on-inference-switch"),
-    ).toBeDisabled();
+    await expect(page.getByTestId("security-manage-users")).toHaveAttribute("href", "/workspace/governance/users");
+    await expect(page.locator("#admin-username, #admin-password, #auth-enabled")).toHaveCount(0);
+    const inference = page.getByTestId("enforce-auth-on-inference-switch");
+    await expect(inference).not.toBeChecked();
+    await inference.click();
+    const submitted = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/config" && request.method() === "PUT");
+    await page.getByTestId("security-save-btn").click();
+    const body = (await submitted).postDataJSON();
+    expect(body.client_config.enforce_auth_on_inference).toBe(true);
+    expect(body).not.toHaveProperty("auth_config");
   });
 });
 
@@ -400,123 +265,6 @@ test.describe("Security Settings", () => {
     expect(isVisible).toBeDefined();
   });
 
-  test.describe("Dashboard Auth Confirmation", () => {
-    // Once an admin account exists, switching dashboard protection off lets
-    // anyone reach the settings API without signing in, so switching it back
-    // on from that state must prove control of the instance with the stored
-    // admin password (or the operator's setup token). The fixture signs the
-    // browser back in with BIFROST_ADMIN_USERNAME/PASSWORD when the server
-    // flushes sessions, so that password is also what this test confirms with.
-    const adminPassword = process.env.BIFROST_ADMIN_PASSWORD;
-
-    test.beforeEach(async ({ configSettingsPage, request }) => {
-      test.skip(
-        !adminPassword,
-        "BIFROST_ADMIN_PASSWORD is not set, so there is no stored admin password to confirm with",
-      );
-      const current = await coreConfigApi.get(request);
-      test.skip(
-        current.auth_config?.is_enabled !== true,
-        "Dashboard auth is not enabled with stored credentials on this instance",
-      );
-      // The onboarding checklist covers the Save button in the bottom-right
-      // corner on a fresh instance, so dismiss it before touching settings.
-      await configSettingsPage.dismissOnboardingWidget();
-    });
-
-    test.afterEach(async ({ configSettingsPage, request }, testInfo) => {
-      // If the test stopped while protection was off, turn it back on with the
-      // proof the server now requires. GET fails with 401 once auth is already
-      // on and the session was flushed, which means there is nothing to undo.
-      const current = await coreConfigApi.get(request).catch(() => null);
-      if (current?.auth_config && !current.auth_config.is_enabled) {
-        await coreConfigApi.setDashboardAuthEnabled(request, true, {
-          currentPassword: adminPassword,
-        });
-      }
-      // Refresh the page state so the outer restore sees the switch already on
-      // rather than clicking it and saving without proof.
-      await configSettingsPage.goto("security");
-      await expect(configSettingsPage.dashboardAuthSwitch).toHaveAttribute(
-        "data-state",
-        "checked",
-        { timeout: 20000 },
-      );
-      // Re-enabling auth flushed every session, including the one later specs on
-      // this worker start from, so save the page's fresh login in its place.
-      const worker = testInfo.project.metadata.worker as string | undefined;
-      if (worker) {
-        await configSettingsPage.page
-          .context()
-          .storageState({ path: storageStatePath(worker) });
-      }
-    });
-
-    test("should require the current admin password to turn protection back on after disabling it", async ({
-      configSettingsPage,
-      request,
-    }) => {
-      // Signed-in session: no confirmation field while protection is on, and
-      // switching it off needs no proof.
-      await expect(configSettingsPage.dashboardAuthSwitch).toHaveAttribute(
-        "data-state",
-        "checked",
-      );
-      await expect(configSettingsPage.currentPasswordInput).not.toBeVisible();
-      await configSettingsPage.toggleDashboardAuth();
-      await configSettingsPage.saveSettings();
-
-      await configSettingsPage.goto("security");
-      await expect(configSettingsPage.dashboardAuthSwitch).toHaveAttribute(
-        "data-state",
-        "unchecked",
-      );
-      expect((await coreConfigApi.get(request)).auth_config?.is_enabled).toBe(
-        false,
-      );
-
-      // Protection off, stored account: turning it on reveals the confirmation
-      // field, and saving without filling it is refused in the form itself.
-      await configSettingsPage.toggleDashboardAuth();
-      await expect(configSettingsPage.currentPasswordInput).toBeVisible();
-      await configSettingsPage.saveBtn.click();
-      await expect(configSettingsPage.currentPasswordError).toBeVisible();
-      await expect(configSettingsPage.currentPasswordError).toContainText(
-        /current admin password/i,
-      );
-      expect((await coreConfigApi.get(request)).auth_config?.is_enabled).toBe(
-        false,
-      );
-
-      // The stored password turns protection back on. The server flushes every
-      // session on that change; sign the browser back in before reloading
-      // rather than racing the fixture's login redirect.
-      await configSettingsPage.setCurrentPassword(adminPassword!);
-      const page = configSettingsPage.page;
-      const saved = page.waitForResponse(
-        (res) => res.url().includes("/api/config") && res.request().method() === "PUT",
-      );
-      await configSettingsPage.saveBtn.click();
-      expect((await saved).ok()).toBe(true);
-      const login = await page.request.post("/api/session/login", {
-        data: { username: process.env.BIFROST_ADMIN_USERNAME, password: adminPassword },
-      });
-      expect(login.ok(), await login.text()).toBe(true);
-      await configSettingsPage.goto("security");
-      await expect(configSettingsPage.dashboardAuthSwitch).toHaveAttribute(
-        "data-state",
-        "checked",
-        { timeout: 20000 },
-      );
-      await expect(configSettingsPage.currentPasswordInput).not.toBeVisible();
-      // The flush also invalidated the request fixture's session; the page has signed in again.
-      expect(
-        (await coreConfigApi.get(configSettingsPage.page.request)).auth_config
-          ?.is_enabled,
-      ).toBe(true);
-    });
-  });
-
   test.describe("Virtual Key Rotation Cooldown", () => {
     // The cooldown is a text input, which the generic settings capture and
     // restore (number inputs and switches only) does not cover, so each test
@@ -597,155 +345,5 @@ test.describe("Security Settings", () => {
       await configSettingsPage.goto("security");
       await expect(configSettingsPage.vkRotationCooldownInput).toHaveValue("");
     });
-  });
-});
-
-test.describe("OSS setup lock", () => {
-  // A fresh browser with no injected header: the state an operator is in when they
-  // first open a locked dashboard.
-  test.use({ skipAutoLogin: true, extraHTTPHeaders: {} });
-
-  const lockedStatus = (setupTokenConfigured: boolean) => ({
-    is_auth_enabled: false,
-    has_valid_token: false,
-    auth_type: "none",
-    inference_auth_enforced: true,
-    setup_required: true,
-    setup_token_configured: setupTokenConfigured,
-  });
-
-  test("setup screen trades the setup token for a session and never keeps it", async ({
-    page,
-  }) => {
-    // Mirrors the gateway: POST /api/session/setup checks the header once and opens a
-    // server-side setup session (the real one is an HttpOnly cookie). Every other call
-    // is 401 until that session exists.
-    let sessionActive = false;
-    const tokenOnLaterCalls: string[] = [];
-    await page.route("**/api/**", async (route) => {
-      const request = route.request();
-      const path = new URL(request.url()).pathname;
-      const token = request.headers()["x-bifrost-setup-token"];
-      if (path === "/api/session/is-auth-enabled") {
-        await route.fulfill({ json: lockedStatus(true) });
-        return;
-      }
-      if (path === "/api/version") {
-        await route.fulfill({ json: "1.0.0" });
-        return;
-      }
-      if (path === "/api/session/setup") {
-        if (token !== "right-token") {
-          await route.fulfill({
-            status: 403,
-            json: { error: { message: "invalid setup token" } },
-          });
-          return;
-        }
-        sessionActive = true;
-        await route.fulfill({
-          json: { expires_at: new Date(Date.now() + 3600_000).toISOString() },
-        });
-        return;
-      }
-      if (token) tokenOnLaterCalls.push(path);
-      if (!sessionActive) {
-        await route.fulfill({
-          status: 401,
-          json: {
-            error: {
-              message:
-                "dashboard auth is not configured; send the setup token in the X-Bifrost-Setup-Token header",
-            },
-          },
-        });
-        return;
-      }
-      if (path === "/api/config") {
-        await route.fulfill({
-          json: {
-            client_config: {
-              ...DefaultCoreConfig,
-              allowed_origins: ["http://localhost:3000"],
-            },
-            auth_config: null,
-            framework_config: {},
-            is_db_connected: true,
-            metadata: { onboarding_dismissed: true },
-          },
-        });
-        return;
-      }
-      await route.fulfill({ json: {} });
-    });
-
-    await page.goto("/login");
-    await expect(page.getByTestId("setup-token-view")).toBeVisible();
-
-    await page.getByTestId("setup-token-input").fill("wrong-token");
-    await page.getByTestId("setup-token-submit").click();
-    await expect(page.getByTestId("setup-token-error")).toHaveText(
-      "Invalid setup token",
-    );
-
-    await page.getByTestId("setup-token-input").fill("right-token");
-    await page.getByTestId("setup-token-submit").click();
-    await page.waitForURL(
-      (url) => url.pathname === "/workspace/config/security",
-    );
-    await expect(page.getByTestId("setup-required-banner")).toBeVisible();
-
-    // The admin form neither shows nor asks for the token again.
-    await page.locator("#auth-enabled").click();
-    await expect(
-      page.getByTestId("security-setup-token-authorized"),
-    ).toBeVisible();
-    await expect(page.locator("#setup-token")).toHaveCount(0);
-
-    // Nothing on the client holds the token: no later request carries it, and no storage has it.
-    expect(
-      tokenOnLaterCalls,
-      "dashboard calls after setup must ride the session, not the token",
-    ).toEqual([]);
-    const stored = await page.evaluate(() =>
-      [
-        ...Object.keys(window.sessionStorage).map((k) =>
-          window.sessionStorage.getItem(k),
-        ),
-        ...Object.keys(window.localStorage).map((k) =>
-          window.localStorage.getItem(k),
-        ),
-        document.cookie,
-      ].join(" "),
-    );
-    expect(stored).not.toContain("right-token");
-  });
-
-  test("setup screen explains how to configure a token when none is set", async ({
-    page,
-  }) => {
-    await page.route("**/api/**", async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      if (path === "/api/session/is-auth-enabled") {
-        await route.fulfill({ json: lockedStatus(false) });
-        return;
-      }
-      await route.fulfill({
-        status: 403,
-        json: {
-          error: {
-            message:
-              "dashboard auth is not configured and no setup token is set",
-          },
-        },
-      });
-    });
-
-    await page.goto("/login");
-    await expect(page.getByTestId("setup-token-instructions")).toBeVisible();
-    await expect(page.getByTestId("setup-token-instructions")).toContainText(
-      "BIFROST_SETUP_TOKEN",
-    );
-    await expect(page.getByTestId("setup-token-input")).toHaveCount(0);
   });
 });

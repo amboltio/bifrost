@@ -222,6 +222,7 @@ run_mode() {
 
     CURRENT_DIR="$(mktemp -d)"
     write_config "$CURRENT_DIR" "$mode"
+    node "$SCRIPT_DIR/../management-session.mjs" --provision "$BIFROST_BINARY" "$CURRENT_DIR"
     local server_log="$CURRENT_DIR/server.log"
 
     "$BIFROST_BINARY" --app-dir "$CURRENT_DIR" --port "$PORT" --log-level info > "$server_log" 2>&1 &
@@ -240,8 +241,12 @@ run_mode() {
         echo -e "${RED}   Server did not start within 60s${NC}"; cat "$server_log"; OVERALL_EXIT=1
     else
         local report_prefix="${REPORT_DIR}/${mode}"
-        local cmd=(newman run "$COLLECTION"
+        local admin_auth_header authenticated_collection="$CURRENT_DIR/mcp-auth.postman_collection.json"
+        admin_auth_header="$(BIFROST_E2E_AUTH_HEADER= BIFROST_ADMIN_AUTH= BIFROST_E2E_BASE_URL="http://localhost:$PORT" node "$SCRIPT_DIR/../management-session.mjs")" || return 1
+        node "$SCRIPT_DIR/../add-session-auth-header.mjs" "$COLLECTION" "$authenticated_collection"
+        local cmd=(newman run "$authenticated_collection"
             --env-var "base_url=http://localhost:$PORT"
+            --env-var "admin_auth_header=$admin_auth_header"
             --env-var "auth_mode=$mode"
             --env-var "vk_value=$VK_VALUE"
             --env-var "vk_inactive_value=$VK_INACTIVE_VALUE"

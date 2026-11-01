@@ -301,7 +301,7 @@ test("proxy teardown is skipped in the unauthenticated pass, which stored nothin
 });
 
 test("proxy teardown runs in the authenticated pass and disables the proxy for every surface", () => {
-  for (const variables of [{ admin_auth_header: "Bearer x" }, { setup_token: "t" }]) {
+  for (const variables of [{ admin_auth_header: "Bearer x" }, { admin_auth_header: "t" }]) {
     const ctx = run(disableProxyPrerequest, { variables });
     assert.strictEqual(ctx.state.skipped, false, `unexpected skipRequest() for ${JSON.stringify(variables)}`);
   }
@@ -359,19 +359,17 @@ test("allow-all VK checks query one provider each", () => {
 });
 
 // ── Request guards / cases the OSS setup lock must refuse ─────────────────────
-test("request-guard lock cases drop the setup token and expect the lock's 401", () => {
+test("request-guard lock cases drop the administrator session and expect the lock's 401", () => {
   for (const name of [
-    "MCP client registration / A target host that does not resolve is refused without a setup token",
-    "MCP client registration / A loopback target is refused without a setup token",
-    "Provider endpoint changes / Changing the proxy URL is refused without a setup token",
-    "Provider endpoint changes / A custom provider with a base URL is refused without a setup token",
-    "Provider endpoint changes / A provider key carrying an endpoint is refused without a setup token",
-    "Webhook delivery test gate / A test delivery is refused without a setup token",
-    "Dashboard auth update / Re-enabling auth without a setup token is refused",
-    "Dashboard auth update / Re-enabling auth with a wrong current_password and no setup token is refused",
+    "MCP client registration / A target host that does not resolve is refused without a administrator session",
+    "MCP client registration / A loopback target is refused without a administrator session",
+    "Provider endpoint changes / Changing the proxy URL is refused without a administrator session",
+    "Provider endpoint changes / A custom provider with a base URL is refused without a administrator session",
+    "Provider endpoint changes / A provider key carrying an endpoint is refused without a administrator session",
+    "Webhook delivery test gate / A test delivery is refused without a administrator session",
   ]) {
     const pre = guardsScriptFor(name, "prerequest");
-    assert.match(pre, /pm\.request\.headers\.remove\('X-Bifrost-Setup-Token'\)/, `${name} must send no setup token`);
+    assert.match(pre, /pm\.request\.headers\.remove\('Authorization'\)/, `${name} must send no administrator session`);
     const post = guardsScriptFor(name, "test");
     assert.match(post, /to\.eql\(401\)/, `${name} must expect the lock's 401`);
   }
@@ -876,7 +874,7 @@ function simulateRedaction(fixture, mode = "masked", existing = false, auth = fa
   }
   const pm = {
     variables: {
-      get: (name) => name === "secret_redaction_fixture" ? JSON.stringify(fixture) : name === "admin_auth_header" && auth ? "Bearer synthetic-admin" : name === "setup_token" && !auth ? "synthetic-setup-token" : undefined,
+      get: (name) => name === "secret_redaction_fixture" ? JSON.stringify(fixture) : name === "admin_auth_header" && auth ? "Bearer synthetic-admin" : name === "admin_auth_header" && !auth ? "synthetic-session-auth" : undefined,
       replaceIn: (value) => value === "{{$guid}}" ? "unique-test-id" : "http://local",
     },
     response: response({ providers: existing ? [providerResponse()] : [] }),
@@ -888,8 +886,8 @@ function simulateRedaction(fixture, mode = "masked", existing = false, auth = fa
     sendRequest: (req, callback) => {
       state.calls.push(req);
       if (auth) assert.strictEqual(req.header.Authorization, "Bearer synthetic-admin");
-      // pm.sendRequest skips the collection-level prerequest, so the script must add the setup token itself.
-      else assert.strictEqual(req.header["X-Bifrost-Setup-Token"], "synthetic-setup-token");
+      // pm.sendRequest skips the collection-level prerequest, so the script must add the administrator session itself.
+      else assert.strictEqual(req.header["Authorization"], "synthetic-session-auth");
       const path = req.url.slice("http://local".length);
       const providerPath = "/api/providers/" + fixture.provider;
       if (req.method === "POST" && path === "/api/providers") {

@@ -3,12 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +11,8 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
-	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -224,11 +219,8 @@ type corsMiddlewareConfig struct {
 	allowHeaders            string // Access-Control-Allow-Headers when nothing is reflected, joined once
 }
 
-// defaultCorsAllowedHeaders are allowed on every route. SetupTokenHeader is sent by the dashboard
-// on every call while the OSS setup lock is active, so a UI served from another origin must be able
-// to preflight it. The MCP Streamable HTTP headers ride on every request a browser MCP client makes
-// after initialize, and on every 2026-07-28 request.
-var defaultCorsAllowedHeaders = []string{"Content-Type", "Authorization", "X-Requested-With", "X-Stainless-Timeout", "X-Api-Key", "X-OpenAI-Agents-SDK", "X-Operation-ID", "X-Bifrost-View-As", SetupTokenHeader,
+// defaultCorsAllowedHeaders are allowed on every route.
+var defaultCorsAllowedHeaders = []string{"Content-Type", "Authorization", "X-Requested-With", "X-Stainless-Timeout", "X-Api-Key", "X-OpenAI-Agents-SDK", "X-Operation-ID", "X-Bifrost-View-As",
 	"MCP-Protocol-Version", "Mcp-Session-Id", "Mcp-Method", "Mcp-Name", "Last-Event-ID"}
 
 // corsAllowHeaders joins the default headers with the configured extras, skipping duplicates.
@@ -1434,6 +1426,7 @@ func virtualKeyFromHeaders(ctx *fasthttp.RequestCtx) string {
 // AuthMiddleware is a middleware that handles authentication for the API.
 type AuthMiddleware struct {
 	identityInitialized atomic.Bool
+	authConfigMu        sync.Mutex // serializes cold policy refresh with policy publication; never used on inference requests
 	store               configstore.ConfigStore
 	whitelistedRoutes   atomic.Pointer[[]string]
 	allowedOrigins      atomic.Pointer[[]string] // client_config.allowed_origins; read while auth is disabled
@@ -1441,25 +1434,10 @@ type AuthMiddleware struct {
 	wsTicketStore       *WSTicketStore
 	tempTokensService   *temptoken.Service // optional; when nil, temp-token fallback is disabled
 	tempTokensEnabled   atomic.Bool
-	// bootstrapToken gates creation of the very first admin account. It is sourced
-	// from operator config (config.json setup_token or the BIFROST_SETUP_TOKEN env
-	// var) — never generated in-memory — so every node in a multi-node deployment
-	// reads the identical value from its own config/env, and cleared permanently
-	// once an admin account is created. When no token is configured, it stays nil
-	// and CheckBootstrapToken fails closed: the very first admin account cannot be
-	// created until the operator sets one. This closes the unauthenticated-PUT-
-	// /api/config-plants-admin-credentials path while a fresh, not-yet-configured
-	// instance is reachable over the network.
-	bootstrapToken atomic.Pointer[string]
-	setupToken     atomic.Pointer[string] // the configured setup token, kept for the life of the process
 }
 
-// InitAuthMiddleware initializes the auth middleware. The tempTokens service
-// is optional and still gated by client config — when nil or disabled, the
-// temp-token fallback path is skipped. configuredSetupToken is the operator-
-// provisioned bootstrap token resolved from config.json/env (see
-// lib.resolveSetupToken); pass "" when the operator hasn't configured one.
-func InitAuthMiddleware(store configstore.ConfigStore, wsTicketStore *WSTicketStore, tempTokensService *temptoken.Service, configuredSetupToken string) (*AuthMiddleware, error) {
+// InitAuthMiddleware loads persisted dashboard authentication and optional temporary-token services.
+func InitAuthMiddleware(store configstore.ConfigStore, wsTicketStore *WSTicketStore, tempTokensService *temptoken.Service) (*AuthMiddleware, error) {
 	if store == nil {
 		return nil, fmt.Errorf("store is not present")
 	}
@@ -1475,31 +1453,6 @@ func InitAuthMiddleware(store configstore.ConfigStore, wsTicketStore *WSTicketSt
 	}
 
 	am.authConfig.Store(authConfig)
-	if configuredSetupToken != "" {
-		am.setupToken.Store(&configuredSetupToken)
-	}
-
-	if authConfig == nil {
-		if configuredSetupToken != "" {
-			am.bootstrapToken.Store(&configuredSetupToken)
-			logger.Warn("================================================================")
-			logger.Warn("No admin account is configured for this Bifrost instance yet.")
-			logger.Warn("Until one is created, the dashboard/API is reachable without a")
-			logger.Warn("password from anyone who can route to this port. To finish setup,")
-			logger.Warn("pass the configured setup token as auth_config.setup_token in the")
-			logger.Warn("PUT /api/config call that creates the admin account.")
-			logger.Warn("================================================================")
-		} else {
-			logger.Warn("================================================================")
-			logger.Warn("No admin account is configured for this Bifrost instance yet, and")
-			logger.Warn("no setup token is configured. Set setup_token in config.json (or")
-			logger.Warn("the BIFROST_SETUP_TOKEN environment variable) before creating the")
-			logger.Warn("first admin account — requests to create it will be rejected until")
-			logger.Warn("a setup token is configured.")
-			logger.Warn("================================================================")
-		}
-	}
-
 	// Load whitelisted routes from client config
 	clientConfig, err := store.GetClientConfig(context.Background())
 	if err == nil && clientConfig != nil {
@@ -1516,42 +1469,9 @@ func InitAuthMiddleware(store configstore.ConfigStore, wsTicketStore *WSTicketSt
 }
 
 func (m *AuthMiddleware) UpdateAuthConfig(authConfig *configstore.AuthConfig) {
+	m.authConfigMu.Lock()
+	defer m.authConfigMu.Unlock()
 	m.authConfig.Store(authConfig)
-}
-
-// CheckBootstrapToken reports whether token matches the configured setup token.
-// It returns true (no token required) once an admin account already exists, so
-// this only ever gates the very first admin account. When no admin exists yet and
-// no setup token was configured at boot, it fails closed — the first admin account
-// cannot be created until the operator configures one.
-func (m *AuthMiddleware) CheckBootstrapToken(token string) bool {
-	if m.authConfig.Load() != nil {
-		return true
-	}
-	current := m.bootstrapToken.Load()
-	if current == nil {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(*current), []byte(token)) == 1
-}
-
-// ClearBootstrapToken permanently invalidates the setup token after the first admin
-// account has been created successfully.
-func (m *AuthMiddleware) ClearBootstrapToken() {
-	m.bootstrapToken.Store(nil)
-}
-
-// CheckConfiguredSetupToken reports whether token matches the operator-configured setup
-// token (config.json setup_token or BIFROST_SETUP_TOKEN). Unlike CheckBootstrapToken it does
-// not open up once an admin account exists and is never cleared: it is the operator's proof
-// of control for auth_config changes made while dashboard auth is disabled (see
-// ConfigHandler.verifyStoredAdminCredential). It is false when no token is configured.
-func (m *AuthMiddleware) CheckConfiguredSetupToken(token string) bool {
-	current := m.setupToken.Load()
-	if current == nil || token == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(*current), []byte(token)) == 1
 }
 
 // UpdateWhitelistedRoutes updates the configured whitelisted routes that bypass auth middleware.
@@ -1822,7 +1742,7 @@ var apiWhitelistedPrefixes = []string{
 
 // isAPIRouteWhitelisted reports whether url (the raw PathOriginal) is a public API route:
 // a system route, a system prefix, or an operator-configured whitelisted route. Shared by
-// APIMiddleware and SetupLockMiddleware so both agree on what never needs a credential.
+// APIMiddleware and DashboardAccessMiddleware so both agree on what never needs a credential.
 func (m *AuthMiddleware) isAPIRouteWhitelisted(url string) bool {
 	var configuredRoutes []string
 	if stored := m.whitelistedRoutes.Load(); stored != nil {
@@ -1877,190 +1797,81 @@ func (m *AuthMiddleware) APIMiddleware() schemas.BifrostHTTPMiddleware {
 	}, false)
 }
 
-// SetupTokenHeader carries the operator-configured setup token (config.json setup_token
-// or BIFROST_SETUP_TOKEN) on API calls made while dashboard auth is not active.
-const SetupTokenHeader = "X-Bifrost-Setup-Token"
-
-// SetupSessionCookie is the HttpOnly cookie the dashboard holds in place of the setup
-// token. POST /api/session/setup trades the token for it once; the browser then sends it on
-// every call (including reloads and WebSocket upgrades) and no script can read it.
-const SetupSessionCookie = "bifrost_setup_session"
-
-// SetupSessionTTL bounds how long a setup session cookie stays valid.
-const SetupSessionTTL = 12 * time.Hour
-
-const setupSessionVersion = "v1"
-
-// setupSessionKey derives the HMAC key for setup session cookies from the configured setup
-// token. Every node configured with the same token verifies the same cookies, and changing
-// the token invalidates every cookie issued under the old one.
-func setupSessionKey(token string) []byte {
-	sum := sha256.Sum256([]byte("bifrost-setup-session:" + token))
-	return sum[:]
-}
-
-func signSetupSession(key []byte, payload string) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(payload))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-// IssueSetupSession mints a setup session cookie value: "v1.<expiry>.<nonce>.<hmac>". It
-// carries no part of the token, only an expiry and a random nonce, signed with a key
-// derived from the token. It fails when no setup token is configured.
-func (m *AuthMiddleware) IssueSetupSession(now time.Time) (string, time.Time, error) {
-	current := m.setupToken.Load()
-	if current == nil {
-		return "", time.Time{}, fmt.Errorf("no setup token is configured")
-	}
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return "", time.Time{}, err
-	}
-	expires := now.Add(SetupSessionTTL)
-	payload := fmt.Sprintf("%s.%d.%s", setupSessionVersion, expires.Unix(), hex.EncodeToString(nonce))
-	return payload + "." + signSetupSession(setupSessionKey(*current), payload), expires, nil
-}
-
-// validSetupSession reports whether value is an unexpired setup session cookie signed under
-// the currently configured setup token.
-func (m *AuthMiddleware) validSetupSession(value string, now time.Time) bool {
-	current := m.setupToken.Load()
-	if current == nil || value == "" {
-		return false
-	}
-	idx := strings.LastIndexByte(value, '.')
-	if idx <= 0 {
-		return false
-	}
-	payload, sig := value[:idx], value[idx+1:]
-	parts := strings.Split(payload, ".")
-	if len(parts) != 3 || parts[0] != setupSessionVersion {
-		return false
-	}
-	expiry, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil || !now.Before(time.Unix(expiry, 0)) {
-		return false
-	}
-	return hmac.Equal([]byte(sig), []byte(signSetupSession(setupSessionKey(*current), payload)))
-}
-
-// IsDashboardAuthActive reports whether an admin account exists and dashboard auth is on.
+// IsDashboardAuthActive reports whether persisted dashboard login is enabled.
 func (m *AuthMiddleware) IsDashboardAuthActive() bool {
-	authConfig := m.authConfig.Load()
-	return authConfig != nil && authConfig.IsEnabled
+	config := m.authConfig.Load()
+	return config != nil && config.IsEnabled
 }
 
-// HasSetupToken reports whether the operator configured a setup token.
-func (m *AuthMiddleware) HasSetupToken() bool {
-	return m.setupToken.Load() != nil
-}
-
-// SetupLockMiddleware locks the OSS admin API while dashboard auth is not active (no admin
-// account, or an admin account with auth disabled). In that state every non-public /api call
-// must carry the operator's setup token in SetupTokenHeader, or the setup session cookie the
-// dashboard got for it (POST /api/session/setup); with either, the request runs as the admin. Once dashboard auth is enabled this middleware is a no-op and APIMiddleware's normal
-// session/Basic auth applies, so the setup token stops working.
-//
-// It must run before APIMiddleware, whose auth-off branch lets every request through. It is
-// registered by the OSS server only: enterprise builds its own chain around APIMiddleware and
-// never installs this gate.
-func (m *AuthMiddleware) SetupLockMiddleware() schemas.BifrostHTTPMiddleware {
-	if !m.IsDashboardAuthActive() {
-		logger.Warn("================================================================")
-		if m.authConfig.Load() == nil {
-			logger.Warn("No admin account is configured for this Bifrost instance yet.")
-		} else {
-			logger.Warn("Dashboard auth is disabled for this Bifrost instance.")
-		}
-		if m.HasSetupToken() {
-			logger.Warn("The /api surface is locked until dashboard auth is enabled. Open")
-			logger.Warn("the dashboard and enter the setup token, or send it in the")
-			logger.Warn("%s header.", SetupTokenHeader)
-		} else {
-			logger.Warn("The /api surface is locked and no setup token is configured. Set")
-			logger.Warn("setup_token in config.json (or the BIFROST_SETUP_TOKEN environment")
-			logger.Warn("variable) and restart to finish setup.")
-		}
-		logger.Warn("================================================================")
+// refreshDashboardAccess publishes the durable policy and initialization together.
+// Policy updates share this lock so a delayed first read cannot replace a newer
+// policy. The lock is released before any downstream handler can update policy.
+func (m *AuthMiddleware) refreshDashboardAccess(ctx *fasthttp.RequestCtx, lifecycle configstore.DashboardIdentityStateStore) bool {
+	m.authConfigMu.Lock()
+	defer m.authConfigMu.Unlock()
+	if m.identityInitialized.Load() {
+		return true
 	}
+	state, err := lifecycle.GetDashboardIdentityState(context.WithoutCancel(ctx))
+	if err != nil {
+		SendError(ctx, 503, "Authentication state unavailable")
+		return false
+	}
+	if !state.Initialized {
+		SendError(ctx, 403, "Run createsuperadmin in the gateway terminal to create an administrator")
+		return false
+	}
+	policy, err := m.store.GetAuthConfig(context.WithoutCancel(ctx))
+	if err != nil || policy == nil || !policy.IsEnabled {
+		SendError(ctx, 503, "Dashboard login policy unavailable")
+		return false
+	}
+	m.authConfig.Store(policy)
+	m.identityInitialized.Store(true)
+	return true
+}
+
+// DashboardAccessMiddleware keeps management closed until local CLI provisioning.
+// While locked, refresh the durable policy before publishing initialization so
+// a running empty gateway can accept its first administrator without a restart.
+func (m *AuthMiddleware) DashboardAccessMiddleware() schemas.BifrostHTTPMiddleware {
 	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 		return func(ctx *fasthttp.RequestCtx) {
-			if lifecycle, canonical := m.store.(configstore.DashboardIdentityStateStore); canonical {
-				path := string(ctx.Request.URI().PathOriginal())
-				// Health probes must reach the database checks before first-run setup.
-				if path == "/health" {
-					next(ctx)
-					return
-				}
-				if !m.identityInitialized.Load() {
-					state, err := lifecycle.GetDashboardIdentityState(ctx)
-					if err != nil {
-						SendError(ctx, 503, "Authentication state unavailable")
-						return
-					}
-					m.identityInitialized.Store(state.Initialized)
-				}
-				if m.identityInitialized.Load() {
-					if path == "/api/session/setup" || path == "/api/session/setup-admin" {
-						SendError(ctx, 409, "Setup is already complete")
-						return
-					}
-					next(ctx)
-					return
-				}
-				if path == "/api/session/is-auth-enabled" || path == "/api/session/setup" {
-					next(ctx)
-					return
-				}
-				if path != "/api/session/setup-admin" {
-					SendError(ctx, 403, "Create the first administrator to finish setup")
-					return
-				}
-				if !m.CheckConfiguredSetupToken(string(ctx.Request.Header.Peek(SetupTokenHeader))) && !m.validSetupSession(string(ctx.Request.Header.Cookie(SetupSessionCookie)), time.Now()) {
-					SendError(ctx, 403, "Invalid setup proof")
-					return
-				}
-				ctx.SetUserValue(schemas.BifrostContextKeySetupTokenAuthenticated, true)
+			if m.identityInitialized.Load() && m.IsDashboardAuthActive() {
 				next(ctx)
 				return
 			}
-			if m.IsDashboardAuthActive() {
+			lifecycle, canonical := m.store.(configstore.DashboardIdentityStateStore)
+			if !canonical && m.IsDashboardAuthActive() {
 				next(ctx)
 				return
 			}
-			if isAPIKeyAuth, ok := ctx.UserValue(schemas.IsAPIKeyAuthContextKey).(bool); ok && isAPIKeyAuth {
+			rawPath := ctx.Request.URI().PathOriginal()
+			if bytes.Equal(rawPath, []byte("/health")) || bytes.Equal(rawPath, []byte("/api/session/is-auth-enabled")) || bytes.Equal(rawPath, []byte("/api/session/login")) || bytes.Equal(rawPath, []byte("/api/session/logout")) {
 				next(ctx)
 				return
 			}
-			// Raw path, for the same router-congruence reason as middleware().
-			if m.isAPIRouteWhitelisted(string(ctx.Request.URI().PathOriginal())) {
+			path := string(rawPath)
+			if isPublicOIDCRoute(path) || strings.HasPrefix(path, "/.well-known/") {
 				next(ctx)
 				return
 			}
-			if m.setupToken.Load() == nil {
-				SendError(ctx, fasthttp.StatusForbidden, "dashboard auth is not configured and no setup token is set; set setup_token in config.json (or the BIFROST_SETUP_TOKEN env var) and restart Bifrost")
-				return
-			}
-			// An explicit header wins: API clients send it, and a wrong one is a 403 even if
-			// a setup session cookie is also present.
-			if token := string(ctx.Request.Header.Peek(SetupTokenHeader)); token != "" {
-				if !m.CheckConfiguredSetupToken(token) {
-					SendError(ctx, fasthttp.StatusForbidden, "invalid setup token")
+			if canonical {
+				if !m.identityInitialized.Load() && !m.refreshDashboardAccess(ctx, lifecycle) {
 					return
 				}
-				ctx.SetUserValue(schemas.BifrostContextKeySetupTokenAuthenticated, true)
+				if !m.IsDashboardAuthActive() {
+					SendError(ctx, 503, "Dashboard login policy unavailable")
+					return
+				}
 				next(ctx)
 				return
 			}
-			// The dashboard holds an HttpOnly setup session cookie instead of the token.
-			// Browsers send it on WebSocket upgrades too, so no ticket is needed.
-			if m.validSetupSession(string(ctx.Request.Header.Cookie(SetupSessionCookie)), time.Now()) {
-				ctx.SetUserValue(schemas.BifrostContextKeySetupTokenAuthenticated, true)
+			if m.IsDashboardAuthActive() || m.isAPIRouteWhitelisted(path) {
 				next(ctx)
 				return
 			}
-			SendError(ctx, fasthttp.StatusUnauthorized, fmt.Sprintf("dashboard auth is not configured; send the setup token in the %s header", SetupTokenHeader))
+			SendError(ctx, 403, "Run createsuperadmin in the gateway terminal to create an administrator")
 		}
 	}
 }
@@ -2081,10 +1892,6 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 			_, canonical := m.store.(identity.CanonicalUserLookupStore)
 			canonicalManagement := canonical && !allowVirtualKeyAuth
 			if canonicalManagement {
-				if url == "/api/session/setup" || url == "/api/session/setup-admin" {
-					next(ctx)
-					return
-				}
 				if !shouldSkip(authConfig, url) && (authConfig == nil || !authConfig.IsEnabled) {
 					SendError(ctx, 401, "User authentication is required")
 					return
@@ -2108,11 +1915,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 				// checked at all" so handlers gating especially dangerous capabilities
 				// (e.g. native plugin/subprocess loading) can require real authentication
 				// even while the rest of the API is intentionally left open.
-				// A request the OSS setup-lock gate already authenticated with the
-				// setup token did pass a credential check, so it is not a bypass.
-				if setupAuthed, _ := ctx.UserValue(schemas.BifrostContextKeySetupTokenAuthenticated).(bool); !setupAuthed {
-					ctx.SetUserValue(schemas.BifrostContextKeyAuthBypassed, true)
-				}
+				ctx.SetUserValue(schemas.BifrostContextKeyAuthBypassed, true)
 				next(ctx)
 				return
 			}

@@ -1,4 +1,4 @@
-// Unit tests for the gateway lifecycle in .github/workflows/scripts/harness-gateway.sh.
+// Unit tests for the gateway lifecycle in .github/_workflows/scripts/harness-gateway.sh.
 // Run directly: `node harness-gateway.test.mjs`. No Bifrost, no network beyond loopback:
 // a fake gateway answers /health, and a fake `sg` stands in for shadow-utils.
 import assert from "node:assert";
@@ -50,11 +50,26 @@ function scratch() {
     server,
     `import http from "node:http";
 const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
-http.createServer((req, res) => { res.statusCode = req.url === "/health" ? 200 : 404; res.end(); }).listen(port, "127.0.0.1");
+http.createServer((req, res) => {
+  res.statusCode = req.url === "/health" || req.url === "/api/session/login" ? 200 : 404;
+  if (req.url === "/api/session/login") res.setHeader('Set-Cookie', 'token=fresh-harness-session; HttpOnly; Path=/');
+  res.end();
+}).listen(port, "127.0.0.1");
 `,
   );
   const binary = path.join(dir, "bifrost-http");
-  writeFileSync(binary, `#!/usr/bin/env bash\nexec node ${JSON.stringify(server)} "$@"\n`);
+  writeFileSync(binary, `#!/usr/bin/env bash
+if [ "$1" = createsuperadmin ]; then
+  while [ $# -gt 0 ]; do case "$1" in --app-dir) dir="$2"; shift ;; esac; shift; done
+  mkdir -p "$dir"
+  [ ! -f "$dir/admin" ] || exit 6
+  read -r password
+  [ -n "$password" ] || exit 7
+  touch "$dir/admin"
+  exit 0
+fi
+exec node ${JSON.stringify(server)} "$@"
+`);
   chmodSync(binary, 0o755);
   const bin = path.join(dir, "bin");
   execFileSync("mkdir", ["-p", bin]);
@@ -71,9 +86,10 @@ async function runLifecycle({ group }) {
   try {
     const script = `
 set -euo pipefail
-source "$REPO_ROOT/.github/workflows/scripts/harness-gateway.sh"
+source "$REPO_ROOT/.github/_workflows/scripts/harness-gateway.sh"
 harness_start_gateway "$APP_DIR" "$PORT" "$LOG" >/dev/null
 echo started
+echo "$BIFROST_E2E_AUTH_HEADER"
 harness_stop_gateway >/dev/null
 echo stopped
 `;
@@ -86,9 +102,11 @@ echo stopped
       LOG: path.join(dir, "gateway.log"),
       PATH: `${bin}:${process.env.PATH}`,
       HARNESS_GATEWAY_GROUP: group,
+      BIFROST_E2E_AUTH_HEADER: 'Bearer stale-previous-gateway-session',
     };
     const out = execFileSync("bash", ["-c", script], { env, encoding: "utf8", timeout: 30000 });
     assert.match(out, /started[\s\S]*stopped/);
+    assert.match(out, /Bearer fresh-harness-session/, 'each gateway must issue its own session');
     return { openAfterStop: await portOpen(port) };
   } finally {
     // A gateway the helper failed to stop would outlive the test; end it by port.

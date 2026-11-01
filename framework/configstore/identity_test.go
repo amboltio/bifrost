@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -284,4 +286,80 @@ func TestRDBIdentityStoreInitialSuperAdminCanOnlyBeCreatedOnce(t *testing.T) {
 
 	_, err = store.CreateInitialSuperAdmin(ctx, &tables.TableUser{Email: ptr("second@example.test")}, nil)
 	require.ErrorIs(t, err, ErrAlreadyExists)
+}
+
+func TestCreateLocalSuperAdminPreservesPolicyAndRejectsDuplicates(t *testing.T) {
+	store := setupIdentityTestStore(t, ":memory:")
+	ctx := context.Background()
+	initial := &AuthConfig{IsEnabled: true, LocalLogin: &LocalLoginConfig{IsEnabled: false, SessionTTLSeconds: 7200, IdleTimeoutSeconds: 600}, OIDCProviders: []OIDCProviderConfig{{ID: "company", DisplayName: "Company", IsEnabled: true, Type: "generic", IssuerURL: "https://id.example.test", ClientID: schemas.NewSecretVar("company-client"), ClientSecret: schemas.NewSecretVar("company-secret")}}}
+	require.NoError(t, writeDashboardPolicy(store.DB(), initial, 7))
+	create := func(email string) (*tables.TableUser, error) {
+		return store.CreateLocalSuperAdmin(ctx, &tables.TableUser{Email: ptr(email), DisplayName: "Operator"}, &tables.TableCredential{Kind: tables.CredentialKindPassword, SecretHash: "$argon2id$test", IsActive: true}, nil)
+	}
+	first, err := create("Admin@Example.test")
+	require.NoError(t, err)
+	assert.Equal(t, tables.UserStatusActive, first.Status)
+	second, err := create("recovery@example.test")
+	require.NoError(t, err)
+	require.NotEqual(t, first.ID, second.ID)
+	_, err = create(" ADMIN@example.test ")
+	require.ErrorIs(t, err, ErrAlreadyExists)
+	policy, err := store.GetDashboardAuthPolicy(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(9), policy.Revision)
+	require.NotNil(t, policy.AuthConfig.LocalLogin)
+	assert.True(t, policy.AuthConfig.LocalLogin.IsEnabled)
+	assert.Equal(t, 7200, policy.AuthConfig.LocalLogin.SessionTTLSeconds)
+	assert.Equal(t, 600, policy.AuthConfig.LocalLogin.IdleTimeoutSeconds)
+	assert.Equal(t, initial.OIDCProviders, policy.AuthConfig.OIDCProviders)
+	for _, model := range []any{&tables.TableUser{}, &tables.TableCredential{}, &tables.TableRoleAssignment{}, &tables.TableAuditEvent{}, &tables.TableOutboxEvent{}} {
+		var count int64
+		require.NoError(t, store.DB().Model(model).Count(&count).Error)
+		assert.Equal(t, int64(2), count)
+	}
+	state, err := store.GetDashboardIdentityState(ctx)
+	require.NoError(t, err)
+	assert.True(t, state.Initialized)
+}
+
+func TestCreateLocalSuperAdminRollsBackOnAuditFailure(t *testing.T) {
+	for _, table := range []string{"identity_audit_events", "identity_outbox_events", "governance_config"} {
+		t.Run(table, func(t *testing.T) {
+			store := setupIdentityTestStore(t, ":memory:")
+			require.NoError(t, store.DB().Exec("CREATE TRIGGER reject_local_admin_write BEFORE INSERT ON "+table+" BEGIN SELECT RAISE(ABORT, 'write unavailable'); END").Error)
+			_, err := store.CreateLocalSuperAdmin(context.Background(), &tables.TableUser{Email: ptr("admin@example.test")}, &tables.TableCredential{Kind: tables.CredentialKindPassword, SecretHash: "$argon2id$test", IsActive: true}, nil)
+			require.Error(t, err)
+			for _, model := range []any{&tables.TableUser{}, &tables.TableCredential{}, &tables.TableRoleAssignment{}, &tables.TableAuditEvent{}, &tables.TableOutboxEvent{}, &tables.TableGovernanceConfig{}} {
+				var count int64
+				require.NoError(t, store.DB().Model(model).Count(&count).Error)
+				assert.Zero(t, count)
+			}
+		})
+	}
+}
+
+func TestCreateLocalSuperAdminConcurrentDuplicate(t *testing.T) {
+	store := setupIdentityTestStore(t, filepath.Join(t.TempDir(), "identity.db")+"?_txlock=immediate&_busy_timeout=10000")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, email := range []string{"admin@example.test", "ADMIN@example.test"} {
+		go func(email string) {
+			<-start
+			_, err := store.CreateLocalSuperAdmin(context.Background(), &tables.TableUser{Email: ptr(email)}, &tables.TableCredential{Kind: tables.CredentialKindPassword, SecretHash: "$argon2id$test", IsActive: true}, nil)
+			results <- err
+		}(email)
+	}
+	close(start)
+	first, second := <-results, <-results
+	if first == nil {
+		require.ErrorIs(t, second, ErrAlreadyExists)
+	} else {
+		require.ErrorIs(t, first, ErrAlreadyExists)
+		require.NoError(t, second)
+	}
+	for _, model := range []any{&tables.TableUser{}, &tables.TableCredential{}, &tables.TableRoleAssignment{}, &tables.TableAuditEvent{}, &tables.TableOutboxEvent{}} {
+		var count int64
+		require.NoError(t, store.DB().Model(model).Count(&count).Error)
+		assert.Equal(t, int64(1), count)
+	}
 }

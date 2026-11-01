@@ -987,6 +987,10 @@ test-http-transport: install-gotestsum ## Run HTTP transport tests
 
 test-governance: install-gotestsum $(if $(DEBUG),install-delve) ## Run governance tests (Usage: make test-governance TESTCASE=TestName or PATTERN=substring, DEBUG=1 for debugger)
 	@$(EXPOSE_ENV); \
+	$(USE_NODE); \
+	if [ -z "$${BIFROST_ADMIN_AUTH:-$${BIFROST_E2E_AUTH_HEADER:-}}" ]; then \
+		BIFROST_ADMIN_AUTH="$$(BIFROST_E2E_BASE_URL="$${BIFROST_TEST_BASE_URL:-http://localhost:8080}" node tests/e2e/api/runners/management-session.mjs)" || exit 1; export BIFROST_ADMIN_AUTH; \
+	fi; \
 	$(ECHO) "$(GREEN)Running governance tests...$(NC)"; \
 	mkdir -p $(TEST_REPORTS_DIR); \
 	if [ -n "$(PATTERN)" ] && [ -n "$(TESTCASE)" ]; then \
@@ -1980,6 +1984,10 @@ CLI_HARNESS_FILTER = awk '/^=== /||/^[ \t]*--- (PASS|FAIL|SKIP)[: ]/||/^(PASS|FA
 
 test-live: install-gotestsum ## Run GPT Live e2e tests against a running gateway (Usage: make test-live [TESTCASE=TestName|PATTERN=substring] [LIVE_UPSTREAM=fake|real] [BIFROST_BASE_URL=http://localhost:8080]; fake mode: start the gateway with APP_DIR=$$(pwd)/tests/live)
 	@$(EXPOSE_ENV); \
+	$(USE_NODE); \
+	if [ -z "$${BIFROST_ADMIN_AUTH:-$${BIFROST_E2E_AUTH_HEADER:-}}" ]; then \
+		BIFROST_ADMIN_AUTH="$$(node tests/e2e/api/runners/management-session.mjs)" || exit 1; export BIFROST_ADMIN_AUTH; \
+	fi; \
 	$(ECHO) "$(GREEN)Running GPT Live e2e tests ($${LIVE_UPSTREAM:-fake} upstream)...$(NC)"; \
 	mkdir -p $(TEST_REPORTS_DIR); \
 	if [ -n "$(PATTERN)" ] && [ -n "$(TESTCASE)" ]; then \
@@ -2000,6 +2008,10 @@ test-live: install-gotestsum ## Run GPT Live e2e tests against a running gateway
 
 test-live-long: install-gotestsum ## Run the long GPT Live sessions: 17 min on the fake, 15 min per transport on the real upstream (Usage: make test-live-long [TESTCASE=TestName] [LIVE_UPSTREAM=fake|real] [BIFROST_BASE_URL=http://localhost:8080])
 	@$(EXPOSE_ENV); \
+	$(USE_NODE); \
+	if [ -z "$${BIFROST_ADMIN_AUTH:-$${BIFROST_E2E_AUTH_HEADER:-}}" ]; then \
+		BIFROST_ADMIN_AUTH="$$(node tests/e2e/api/runners/management-session.mjs)" || exit 1; export BIFROST_ADMIN_AUTH; \
+	fi; \
 	$(ECHO) "$(GREEN)Running long GPT Live sessions ($${LIVE_UPSTREAM:-fake} upstream)...$(NC)"; \
 	mkdir -p $(TEST_REPORTS_DIR); \
 	RUN_FLAG="-run Long"; \
@@ -2016,6 +2028,10 @@ test-live-long: install-gotestsum ## Run the long GPT Live sessions: 17 min on t
 
 test-realtime: install-gotestsum
 	@$(EXPOSE_ENV); \
+	$(USE_NODE); \
+	if [ -z "$${BIFROST_ADMIN_AUTH:-$${BIFROST_E2E_AUTH_HEADER:-}}" ]; then \
+		BIFROST_ADMIN_AUTH="$$(node tests/e2e/api/runners/management-session.mjs)" || exit 1; export BIFROST_ADMIN_AUTH; \
+	fi; \
 	$(ECHO) "$(GREEN)Running Realtime API e2e tests...$(NC)"; \
 	mkdir -p $(TEST_REPORTS_DIR); \
 	if [ -n "$(PATTERN)" ] && [ -n "$(TESTCASE)" ]; then \
@@ -2659,6 +2675,15 @@ run-provider-harness-test: $(if $(HELP),,install-newman) ## Run the Bifrost prov
 			exit 1; \
 		fi; \
 	fi; \
+	$(USE_NODE); \
+	if [ "$$STARTED_BY_US" = "1" ] && curl -fsS "$$BASE_URL_VAL/api/session/is-auth-enabled" | node -e 'let s="";process.stdin.on("data",b=>s+=b);process.stdin.on("end",()=>process.exit(JSON.parse(s).admin_provisioning_required ? 0 : 1))'; then \
+		APP_DIR_ABS_VAL="$$(cd "$$APP_DIR_VAL" && pwd)" || exit 1; \
+		printf '%s\n' "$${BIFROST_E2E_ADMIN_PASSWORD:-Bifrost-E2E-Admin-Pass1!}" | (cd transports/bifrost-http && go run . createsuperadmin \
+			--app-dir "$$APP_DIR_ABS_VAL" --email "$${BIFROST_E2E_ADMIN_EMAIL:-e2e-admin@example.com}" \
+			--display-name 'E2E Administrator' --password-stdin) || exit 1; \
+	fi; \
+	ADMIN_AUTH_HEADER="$$(BIFROST_E2E_BASE_URL="$$BASE_URL_VAL" node tests/e2e/api/runners/management-session.mjs)" || exit 1; \
+	export BIFROST_E2E_AUTH_HEADER="$$ADMIN_AUTH_HEADER"; \
 	: "Rows that assert on extra_fields.raw_request send x-bf-send-back-raw-*; core ignores those"; \
 	: "headers unless client_config.allow_per_request_raw_override is on. The harness config.json"; \
 	: "already enables it for a gateway we start ourselves; an already-running one may not have it."; \
@@ -2874,7 +2899,7 @@ run-provider-harness-test: $(if $(HELP),,install-newman) ## Run the Bifrost prov
 		newman_shard() { \
 			NS_SHARD="$$1"; NS_COLLECTION="$$2"; NS_REPORT="$$3"; NS_PROV="$$4"; \
 			newman run "$$NS_COLLECTION" \
-				--env-var "baseUrl=$$BASE_URL_VAL" \
+				--env-var "baseUrl=$$BASE_URL_VAL" --env-var "admin_auth_header=$$ADMIN_AUTH_HEADER" \
 				$(if $(filter on true 1 yes YES y Y,$(COMPAT)),--env-var "compat=true",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_PREVIEW)),--env-var "include_preview=1",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_SKIP)),--env-var "include_skip=1",) \
@@ -3147,7 +3172,7 @@ run-provider-harness-test: $(if $(HELP),,install-newman) ## Run the Bifrost prov
 		if budget_ok "$$SEQ_COUNT" main; then \
 		add_pass "$$(printf '{"t":"pass","id":"main","mode":"sequential","log":"tmp/newman-cli.log","collection":"%s"}' "$$COLLECTION_FILE")"; \
 		newman run "$$COLLECTION_FILE" \
-				--env-var "baseUrl=$$BASE_URL_VAL" \
+				--env-var "baseUrl=$$BASE_URL_VAL" --env-var "admin_auth_header=$$ADMIN_AUTH_HEADER" \
 				$(if $(filter on true 1 yes YES y Y,$(COMPAT)),--env-var "compat=true",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_PREVIEW)),--env-var "include_preview=1",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_SKIP)),--env-var "include_skip=1",) \
@@ -3212,7 +3237,7 @@ run-provider-harness-test: $(if $(HELP),,install-newman) ## Run the Bifrost prov
 			: > tmp/newman-cli-cache-parity.log; \
 			add_pass '{"t":"pass","id":"cache-parity","mode":"sequential","log":"tmp/newman-cli-cache-parity.log","collection":"tmp/harness-cache-filtered.json"}'; \
 			newman run tmp/harness-cache-filtered.json \
-				--env-var "baseUrl=$$BASE_URL_VAL" \
+				--env-var "baseUrl=$$BASE_URL_VAL" --env-var "admin_auth_header=$$ADMIN_AUTH_HEADER" \
 				$(if $(filter on true 1 yes YES y Y,$(COMPAT)),--env-var "compat=true",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_PREVIEW)),--env-var "include_preview=1",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_SKIP)),--env-var "include_skip=1",) \
@@ -3268,7 +3293,7 @@ run-provider-harness-test: $(if $(HELP),,install-newman) ## Run the Bifrost prov
 			: > tmp/newman-cli-serial.log; \
 			add_pass '{"t":"pass","id":"serial","mode":"sequential","log":"tmp/newman-cli-serial.log","collection":"tmp/harness-serial-filtered.json"}'; \
 			newman run tmp/harness-serial-filtered.json \
-				--env-var "baseUrl=$$BASE_URL_VAL" \
+				--env-var "baseUrl=$$BASE_URL_VAL" --env-var "admin_auth_header=$$ADMIN_AUTH_HEADER" \
 				$(if $(filter on true 1 yes YES y Y,$(COMPAT)),--env-var "compat=true",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_PREVIEW)),--env-var "include_preview=1",) \
 				$(if $(filter 1 true TRUE yes YES y Y,$(INCLUDE_SKIP)),--env-var "include_skip=1",) \

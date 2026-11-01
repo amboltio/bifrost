@@ -2093,32 +2093,8 @@ export const budgetOverrideFormSchema = z
 		path: ["cycles"],
 	});
 
-// Proof of control for an auth_config change made while dashboard auth is disabled but an
-// admin account exists (SecurityView). PUT /api/config refuses such a change with 403 unless
-// it carries the stored admin password or the operator's setup token, so one of the two must
-// be filled in; the issue lands on current_password because that is the field shown first.
-// current_password is sent exactly as typed: the server compares it against the stored hash
-// byte for byte and the password policy allows spaces. The setup token is trimmed, matching
-// how the server reads the configured one.
-export const authProofOfControlSchema = z
-	.object({
-		current_password: z.string(),
-		setup_token: z.string().trim(),
-	})
-	.superRefine((data, ctx) => {
-		if (!data.current_password.trim() && !data.setup_token) {
-			ctx.addIssue({
-				code: "custom",
-				path: ["current_password"],
-				message:
-					"Enter the current admin password to confirm this change. Dashboard protection is off, so this session is not signed in. If you do not know the password, use the setup token instead.",
-			});
-		}
-	});
-
 // Export type inference helpers
 export type SecretVar = z.infer<typeof secretVarSchema>;
-export type AuthProofOfControl = z.infer<typeof authProofOfControlSchema>;
 export type MCPClientUpdateSchema = z.infer<typeof mcpClientUpdateSchema>;
 export type ModelProviderKeySchema = z.infer<typeof modelProviderKeySchema>;
 export type NetworkConfigSchema = z.infer<typeof networkConfigSchema>;
@@ -2141,12 +2117,6 @@ export type GlobalHeaderFilterConfigSchema = z.infer<typeof globalHeaderFilterCo
 export type GlobalHeaderFilterFormSchema = z.infer<typeof globalHeaderFilterFormSchema>;
 export type RoutingRuleSchema = z.infer<typeof routingRuleSchema>;
 export type BudgetOverrideFormSchema = z.infer<typeof budgetOverrideFormSchema>;
-// OSS setup lock: the operator's setup token entered on the login setup view.
-export const setupTokenFormSchema = z.object({
-	setup_token: z.string().trim().min(1, "Enter the setup token configured for this Bifrost instance"),
-});
-
-export type SetupTokenFormSchema = z.infer<typeof setupTokenFormSchema>;
 // RSS feed added from the notification tray's Sources sheet. The server also
 // fetches the URL once and rejects anything that is not an RSS or Atom feed.
 export const rssFeedFormSchema = z.object({

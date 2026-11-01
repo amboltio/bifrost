@@ -286,7 +286,7 @@ newman run tests/e2e/api/collections/provider-harness.json \
   --env-var openaiKey="$OPENAI_API_KEY"
 ```
 
-When the gateway needs a setup token for its management API, run the folder through
+When the gateway needs a administrator session for its management API, run the folder through
 `make run-provider-harness-test FEATURE=routing-error-fixture ENV_FILE=<an environment setting
 providerErrorFixture=1>` instead, which adds the token to every management call.
 
@@ -650,7 +650,7 @@ BIFROST_BASE_URL=http://localhost:8080 ./runners/individual/run-newman-request-g
 # With a stored admin account whose password you know: also runs the
 # "Dashboard auth update" folder, which re-enables auth with that password and
 # disables it again. Create the account first if needed:
-#   BIFROST_E2E_SETUP_TOKEN=<token> node runners/set-auth-config.mjs enable
+#   BIFROST_E2E_AUTH_HEADER=<token> node runners/set-auth-config.mjs enable
 #   BIFROST_E2E_AUTH_HEADER="Bearer $(printf 'admin:<password>' | base64)" node runners/set-auth-config.mjs disable
 BIFROST_BASE_URL=http://localhost:8080 BIFROST_E2E_ADMIN_EXISTS=1 \
   BIFROST_E2E_ADMIN_USERNAME=admin BIFROST_E2E_ADMIN_PASSWORD='<password>' \
@@ -794,15 +794,16 @@ node runners/build-routing-wiring.mjs                                           
 It calls real providers through `env.<NAME>` keys, so the server's environment
 needs `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `AZURE_API_KEY` and
 `AZURE_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION`,
-and `VERTEX_PROJECT_ID` and `VERTEX_CREDENTIALS`. Both wiring collections send the
-setup token on `/api` calls (`BIFROST_SETUP_TOKEN`, default
-`bifrost-e2e-setup-token`), which a server with a setup token and no admin requires.
+and `VERTEX_PROJECT_ID` and `VERTEX_CREDENTIALS`. Both wiring runners provision a canonical test administrator in their fresh stores
+and log in before sending authenticated `/api` calls. For an existing gateway, set
+`BIFROST_E2E_ADMIN_EMAIL` and `BIFROST_E2E_ADMIN_PASSWORD`, or provide an existing
+`BIFROST_E2E_AUTH_HEADER` session.
 
 ### Auth Matrix Tests
 
 | Path | Description |
 |------|-------------|
-| `collections/bifrost-v1-auth-matrix.postman_collection.json` | Asserts the separation between inference auth (governance / virtual key) and dashboard auth (admin password on `/api/*`). |
+| `collections/bifrost-v1-auth-matrix.postman_collection.json` | Asserts separation between inference auth (governance / virtual key) and canonical administrator sessions on `/api/*`. |
 | `runners/individual/run-newman-auth-matrix-tests.sh` | Boots a fresh server per config combination and runs the collection against each. |
 
 Unlike the other runners, this one **boots its own servers** — each of the four
@@ -810,7 +811,7 @@ combinations needs a different boot config, so it cannot reuse a shared running
 server. It requires a built `bifrost-http` binary.
 
 It sweeps the 2x2 of `client.enforce_auth_on_inference` x
-`governance.auth_config.is_enabled` (admin password) with a pre-seeded virtual key
+the presence of a CLI-provisioned canonical administrator with a pre-seeded virtual key
 and an unreachable dummy provider (so "auth passed" surfaces as a non-401 upstream
 error). Per combination it asserts:
 

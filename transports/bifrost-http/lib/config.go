@@ -213,14 +213,7 @@ type ConfigData struct {
 	Client            *configstore.ClientConfig `json:"client"`
 	EncryptionKey     *schemas.SecretVar        `json:"encryption_key"`
 	// Deprecated: Use GovernanceConfig.AuthConfig instead
-	AuthConfig *configstore.AuthConfig `json:"auth_config,omitempty"`
-	// SetupToken is the operator-provisioned bootstrap secret required to create the
-	// very first admin account (see AuthMiddleware.bootstrapToken). It is never
-	// persisted to the config store — only read from this file (or, when absent here,
-	// the BIFROST_SETUP_TOKEN env var) — so every node in a multi-node deployment reads
-	// the same value from its own identical config/env rather than relying on a
-	// per-process generated value.
-	SetupToken        *schemas.SecretVar                    `json:"setup_token,omitempty"`
+	AuthConfig        *configstore.AuthConfig               `json:"auth_config,omitempty"`
 	Providers         map[string]configstore.ProviderConfig `json:"providers"`
 	FrameworkConfig   *framework.FrameworkConfig            `json:"framework,omitempty"`
 	MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
@@ -566,7 +559,6 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 		Client            *configstore.ClientConfig             `json:"client"`
 		EncryptionKey     *schemas.SecretVar                    `json:"encryption_key"`
 		AuthConfig        *configstore.AuthConfig               `json:"auth_config,omitempty"`
-		SetupToken        *schemas.SecretVar                    `json:"setup_token,omitempty"`
 		Providers         map[string]configstore.ProviderConfig `json:"providers"`
 		MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
 		Webhooks          []*WebhookEndpointConfig              `json:"webhooks,omitempty"`
@@ -598,7 +590,6 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	cd.Server = temp.Server
 	cd.EncryptionKey = temp.EncryptionKey
 	cd.AuthConfig = temp.AuthConfig
-	cd.SetupToken = temp.SetupToken
 	cd.Providers = temp.Providers
 	cd.MCP = temp.MCP
 	cd.Webhooks = temp.Webhooks
@@ -752,11 +743,6 @@ type Config struct {
 	// HTTPClientFactory hands out outbound clients that honour ProxyConfig per purpose
 	// and follow its changes live (see network.HTTPClientFactory).
 	HTTPClientFactory *network.HTTPClientFactory
-
-	// SetupToken is the resolved operator-provisioned bootstrap secret (see
-	// ConfigData.SetupToken / resolveSetupToken). Empty when the operator hasn't
-	// configured one. Never persisted — read fresh from config/env on every boot.
-	SetupToken string
 
 	// webhookEndpoints serves webhook endpoint config to the request path and
 	// the delivery worker without database reads. Guarded by muWebhooks;
@@ -1183,8 +1169,6 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 	}
 	// 1a. Vault config acknowledgement (initialization handled by enterprise layer)
 	initVault(&configData)
-	// 1b. Bootstrap setup token (from config file or BIFROST_SETUP_TOKEN env var)
-	config.SetupToken = resolveSetupToken(&configData)
 	// 2. Stores (config, logs, vector) — creates defaults for absent configs
 	if err := initStores(ctx, config, &configData, configDBPath, logsDBPath); err != nil {
 		return nil, err
@@ -1629,34 +1613,20 @@ func loadClientConfig(ctx context.Context, config *Config, configData *ConfigDat
 	if configData.Governance != nil && configData.Governance.AuthConfig != nil {
 		fileAuth = configData.Governance.AuthConfig
 	}
-	firstAdmin := false
-	// File-only deployments have no persisted auth to compare against, so first-admin
-	// detection (and the inference-auth default) needs a store. loadAuthConfig keeps
-	// the existing warn-and-continue behavior for them.
+	firstAuthPolicy := false
+	// Policy-only detection keeps the inference default independent of credentials.
+	// File credentials never provision an administrator or get hashed here.
 	if fileAuth != nil && fileAuth.IsEnabled && config.ConfigStore != nil {
 		var existingAuth *configstore.AuthConfig
 		existingAuth, err = config.ConfigStore.GetAuthConfig(ctx)
 		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 			return fmt.Errorf("failed to get auth config from store: %w", err)
 		}
-		firstAdmin = existingAuth == nil
-		if firstAdmin && (fileAuth.AdminUserName == nil || fileAuth.AdminUserName.GetValue() == "" ||
-			fileAuth.AdminPassword == nil || fileAuth.AdminPassword.GetValue() == "") {
-			return fmt.Errorf("auth username and password must be provided for initial admin setup")
-		}
-		// Check hashability before saving client settings. loadAuthConfig accepts
-		// this prepared hash, so initial setup does not hash the password twice.
-		if firstAdmin && !isBcryptHash(fileAuth.AdminPassword.GetValue()) {
-			hashed, hashErr := encrypt.Hash(fileAuth.AdminPassword.GetValue())
-			if hashErr != nil {
-				return fmt.Errorf("invalid initial admin password: %w", hashErr)
-			}
-			fileAuth.AdminPassword = preserveSecretVar(fileAuth.AdminPassword, hashed)
-		}
+		firstAuthPolicy = existingAuth == nil
 	}
 
 	fileInferenceAuthProvided := configData.Client != nil && configData.Client.HasInferenceAuthSetting()
-	if configData.Client == nil && firstAdmin {
+	if configData.Client == nil && firstAuthPolicy {
 		if clientConfig != nil {
 			copied := *clientConfig
 			configData.Client = &copied
@@ -1678,16 +1648,16 @@ func loadClientConfig(ctx context.Context, config *Config, configData *ConfigDat
 			return fmt.Errorf("failed to hash client config: %w", err)
 		}
 		const defaultMarker = ":inference-auth-default"
-		if !fileInferenceAuthProvided && (firstAdmin || clientConfig == nil ||
+		if !fileInferenceAuthProvided && (firstAuthPolicy || clientConfig == nil ||
 			strings.HasSuffix(clientConfig.ConfigHash, defaultMarker)) {
 			fileHash += defaultMarker
 		}
 	}
-	// An omitted enforce_auth_on_inference resolves to true for a first admin and for a
+	// An omitted enforce_auth_on_inference resolves to true for a first enabled policy and for a
 	// fresh deployment (no stored client config). An existing deployment keeps whatever
 	// its database holds; an explicit value in the file always wins.
 	if configData.Client != nil && !fileInferenceAuthProvided {
-		if firstAdmin || clientConfig == nil {
+		if firstAuthPolicy || clientConfig == nil {
 			configData.Client.EnforceAuthOnInference = true
 		} else {
 			configData.Client.EnforceAuthOnInference = clientConfig.EnforceAuthOnInference
@@ -1757,10 +1727,10 @@ func loadClientConfig(ctx context.Context, config *Config, configData *ConfigDat
 	// stored hash: UI/API edits do not bump ConfigHash, so a hash match cannot prove
 	// the DB row is unchanged. Forcing the sync reverts UI drift back to file values.
 	forceClientSync := configData.isConfigJSONSourceOfTruth() && configData.sectionPresent("client")
-	if !firstAdmin && !forceClientSync && clientConfig.ConfigHash == fileHash {
+	if !firstAuthPolicy && !forceClientSync && clientConfig.ConfigHash == fileHash {
 		// Hash matches - keep DB config (preserves UI changes to both client and tool manager settings)
 		logger.Debug("client config hash matches, keeping DB config")
-	} else if !firstAdmin && !forceClientSync &&
+	} else if !firstAuthPolicy && !forceClientSync &&
 		clientConfig.ConfigHash == baseHash && toolManagerFromFile != nil {
 		// Legacy hash match (pre-upgrade): the stored hash covers only the client section and
 		// matches the file, meaning the client section is unchanged. Only apply the tool manager
@@ -5998,141 +5968,71 @@ func isBcryptHash(s string) bool {
 		strings.HasPrefix(s, "$2y$")
 }
 
-// preserveSecretVar returns a new SecretVar with the given value but preserving
-// env var metadata (SecretVar reference and FromEnv flag) from the source.
-// This allows the hashed password to be used as the value while retaining
-// the original env var reference for display in the UI.
-func preserveSecretVar(source *schemas.SecretVar, value string) *schemas.SecretVar {
-	if source == nil {
-		return schemas.NewSecretVar(value)
-	}
-	if source.IsFromSecret() {
-		sv := *source
-		sv.Val = value
-		return &sv
-	}
-	return &schemas.SecretVar{Val: value}
-}
-
-// loadAuthConfig loads auth config from file.
-// File config (configData) always takes precedence over DB config.
+// loadAuthConfig loads login policy without provisioning identities. Canonical
+// policy and already persisted legacy credentials are authoritative; only the
+// latter may be consumed by the historical server-side upgrade migration.
 func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData) error {
 	hasFileConfig := configData != nil && (configData.AuthConfig != nil || (configData.Governance != nil && configData.Governance.AuthConfig != nil))
 	if !hasFileConfig && config.ConfigStore == nil && (config.GovernanceConfig == nil || config.GovernanceConfig.AuthConfig == nil) {
 		return nil
 	}
-	// Ensure GovernanceConfig is initialized
 	if config.GovernanceConfig == nil {
 		config.GovernanceConfig = &configstore.GovernanceConfig{}
 	}
-	fileAuthConfig := authConfigFromConfigData(configData)
-	if fileAuthConfig != nil {
-		if err := fileAuthConfig.Validate(); err != nil {
-			return fmt.Errorf("invalid auth config from file: %w", err)
+	if config.ConfigStore != nil {
+		dbAuthConfig, err := config.ConfigStore.GetAuthConfig(ctx)
+		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to get auth config from store: %w", err)
 		}
-		normalized := fileAuthConfig.Normalized()
-		fileAuthConfig = &normalized
-	}
-	if config.ConfigStore == nil {
-		logger.Warn("config store is required to load auth config from file")
-		if fileAuthConfig != nil {
-			config.GovernanceConfig.AuthConfig = fileAuthConfig
-		}
-		return nil
-	}
-	// Load existing auth config from DB
-	dbAuthConfig, err := config.ConfigStore.GetAuthConfig(ctx)
-	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
-		return fmt.Errorf("failed to get auth config from store: %w", err)
-	}
-	if store, ok := config.ConfigStore.(configstore.DashboardIdentityStateStore); ok {
-		state, err := store.GetDashboardIdentityState(ctx)
-		if err != nil {
-			return err
-		}
-		if state.Initialized {
-			if dbAuthConfig == nil || !dbAuthConfig.IsEnabled {
-				return fmt.Errorf("initialized dashboard requires a login policy")
+		if store, ok := config.ConfigStore.(configstore.DashboardIdentityStateStore); ok {
+			state, err := store.GetDashboardIdentityState(ctx)
+			if err != nil {
+				return err
 			}
+			if state.Initialized {
+				if dbAuthConfig == nil || !dbAuthConfig.IsEnabled {
+					return fmt.Errorf("initialized dashboard requires a login policy")
+				}
+				config.GovernanceConfig.AuthConfig = dbAuthConfig
+				if hasFileConfig {
+					logger.Warn("Dashboard user access is initialized; manage login policy in Users. Legacy file credentials are ignored.")
+				}
+				return nil
+			}
+		}
+		// Preserve upgrade input before considering the file. Never replace a
+		// persisted legacy identity, verifier, or its enabled state on startup.
+		if dbAuthConfig != nil && dbAuthConfig.AdminUserName != nil && dbAuthConfig.AdminPassword != nil &&
+			strings.TrimSpace(dbAuthConfig.AdminUserName.GetValue()) != "" && isBcryptHash(dbAuthConfig.AdminPassword.GetValue()) {
 			config.GovernanceConfig.AuthConfig = dbAuthConfig
-			if hasFileConfig {
-				logger.Warn("Dashboard user access is initialized; manage login policy in Security Settings. Legacy file credentials are ignored.")
-			}
+			return nil
+		}
+		if !hasFileConfig {
+			config.GovernanceConfig.AuthConfig = dbAuthConfig
 			return nil
 		}
 	}
-	// If no file config, use DB config and return (no write needed)
-	if !hasFileConfig {
-		if dbAuthConfig != nil {
-			config.GovernanceConfig.AuthConfig = dbAuthConfig
-		}
-		return nil
-	}
+	fileAuthConfig := authConfigFromConfigData(configData)
 	if fileAuthConfig == nil {
 		return nil
 	}
-	authConfig := fileAuthConfig
-	// The legacy config-store representation has only username, password and
-	// enabled rows. OIDC configuration remains file-owned until the encrypted
-	// provider store is introduced, rather than serializing client secrets into
-	// an unrelated plaintext row.
-	if authConfig.AdminPassword == nil || authConfig.AdminUserName == nil {
-		config.GovernanceConfig.AuthConfig = authConfig
-		return config.ConfigStore.UpdateAuthConfig(ctx, authConfig)
+	policy := *fileAuthConfig
+	// Retain the legacy enabled flag as login policy only. A local login
+	// policy cannot authenticate anyone until the CLI creates a credential.
+	if policy.LocalLogin == nil && (policy.AdminUserName != nil || policy.AdminPassword != nil) {
+		policy.LocalLogin = &configstore.LocalLoginConfig{IsEnabled: policy.IsEnabled}
 	}
-	// Fail-closed: if env/vault reference is unresolved, don't persist empty credentials.
-	if authConfig.AdminUserName != nil && authConfig.AdminUserName.GetValue() == "" && authConfig.AdminUserName.IsFromSecret() {
-		logger.Warn("username set with external reference but value is empty: %s", authConfig.AdminUserName.GetRawRef())
+	policy.AdminUserName, policy.AdminPassword = nil, nil
+	if err := policy.Validate(); err != nil {
+		return fmt.Errorf("invalid auth config from file: %w", err)
 	}
-	if authConfig.AdminPassword != nil && authConfig.AdminPassword.GetValue() == "" && authConfig.AdminPassword.IsFromSecret() {
-		logger.Warn("password set with external reference but value is empty: %s", authConfig.AdminPassword.GetRawRef())
-	}
-	if authConfig.AdminPassword == nil || authConfig.AdminUserName == nil {
-		logger.Warn("auth config is missing admin_username or admin_password, skipping auth config processing")
+	policy = policy.Normalized()
+	config.GovernanceConfig.AuthConfig = &policy
+	if config.ConfigStore == nil {
+		logger.Warn("config store is required to load auth config from file")
 		return nil
 	}
-	filePassword := authConfig.AdminPassword.GetValue()
-	// If DB already matches file config, skip hashing and DB write
-	if dbAuthConfig != nil {
-		usernameMatch := dbAuthConfig.AdminUserName.GetValue() == authConfig.AdminUserName.GetValue()
-		boolsMatch := dbAuthConfig.IsEnabled == authConfig.IsEnabled
-		var passwordMatch bool
-		if filePassword == "" {
-			passwordMatch = dbAuthConfig.AdminPassword.GetValue() == ""
-		} else if isBcryptHash(filePassword) {
-			passwordMatch = dbAuthConfig.AdminPassword.GetValue() == filePassword
-		} else {
-			passwordMatch, _ = encrypt.CompareHash(dbAuthConfig.AdminPassword.GetValue(), filePassword)
-		}
-		if usernameMatch && passwordMatch && boolsMatch {
-			// DB matches file -- use DB hash but preserve file env var references
-			loaded := *authConfig
-			loaded.AdminPassword = preserveSecretVar(authConfig.AdminPassword, dbAuthConfig.AdminPassword.GetValue())
-			config.GovernanceConfig.AuthConfig = &loaded
-			return nil
-		}
-		if !passwordMatch {
-			// Here we nuke all sessions
-			if err := config.ConfigStore.FlushSessions(ctx); err != nil {
-				return fmt.Errorf("failed to flush sessions: %w", err)
-			}
-		}
-	}
-	// Hash password if it's plaintext (not already a bcrypt hash)
-	hashedPassword := filePassword
-	if hashedPassword != "" && !isBcryptHash(hashedPassword) {
-		var err error
-		hashedPassword, err = encrypt.Hash(hashedPassword)
-		if err != nil {
-			return fmt.Errorf("failed to hash auth password: %w", err)
-		}
-	}
-	// Build auth config with hashed password but preserve env var references
-	loaded := *authConfig
-	loaded.AdminPassword = preserveSecretVar(authConfig.AdminPassword, hashedPassword)
-	config.GovernanceConfig.AuthConfig = &loaded
-	// Persist to config store
-	if err := config.ConfigStore.UpdateAuthConfig(ctx, config.GovernanceConfig.AuthConfig); err != nil {
+	if err := config.ConfigStore.UpdateAuthConfig(ctx, &policy); err != nil {
 		return fmt.Errorf("failed to update auth config: %w", err)
 	}
 	return nil
@@ -6990,23 +6890,6 @@ func initEncryption(configData *ConfigData) error {
 // initVault is a no-op stub at the OSS level.
 // Vault initialization is performed by the enterprise layer via config_store.vault_store.
 func initVault(_ *ConfigData) {}
-
-// resolveSetupToken resolves the bootstrap setup token required to create the very
-// first admin account from config data or the BIFROST_SETUP_TOKEN environment
-// variable. Returns "" when neither is set — callers must then fail closed rather
-// than fall back to generating and logging a token, since a per-process generated
-// value would differ across nodes in a multi-node deployment. Whitespace-only
-// values are treated as unset so an accidental " " doesn't become a guessable token.
-func resolveSetupToken(configData *ConfigData) string {
-	configured := ""
-	if configData.SetupToken != nil {
-		configured = strings.TrimSpace(configData.SetupToken.GetValue())
-	}
-	if configured == "" {
-		return strings.TrimSpace(os.Getenv("BIFROST_SETUP_TOKEN"))
-	}
-	return configured
-}
 
 // syncEncryption encrypts all plaintext rows in the config store if encryption is enabled.
 // Called during bootup after encryption key is initialized and all config data has been loaded.

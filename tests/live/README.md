@@ -74,8 +74,8 @@ cd tests/live/python && uv run pytest -q          # by hand, with BIFROST_BASE_U
 | `LIVE_UPSTREAM` | `fake` | `fake` or `real` |
 | `LIVE_FAKE_ADDR` | `127.0.0.1:9411` | where the fake listens; must match `config.json` |
 | `BIFROST_VK` | | credential for real mode when the gateway enforces auth |
-| `BIFROST_SETUP_TOKEN` | `bifrost-live-setup-token` | the `setup_token` in `config.json`, sent on `/api` calls while dashboard auth is off |
-| `BIFROST_ADMIN_AUTH` | | the `Authorization` header value for `/api` calls on a gateway with dashboard auth: `Basic <base64 user:password>` with the admin login, or `Bearer <session token>` |
+| `BIFROST_E2E_AUTH_HEADER` | Unset | Canonical administrator Bearer session for management calls; provision a test administrator with the CLI first |
+| `BIFROST_ADMIN_AUTH` | | Canonical `Authorization: Bearer <session token>` credential for `/api` calls |
 
 Every test skips when the gateway does not answer `/health`.
 
@@ -95,3 +95,14 @@ Every test skips when the gateway does not answer `/health`.
 | `real_test.go` | the paid smoke set: delegation, client delegation and the voice-model guard on both transports, WebRTC recording and sideband; the 15-minute conversation (`LIVE_LONG=1`) |
 | `sdk_test.go`, `python/` | the OpenAI Python SDK's live client through the drop-in route |
 | `fakeopenai_test.go`, `client_test.go`, `gateway_test.go`, `speech_test.go` | the fake upstream, the test client, the gateway API helpers, speech synthesis |
+
+For a new local test gateway, provision its own store before starting it:
+
+```bash
+node tests/e2e/api/runners/management-session.mjs --provision /path/to/bifrost-http /path/to/test-app
+/path/to/bifrost-http --app-dir /path/to/test-app
+# In a second terminal, after health is ready:
+export BIFROST_ADMIN_AUTH="$(node tests/e2e/api/runners/management-session.mjs)"
+```
+
+The helper uses `BIFROST_E2E_ADMIN_EMAIL` and `BIFROST_E2E_ADMIN_PASSWORD` (local test defaults are documented in the helper). For an existing gateway, configure an existing test administrator or supply an already authenticated session; the runner never overwrites existing accounts.

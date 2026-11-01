@@ -21,8 +21,6 @@ import (
 	"github.com/maximhq/bifrost/framework"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
-	"github.com/maximhq/bifrost/framework/encrypt"
-	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
@@ -45,55 +43,9 @@ var securityHeaders = []string{
 	"x-bf-vk",
 }
 
-func getPasswordPolicyFailures(password string) []string {
-	failures := make([]string, 0, 5)
-	hasUppercase := false
-	hasLowercase := false
-	hasDigit := false
-	hasSpecial := false
-
-	for i := 0; i < len(password); i++ {
-		char := password[i]
-		switch {
-		case char >= 'A' && char <= 'Z':
-			hasUppercase = true
-		case char >= 'a' && char <= 'z':
-			hasLowercase = true
-		case char >= '0' && char <= '9':
-			hasDigit = true
-		default:
-			hasSpecial = true
-		}
-	}
-
-	if len(password) < 12 {
-		failures = append(failures, "at least 12 characters")
-	}
-	if !hasUppercase {
-		failures = append(failures, "one uppercase letter")
-	}
-	if !hasLowercase {
-		failures = append(failures, "one lowercase letter")
-	}
-	if !hasDigit {
-		failures = append(failures, "one number")
-	}
-	if !hasSpecial {
-		failures = append(failures, "one special character")
-	}
-
-	return failures
-}
-
 // ConfigManager is the interface for the config manager
 type ConfigManager interface {
 	UpdateAuthConfig(ctx context.Context, authConfig *configstore.AuthConfig) error
-	// ValidateSetupToken checks the one-time bootstrap token required to create the
-	// first admin account. Returns true once an admin account already exists.
-	ValidateSetupToken(token string) bool
-	// ValidateConfiguredSetupToken checks a token against the operator-configured setup
-	// token regardless of whether an admin account exists; false when none is configured.
-	ValidateConfiguredSetupToken(token string) bool
 	ReloadClientConfigFromConfigStore(ctx context.Context) error
 	UpdateSyncConfig(ctx context.Context) error
 	ForceReloadPricing(ctx context.Context) error
@@ -203,11 +155,7 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 				"is_enabled":     authConfig.IsEnabled,
 			}
 		}
-		// When authConfig is nil, no admin account has been created yet: leave
-		// auth_config unset (rather than a placeholder object) so the UI's
-		// isFirstTimeSetup check (!bifrostConfig?.auth_config) can tell "no admin
-		// configured yet" apart from "admin configured with empty fields" and show
-		// the setup-token field / include setup_token in the create request.
+		// Missing login policy remains absent; administrators are provisioned locally.
 	} else {
 		mapConfig["auth_config"] = map[string]any{
 			"admin_username": &schemas.SecretVar{},
@@ -311,22 +259,6 @@ func (h *ConfigHandler) updateMetadata(ctx *fasthttp.RequestCtx) {
 	SendJSON(ctx, map[string]any{"success": true})
 }
 
-// authConfigWithSetupToken extends the persisted AuthConfig shape with the
-// one-time bootstrap setup_token field, for the auth_config object in PUT
-// /api/config requests only. setup_token lives here (nested under auth_config
-// on the wire) rather than directly on configstore.AuthConfig because that
-// type is also what gets persisted to and read back from the DB via
-// UpdateAuthConfig/GetAuthConfig; keeping SetupToken off it means there's no
-// risk of it ever being written to storage or echoed back by GET /api/config.
-type authConfigWithSetupToken struct {
-	configstore.AuthConfig
-	// SetupToken is the operator-configured bootstrap token (see AuthMiddleware.bootstrapToken):
-	// required to create the very first admin account, and accepted as proof of control for
-	// changes made while dashboard auth is disabled. It is never persisted.
-	SetupToken      string `json:"setup_token,omitempty"`
-	CurrentPassword string `json:"current_password,omitempty"` // stored admin password, proves control while auth is disabled; never persisted
-}
-
 // updateConfig updates the core configuration settings.
 // Currently, it supports hot-reloading of the `drop_excess_requests` setting.
 // Note that settings like `prometheus_labels` cannot be changed at runtime.
@@ -343,7 +275,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	payload := struct {
 		ClientConfig    configstore.ClientConfig               `json:"client_config"`
 		FrameworkConfig configstoreTables.TableFrameworkConfig `json:"framework_config"`
-		AuthConfig      *authConfigWithSetupToken              `json:"auth_config"`
+		AuthConfig      *configstore.AuthConfig                `json:"auth_config"`
 	}{}
 
 	if err := json.Unmarshal(ctx.PostBody(), &payload); err != nil {
@@ -478,36 +410,10 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	updatedConfig := &copied
 	before := lib.AuditSnapshot(currentConfig.Redacted())
 
-	// Validate first-admin setup before any live mutation or persistence below.
-	var existingAuthConfig *configstore.AuthConfig
-	var initialPasswordHash string
+	// Dashboard credentials cannot be created or replaced over this legacy config endpoint.
 	if payload.AuthConfig != nil {
-		var err error
-		existingAuthConfig, err = h.store.ConfigStore.GetAuthConfig(ctx)
-		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get auth config from store: %v", err))
-			return
-		}
-		if existingAuthConfig == nil && payload.AuthConfig.IsEnabled {
-			if !isSetupTokenAuthenticated(ctx) && !h.configManager.ValidateSetupToken(payload.AuthConfig.SetupToken) {
-				SendError(ctx, fasthttp.StatusForbidden, "a valid setup token is required to create the initial admin account")
-				return
-			}
-			if payload.AuthConfig.AdminUserName == nil || payload.AuthConfig.AdminUserName.GetValue() == "" ||
-				payload.AuthConfig.AdminPassword == nil || payload.AuthConfig.AdminPassword.GetValue() == "" || payload.AuthConfig.AdminPassword.ShouldPreserveStored() {
-				SendError(ctx, fasthttp.StatusBadRequest, "auth username and password must be provided")
-				return
-			}
-			if failures := getPasswordPolicyFailures(payload.AuthConfig.AdminPassword.GetValue()); len(failures) > 0 {
-				SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("auth password must include %s", strings.Join(failures, ", ")))
-				return
-			}
-			initialPasswordHash, err = encrypt.Hash(payload.AuthConfig.AdminPassword.GetValue())
-			if err != nil {
-				SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("invalid auth password: %v", err))
-				return
-			}
-		}
+		SendError(ctx, 400, "Use createsuperadmin in the gateway terminal; manage login policy in Security Settings")
+		return
 	}
 
 	// Validate MCP auth-mode / OAuth2 server settings before any live mutation
@@ -793,8 +699,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	enforceAuthOnInference := currentConfig.EnforceAuthOnInference
 	if payload.ClientConfig.HasInferenceAuthSetting() {
 		enforceAuthOnInference = payload.ClientConfig.EnforceAuthOnInference
-	} else if payload.AuthConfig != nil && payload.AuthConfig.IsEnabled && existingAuthConfig == nil {
-		enforceAuthOnInference = true
+
 	}
 	updatedConfig.EnforceAuthOnInference = enforceAuthOnInference
 	// Sync deprecated columns to match new field so they stay consistent in the DB
@@ -1133,155 +1038,6 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		// Reloading pricing manager
 		h.configManager.UpdateSyncConfig(ctx)
 	}
-	// Checking auth config and trying to update if required
-	if payload.AuthConfig != nil {
-		authConfig := existingAuthConfig
-
-		// Check if auth config has changed
-		authChanged := false
-		if authConfig == nil {
-			// No existing config, any enabled state is a change
-			if payload.AuthConfig.IsEnabled {
-				authChanged = true
-			}
-		} else {
-			// Compare with existing config using value comparison (not pointer comparison)
-			// Password is considered changed when it was intentionally submitted —
-			// ShouldPreserveStored() returns false for both plain values and secret refs.
-			passwordChanged := payload.AuthConfig.AdminPassword != nil &&
-				!payload.AuthConfig.AdminPassword.ShouldPreserveStored()
-			usernameChanged := payload.AuthConfig.AdminUserName != nil &&
-				!payload.AuthConfig.AdminUserName.Equals(authConfig.AdminUserName)
-			if payload.AuthConfig.IsEnabled != authConfig.IsEnabled ||
-				usernameChanged ||
-				passwordChanged {
-				authChanged = true
-			}
-		}
-
-		if payload.AuthConfig.IsEnabled {
-			// Initialize nil pointers to empty SecretVar to prevent nil-pointer dereference
-			if payload.AuthConfig.AdminUserName == nil {
-				payload.AuthConfig.AdminUserName = &schemas.SecretVar{}
-			}
-			if payload.AuthConfig.AdminPassword == nil {
-				payload.AuthConfig.AdminPassword = &schemas.SecretVar{}
-			}
-
-			// Validate env variables are set if referenced
-			if payload.AuthConfig.AdminUserName.IsFromSecret() && payload.AuthConfig.AdminUserName.GetValue() == "" {
-				SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("external reference %s for admin_username resolved to an empty value", payload.AuthConfig.AdminUserName.GetRawRef()))
-				return
-			}
-			if payload.AuthConfig.AdminPassword.IsFromSecret() && payload.AuthConfig.AdminPassword.GetValue() == "" {
-				SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("external reference %s for admin_password resolved to an empty value", payload.AuthConfig.AdminPassword.GetRawRef()))
-				return
-			}
-
-			if authConfig == nil && (payload.AuthConfig.AdminUserName.GetValue() == "" || payload.AuthConfig.AdminPassword.GetValue() == "") {
-				SendError(ctx, fasthttp.StatusBadRequest, "auth username and password must be provided")
-				return
-			}
-
-			// Creating the very first admin account is the one config write this
-			// endpoint allows while genuinely unauthenticated (no admin exists yet to
-			// authenticate as). Require the operator-configured setup token (config.json
-			// setup_token or BIFROST_SETUP_TOKEN env var) so that action can't be taken by
-			// an unauthenticated network caller racing the real operator to a freshly
-			// exposed instance.
-			if authConfig == nil && !isSetupTokenAuthenticated(ctx) && !h.configManager.ValidateSetupToken(payload.AuthConfig.SetupToken) {
-				SendError(ctx, fasthttp.StatusForbidden, "a valid setup token is required to create the initial admin account; configure setup_token in config.json (or the BIFROST_SETUP_TOKEN env var) and pass it in this request")
-				return
-			}
-			// Stored credentials with auth switched off: the caller was admitted without any
-			// credential check, so switching auth back on (or replacing the credentials in
-			// the same request) must first prove control of the instance.
-			if authConfig != nil && isAuthBypassed(ctx) && !h.verifyStoredAdminCredential(ctx, authConfig, payload.AuthConfig) {
-				return
-			}
-			// Fetching current Auth config
-			if payload.AuthConfig.AdminUserName.GetValue() != "" {
-				if payload.AuthConfig.AdminPassword.ShouldPreserveStored() {
-					if authConfig == nil || authConfig.AdminPassword.GetValue() == "" {
-						SendError(ctx, fasthttp.StatusBadRequest, "auth password must be provided")
-						return
-					}
-					// Assuming that password hasn't been changed
-					payload.AuthConfig.AdminPassword = authConfig.AdminPassword
-				} else {
-					hashed, ok := h.hashAdminPassword(ctx, payload.AuthConfig.AdminPassword)
-					if !ok {
-						return
-					}
-					// First-time setup pre-hashed the password while validating the request
-					// (initialPasswordHash); reuse that hash rather than computing a second one.
-					if initialPasswordHash != "" {
-						hashed.Val = initialPasswordHash
-					}
-					payload.AuthConfig.AdminPassword = hashed
-				}
-			}
-			// Save auth config - this handles both first-time creation and updates
-			err = h.configManager.UpdateAuthConfig(ctx, &payload.AuthConfig.AuthConfig)
-			if err != nil {
-				logger.Warn("failed to update auth config: %v", err)
-				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to update auth config: %v", err))
-				return
-			}
-			// Login resolves canonical identities only, so the first admin must be
-			// imported now rather than at the next server start. The bootstrap is
-			// idempotent and does nothing once a canonical user exists.
-			if authConfig == nil {
-				if bootstrapStore, ok := h.store.ConfigStore.(configstore.LegacyAdminBootstrapStore); ok {
-					if _, err := identity.BootstrapLegacyAdmin(ctx, bootstrapStore); err != nil {
-						logger.Error("failed to import the initial admin into canonical identity storage: %v", err)
-						SendError(ctx, fasthttp.StatusInternalServerError, "Failed to create the initial admin identity")
-						return
-					}
-				}
-			}
-		} else if authConfig != nil {
-			// Auth is being disabled (or kept disabled) over an existing config - preserve the
-			// credentials that were not resubmitted and update the disabled state.
-			passwordReplaced := !payload.AuthConfig.AdminPassword.ShouldPreserveStored()
-			if !passwordReplaced {
-				payload.AuthConfig.AdminPassword = authConfig.AdminPassword
-			}
-			if payload.AuthConfig.AdminUserName == nil || payload.AuthConfig.AdminUserName.GetValue() == "" {
-				payload.AuthConfig.AdminUserName = authConfig.AdminUserName
-			}
-			// Replacing the stored credentials while auth stays off is the same exposure as
-			// re-enabling with new ones, so it needs the same proof of control.
-			credentialsReplaced := passwordReplaced || !payload.AuthConfig.AdminUserName.Equals(authConfig.AdminUserName)
-			if credentialsReplaced && isAuthBypassed(ctx) && !h.verifyStoredAdminCredential(ctx, authConfig, payload.AuthConfig) {
-				return
-			}
-			if passwordReplaced {
-				hashed, ok := h.hashAdminPassword(ctx, payload.AuthConfig.AdminPassword)
-				if !ok {
-					return
-				}
-				payload.AuthConfig.AdminPassword = hashed
-			}
-			err = h.configManager.UpdateAuthConfig(ctx, &payload.AuthConfig.AuthConfig)
-			if err != nil {
-				logger.Warn("failed to update auth config: %v", err)
-				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to update auth config: %v", err))
-				return
-			}
-		}
-
-		// Flush all existing sessions if auth details have been changed
-		if authChanged {
-			if err := h.store.ConfigStore.FlushSessions(ctx); err != nil {
-				logger.Warn("updated auth config but failed to flush existing sessions, please restart the server: %v", err)
-				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("updated auth config but failed to flush existing sessions, please restart the server: %v", err))
-				return
-			}
-		}
-		// Note: AuthMiddleware is updated via ServerCallbacks.UpdateAuthConfig (handled by BifrostHTTPServer)
-	}
-
 	// Set restart required flag if any restart-requiring configs changed
 	if len(restartReasons) > 0 {
 		reason := fmt.Sprintf("%s settings have been updated. A restart is required for changes to take full effect.", strings.Join(restartReasons, ", "))
@@ -1693,53 +1449,7 @@ func validateMCPInstructionCaps(perClient, total int) error {
 	return nil
 }
 
-// hashAdminPassword applies the password policy to a newly submitted admin password and
-// returns its hash, keeping env/vault reference metadata so the stored value still records
-// where the password came from. On failure it sends the response and returns false.
-func (h *ConfigHandler) hashAdminPassword(ctx *fasthttp.RequestCtx, password *schemas.SecretVar) (*schemas.SecretVar, bool) {
-	if failures := getPasswordPolicyFailures(password.GetValue()); len(failures) > 0 {
-		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("auth password must include %s", strings.Join(failures, ", ")))
-		return nil, false
-	}
-	hashed, err := encrypt.Hash(password.GetValue())
-	if err != nil {
-		logger.Warn("failed to hash password: %v", err)
-		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to hash password: %v", err))
-		return nil, false
-	}
-	if password.IsFromSecret() {
-		sv := *password
-		sv.Val = hashed
-		return &sv, true
-	}
-	return &schemas.SecretVar{Val: hashed}, true
-}
-
-// verifyStoredAdminCredential authorizes an auth_config change made while dashboard auth is
-// disabled but admin credentials are stored. Such a request reached the handler without any
-// credential check (BifrostContextKeyAuthBypassed), so switching auth back on or replacing
-// the stored credentials must prove control of the instance: either current_password matches
-// the stored admin password, or setup_token matches the operator-configured setup token
-// (which, unlike the first-admin gate, stays valid for the life of the process). Without that
-// proof anyone who can reach the port could install their own admin account. On failure it
-// sends the 403 and returns false.
-func (h *ConfigHandler) verifyStoredAdminCredential(ctx *fasthttp.RequestCtx, stored *configstore.AuthConfig, payload *authConfigWithSetupToken) bool {
-	if payload.CurrentPassword != "" && stored.AdminPassword != nil {
-		if ok, err := encrypt.CompareHash(stored.AdminPassword.GetValue(), payload.CurrentPassword); err == nil && ok {
-			return true
-		}
-	}
-	if payload.SetupToken != "" && h.configManager.ValidateConfiguredSetupToken(payload.SetupToken) {
-		return true
-	}
-	SendError(ctx, fasthttp.StatusForbidden, "dashboard auth is disabled but an admin account exists; re-enabling it or changing the admin credentials requires current_password (the stored admin password) or a valid setup_token")
-	return false
-}
-
-// globalProxyInterceptionChanges returns the global proxy settings next adds or changes,
-// relative to old (nil when none is stored), that widen who can read proxied traffic: a new
-// proxy URL or TLS verification turned off. Keeping the stored URL while editing other fields,
-// disabling the proxy, or turning verification back on is not reported.
+// globalProxyInterceptionChanges identifies changes that widen access to proxied traffic.
 func globalProxyInterceptionChanges(old *configstoreTables.GlobalProxyConfig, next configstoreTables.GlobalProxyConfig) []string {
 	var prev configstoreTables.GlobalProxyConfig
 	if old != nil {

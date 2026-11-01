@@ -1139,20 +1139,20 @@ const collection = buildCollection({
   expandedScenarios: folders,
   extraVariables: [
     { key: "ns", value: "", type: "string" },
-    { key: "setup_token", value: "", type: "string" },
+    { key: "admin_auth_header", value: "", type: "string" },
     { key: "scw_lib", value: scwLibSource(), type: "string" },
   ],
 });
 
-// After the builder's run id: derive the namespace suffix once, and send the setup token on every
+// After the builder's run id: derive the namespace suffix once, and send the administrator session on every
 // /api call, which the OSS setup lock refuses without it while dashboard auth is off.
 collection.event[0].script.exec.push(
   "if (!pm.collectionVariables.get('ns')) {",
   `  pm.collectionVariables.set('ns', (${scwNamespaceSuffix.toString()})(pm.collectionVariables.get('run_id')));`,
   "}",
-  "var setupToken = pm.variables.get('setup_token');",
-  "if (setupToken && pm.request.url.getPath().indexOf('/api/') === 0) {",
-  "  pm.request.headers.upsert({ key: 'X-Bifrost-Setup-Token', value: setupToken });",
+  "var adminAuthHeader = pm.variables.get('admin_auth_header');",
+  "if (adminAuthHeader && pm.request.url.getPath().indexOf('/api/') === 0) {",
+  "  pm.request.headers.upsert({ key: 'Authorization', value: adminAuthHeader });",
   "}"
 );
 

@@ -3,18 +3,16 @@
 # providers, sqlite config and logs stores in a throwaway app dir, request logging on and
 # inference auth off. Sourced by the runners under runners/individual/, which set an EXIT trap
 # to stop_clean_bifrost. The server inherits the runner's environment, so a collection's
-# env.<NAME> provider keys and BIFROST_SETUP_TOKEN resolve as they would on any other server.
+# env.<NAME> provider keys and BIFROST_E2E_AUTH_HEADER resolve as they would on any other server.
 
 CLEAN_BIFROST_PID=""
 CLEAN_BIFROST_DIR=""
 
 # boot_clean_bifrost starts <binary> on <port> and returns once the server says it has started.
-# The server gets the setup token the collections send by default unless the runner set one, so a
-# local run with --binary is not refused on its management calls. It goes in the environment, not
-# the config, where it would win over a token the runner exports later.
+# Provision a canonical test administrator in the fresh store before starting the server.
+# The caller logs in after startup; no management bypass is configured.
 boot_clean_bifrost() {
     local binary="$1" port="$2" elapsed=0
-    export BIFROST_SETUP_TOKEN="${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}"
     if [ -z "$binary" ] || [ ! -x "$binary" ]; then
         echo "Error: --binary must point to an executable bifrost-http binary" >&2
         return 1
@@ -39,6 +37,10 @@ boot_clean_bifrost() {
   "logs_store": { "enabled": true, "type": "sqlite", "config": { "path": "$CLEAN_BIFROST_DIR/logs.db" } }
 }
 EOF
+    BIFROST_E2E_ADMIN_EMAIL="${BIFROST_E2E_ADMIN_EMAIL:-e2e-admin@example.com}"
+    BIFROST_E2E_ADMIN_PASSWORD="${BIFROST_E2E_ADMIN_PASSWORD:-Bifrost-E2E-Admin-Pass1!}"
+    export BIFROST_E2E_ADMIN_EMAIL BIFROST_E2E_ADMIN_PASSWORD
+    printf '%s\n' "$BIFROST_E2E_ADMIN_PASSWORD" | "$binary" createsuperadmin --app-dir "$CLEAN_BIFROST_DIR" --email "$BIFROST_E2E_ADMIN_EMAIL" --display-name 'E2E Administrator' --password-stdin >/dev/null || return 1
     "$binary" --app-dir "$CLEAN_BIFROST_DIR" --port "$port" --log-level info > "$CLEAN_BIFROST_DIR/server.log" 2>&1 &
     CLEAN_BIFROST_PID=$!
     until grep -q "successfully started bifrost" "$CLEAN_BIFROST_DIR/server.log" 2>/dev/null; do

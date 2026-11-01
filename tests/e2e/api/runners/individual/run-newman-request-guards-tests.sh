@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Environment Variables:"
             echo "  BIFROST_BASE_URL              Gateway base URL (default: http://localhost:8080); dashboard auth must be disabled"
-            echo "  BIFROST_E2E_SETUP_TOKEN       OSS setup token sent on every request (default: bifrost-e2e-setup-token)"
+            echo "  BIFROST_E2E_AUTH_HEADER       OSS administrator session sent on every request (default: )"
             echo "  BIFROST_E2E_ADMIN_EXISTS      Set to 1 when a stored admin account exists whose password is"
             echo "                                BIFROST_E2E_ADMIN_PASSWORD; enables the Dashboard auth update folder (default: 0)"
             echo "  BIFROST_E2E_ADMIN_USERNAME    Stored admin username (default: admin)"
@@ -111,7 +111,7 @@ base_url="${BIFROST_BASE_URL:-http://localhost:8080}"
 admin_exists="${BIFROST_E2E_ADMIN_EXISTS:-0}"
 admin_username="${BIFROST_E2E_ADMIN_USERNAME:-admin}"
 admin_password="${BIFROST_E2E_ADMIN_PASSWORD:-Bifrost-E2E-Admin-Pass1!}"
-admin_auth_header="Bearer $(printf '%s:%s' "$admin_username" "$admin_password" | base64 | tr -d '\n')"
+admin_auth_header="$(node "$SCRIPT_DIR/../management-session.mjs")"
 
 # The admin password and the derived Authorization header are secrets: they go to Newman
 # through a 0600 temporary environment file, never as command-line arguments, which any
@@ -132,36 +132,17 @@ jq -n --arg password "$admin_password" --arg header "$admin_auth_header" '{
   ]
 }' > "$SECRET_ENV_FILE"
 
-# The Dashboard auth folder re-enables auth and disables it again in its last request. A run
-# that stops in between (--bail, a crash, Ctrl-C) would leave the gateway with auth enabled, so
-# unless the run completed, best-effort restore the disabled state the suite started from.
-RUN_COMPLETED=0
-restore_dashboard_auth() {
-    rm -f "$SECRET_ENV_FILE"
-    if [ "$RUN_COMPLETED" = "1" ] || [ "$admin_exists" != "1" ]; then
-        return
-    fi
-    echo -e "${YELLOW}Run did not complete; restoring dashboard auth to disabled...${NC}"
-    BIFROST_E2E_AUTH_HEADER="$admin_auth_header" \
-    BIFROST_E2E_BASE_URL="$base_url" \
-    BIFROST_E2E_ADMIN_USERNAME="$admin_username" \
-    BIFROST_E2E_ADMIN_PASSWORD="$admin_password" \
-        node runners/set-auth-config.mjs disable >/dev/null 2>&1 || true
-}
-trap restore_dashboard_auth EXIT
+trap 'rm -f "$SECRET_ENV_FILE"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Build Newman command
-# OSS locks /api behind the setup token while dashboard auth is not active, and every folder here
-# runs with auth disabled, so each request carries the setup token (same as the governance runners).
-SETUP_TOKEN="${BIFROST_E2E_SETUP_TOKEN:-${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}}"
-SETUP_COLLECTION="$REPORT_DIR/$(basename "$COLLECTION" .postman_collection.json)-setup-token.postman_collection.json"
-node "$SCRIPT_DIR/../add-setup-token-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
+# Authenticate management rows using the session already stored in the secret environment file.
+SETUP_COLLECTION="$REPORT_DIR/$(basename "$COLLECTION" .postman_collection.json)-session-auth.postman_collection.json"
+export BIFROST_E2E_AUTH_HEADER="$admin_auth_header"
+node "$SCRIPT_DIR/../add-session-auth-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
 
 cmd=(newman run "$SETUP_COLLECTION")
 cmd+=(--env-var "base_url=$base_url")
-cmd+=(--env-var "setup_token=$SETUP_TOKEN")
 cmd+=(--env-var "admin_exists=$admin_exists")
 cmd+=(--env-var "admin_username=$admin_username")
 cmd+=(--environment "$SECRET_ENV_FILE")

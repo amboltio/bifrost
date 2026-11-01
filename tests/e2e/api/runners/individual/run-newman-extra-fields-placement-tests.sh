@@ -159,11 +159,13 @@ if [ -z "$SINGLE_JSON_ENV" ]; then
 fi
 
 # Build Newman command
-# OSS locks /api behind the setup token while dashboard auth is not active, and
+# OSS locks /api behind the administrator session while dashboard auth is not active, and
 # this suite reads and writes client config through that API.
-SETUP_TOKEN="${BIFROST_E2E_SETUP_TOKEN:-${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}}"
-SETUP_COLLECTION="$REPORT_DIR/$(basename "$COLLECTION" .postman_collection.json)-setup-token.postman_collection.json"
-node "$SCRIPT_DIR/../add-setup-token-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
+SESSION_AUTH_HEADER="${BIFROST_E2E_AUTH_HEADER:-}"
+SETUP_COLLECTION="$REPORT_DIR/$(basename "$COLLECTION" .postman_collection.json)-session-auth.postman_collection.json"
+SESSION_AUTH_HEADER="$(node "$SCRIPT_DIR/../management-session.mjs")"
+export BIFROST_E2E_AUTH_HEADER="$SESSION_AUTH_HEADER"
+node "$SCRIPT_DIR/../add-session-auth-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
 
 cmd=(newman run "$SETUP_COLLECTION")
 [ -n "$GLOBALS_TMP" ] && [ -f "$GLOBALS_TMP" ] && cmd+=(-g "$GLOBALS_TMP")
@@ -181,11 +183,11 @@ cmd+=(--env-var "base_url=$base_url")
 # 30, which the PUT requires.
 restore_placement() {
     local cfg
-    cfg=$(curl -sf -H "X-Bifrost-Setup-Token: $SETUP_TOKEN" "$base_url/api/config?from_db=true") || return 0
+    cfg=$(curl -sf -H "Authorization: $SESSION_AUTH_HEADER" "$base_url/api/config?from_db=true") || return 0
     [ "$(jq -r '.client_config.extra_fields_placement // "body"' <<<"$cfg")" = "body" ] && return 0
     echo -e "${YELLOW}Restoring extra_fields_placement to body (newman stopped before Teardown)${NC}"
     jq '{client_config: (.client_config | .extra_fields_placement = "body" | if (.log_retention_days // 0) < 1 then .log_retention_days = 30 else . end)}' <<<"$cfg" |
-        curl -sf -X PUT -H "X-Bifrost-Setup-Token: $SETUP_TOKEN" -H "Content-Type: application/json" --data-binary @- "$base_url/api/config" >/dev/null ||
+        curl -sf -X PUT -H "Authorization: $SESSION_AUTH_HEADER" -H "Content-Type: application/json" --data-binary @- "$base_url/api/config" >/dev/null ||
         echo -e "${RED}Could not restore extra_fields_placement; set it back to body by hand${NC}"
 }
 cleanup() {
@@ -194,7 +196,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-cmd+=(--env-var "setup_token=$SETUP_TOKEN")
+cmd+=(--env-var "admin_auth_header=$SESSION_AUTH_HEADER")
 
 cmd+=(-r "$REPORTERS")
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { managementHeaders as canonicalManagementHeaders } from './lib/management-session.mjs';
 // Verifies that async video jobs are billed correctly, end to end, against a
 // real Bifrost and real providers.
 //
@@ -44,14 +45,14 @@ const args = Object.fromEntries(
 );
 
 const baseUrl = (args["base-url"] || process.env.BIFROST_BASE_URL || process.env.BASE_URL || "http://localhost:8080").replace(/\/+$/, "");
+let adminAuthHeader = process.env.BIFROST_E2E_AUTH_HEADER || "";
 // The virtual key authenticates the inference calls. Hosted Bifrost requires one;
 // a local instance with no governance usually does not.
 const virtualKey = args.vk || process.env.BIFROST_VK || "";
 // Management API (/api/logs) auth. Separate from the VK: on hosted these are
 // different credentials, and reading logs is not something a VK is entitled to.
 const apiKey = args["api-key"] || process.env.BIFROST_API_KEY || "";
-// OSS setup lock: a local gateway with dashboard auth off needs the setup token on /api.
-const setupToken = (process.env.BIFROST_E2E_SETUP_TOKEN || process.env.BIFROST_SETUP_TOKEN || "bifrost-e2e-setup-token").trim();
+// OSS setup lock: a local gateway with dashboard auth off needs the administrator session on /api.
 const extraHeaders = parseHeaderArgs(args.header);
 
 const casesPath = args.cases || path.join(HERE, "..", "fixtures", "video-costing-cases.json");
@@ -96,7 +97,7 @@ function inferenceHeaders(requestId) {
 function managementHeaders() {
   const h = { ...extraHeaders };
   if (apiKey) h["authorization"] = apiKey.startsWith("Bearer ") ? apiKey : `Bearer ${apiKey}`;
-  if (setupToken) h["X-Bifrost-Setup-Token"] = setupToken;
+  if (adminAuthHeader) h["Authorization"] = adminAuthHeader;
   return h;
 }
 
@@ -501,6 +502,7 @@ async function main() {
     return 0;
   }
 
+  if (!apiKey && !adminAuthHeader) adminAuthHeader = (await canonicalManagementHeaders(baseUrl)).Authorization;
   const health = await httpJson(`${baseUrl}/health`, { headers: managementHeaders() }, 10000);
   if (health.status === 0) {
     console.log(`Cannot reach ${baseUrl} — ${health.error || "connection failed"}`);

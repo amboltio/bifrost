@@ -33,7 +33,7 @@ set -euo pipefail
 #   PROXY_E2E_STRICT_EGRESS   1 to confine the gateway with iptables (Linux only)
 #   PROXY_E2E_ADMIN_AUTH      Authorization header value for /api calls, when the
 #                             gateway enforces auth
-#   BIFROST_SETUP_TOKEN       setup token for /api calls (default: the python profile's)
+#   BIFROST_E2E_AUTH_HEADER       administrator session for /api calls (default: the python profile's)
 #   RERUN_ATTEMPTS            re-runs of only the failed items per cell (default 1)
 #
 # Provider secrets come from the environment, as for `make run-provider-harness-test`;
@@ -186,11 +186,9 @@ seed_cell() {
   export HARNESS_GATEWAY_ENV="$gateway_env"
 }
 
-# api_curl calls the management API. The python profile sets setup_token and has no admin
-# account, so SetupLockMiddleware refuses any /api call that does not carry the token.
+# api_curl authenticates management calls with the session from harness_start_gateway.
 api_curl() {
-  local auth=(-H "X-Bifrost-Setup-Token: ${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}")
-  [ -n "${PROXY_E2E_ADMIN_AUTH:-}" ] && auth+=(-H "Authorization: $PROXY_E2E_ADMIN_AUTH")
+  local auth=(-H "Authorization: ${PROXY_E2E_ADMIN_AUTH:-${BIFROST_E2E_AUTH_HEADER:-}}")
   curl -fsS --max-time 30 "${auth[@]}" "$@"
 }
 

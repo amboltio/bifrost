@@ -113,12 +113,13 @@ export const configApi = baseApi.injectEndpoints({
 			keepUnusedDataFor: 300, // Cache for 5 minutes (seconds)
 		}),
 		// Update core configuration
-		updateCoreConfig: builder.mutation<null, BifrostConfig>({
-			query: (data) => ({
-				url: "/config",
-				method: "PUT",
-				body: data,
-			}),
+		updateCoreConfig: builder.mutation<null, Partial<Omit<BifrostConfig, "auth_config">>>({
+			query: (data) => {
+				// Config reads may contain upgrade-only legacy credentials. They are never
+				// written back; accounts and login policy have dedicated endpoints.
+				const { auth_config: _legacyAuth, ...body } = data as Partial<BifrostConfig>;
+				return { url: "/config", method: "PUT", body };
+			},
 			invalidatesTags: ["Config"],
 		}),
 

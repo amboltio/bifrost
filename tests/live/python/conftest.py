@@ -20,11 +20,8 @@ from openai import AsyncOpenAI, OpenAI
 GATEWAY = os.environ.get("BIFROST_BASE_URL", "http://localhost:8080").rstrip("/")
 UPSTREAM = os.environ.get("LIVE_UPSTREAM", "fake")
 VIRTUAL_KEY = os.environ.get("BIFROST_VK", "")
-# OSS setup lock: /api needs the setup token while dashboard auth is not active; a deployed
-# gateway with dashboard auth needs the admin's Authorization header instead.
-ADMIN_HEADERS = {"X-Bifrost-Setup-Token": os.environ.get("BIFROST_SETUP_TOKEN", "bifrost-live-setup-token")}
-if os.environ.get("BIFROST_ADMIN_AUTH"):
-    ADMIN_HEADERS["Authorization"] = os.environ["BIFROST_ADMIN_AUTH"]
+# Management calls use a canonical administrator session supplied by the runner.
+ADMIN_HEADERS = {"Authorization": os.environ.get("BIFROST_E2E_AUTH_HEADER") or os.environ.get("BIFROST_ADMIN_AUTH", "")}
 RESTRICTED_VIRTUAL_KEY = os.environ.get("BIFROST_VK_RESTRICTED", "")
 VOICE_MODEL = os.environ.get("LIVE_VOICE_MODEL", "gpt-live-1")
 BACKEND_MODEL = os.environ.get("LIVE_BACKEND_MODEL", "gpt-5.6-luna")

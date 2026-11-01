@@ -535,15 +535,6 @@ func isAuthBypassed(ctx *fasthttp.RequestCtx) bool {
 	return bypassed
 }
 
-// isSetupTokenAuthenticated reports whether the OSS setup-lock gate let ctx through because
-// it carried the operator's setup token (see AuthMiddleware.SetupLockMiddleware). That is
-// the same proof the body's auth_config.setup_token gives, so first-admin creation accepts
-// either.
-func isSetupTokenAuthenticated(ctx *fasthttp.RequestCtx) bool {
-	authed, _ := ctx.UserValue(schemas.BifrostContextKeySetupTokenAuthenticated).(bool)
-	return authed
-}
-
 // RequestWorkTimeout bounds store, object-store and outbound HTTP work started while
 // serving an HTTP request.
 const RequestWorkTimeout = 30 * time.Second

@@ -154,10 +154,14 @@ fi
 if [ -n "${BIFROST_BASE_URL:-}" ]; then
     cmd+=(--env-var "base_url=$BIFROST_BASE_URL")
 fi
-# The collection sends the setup token on /api calls; its default matches CI's, so
-# forward the server's own only when one is set.
-if [ -n "${BIFROST_SETUP_TOKEN:-}" ]; then
-    cmd+=(--env-var "setup_token=$BIFROST_SETUP_TOKEN")
+# Owned servers require their own freshly issued canonical session.
+if [ -n "$BIFROST_BINARY" ]; then
+    BIFROST_E2E_AUTH_HEADER=""; BIFROST_ADMIN_AUTH=""
+fi
+BIFROST_E2E_AUTH_HEADER="$(BIFROST_ADMIN_AUTH="${BIFROST_ADMIN_AUTH:-}" BIFROST_E2E_BASE_URL="${BIFROST_BASE_URL:-${BIFROST_E2E_BASE_URL:-http://localhost:8080}}" node "$SCRIPT_DIR/../management-session.mjs")"
+export BIFROST_E2E_AUTH_HEADER
+if [ -n "${BIFROST_E2E_AUTH_HEADER:-}" ]; then
+    cmd+=(--env-var "admin_auth_header=$BIFROST_E2E_AUTH_HEADER")
 fi
 
 echo -e "Collection: ${YELLOW}$COLLECTION${NC}"

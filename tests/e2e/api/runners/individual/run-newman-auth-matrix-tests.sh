@@ -5,11 +5,11 @@
 # Boots a fresh Bifrost server (sqlite, pre-seeded virtual key, unreachable dummy
 # provider) once per combination of:
 #   - client.enforce_auth_on_inference        (enforce VK on inference)
-#   - governance.auth_config.is_enabled        (admin password on /api/*)
+#   - CLI-provisioned canonical administrator present or absent
 # and runs collections/bifrost-v1-auth-matrix.postman_collection.json against each.
 #
 # Guards the separation: inference auth is owned by governance (virtual key),
-# admin password guards only /api/* — a VK-authenticated inference request must
+# canonical sessions guard /api/* — a VK-authenticated inference request must
 # never be rejected by the admin middleware, in any combination.
 #
 # Requires a built bifrost-http binary; this runner boots its own servers (it does
@@ -24,7 +24,7 @@ cd "$API_DIR"
 
 COLLECTION="collections/bifrost-v1-auth-matrix.postman_collection.json"
 REPORT_DIR="newman-reports/auth-matrix"
-ADMIN_USER="admin"
+ADMIN_USER="e2e-admin@example.com"
 ADMIN_PASS="Matrix-Admin-Pass1!"
 VK_VALUE="sk-bf-matrix-test-key"
 
@@ -91,7 +91,7 @@ fi
 
 mkdir -p "$REPORT_DIR"
 
-ADMIN_HEADER="Basic $(printf '%s:%s' "$ADMIN_USER" "$ADMIN_PASS" | base64 | tr -d '\n')"
+ADMIN_HEADER=""
 
 # Tracks the running server + its temp dir so the trap can always clean up.
 CURRENT_PID=""
@@ -111,9 +111,6 @@ trap cleanup EXIT
 write_config() {
     local dir="$1" enforce="$2" admin="$3"
     local auth_block=""
-    if [ "$admin" = "1" ]; then
-        auth_block="\"auth_config\": { \"is_enabled\": true, \"admin_username\": \"$ADMIN_USER\", \"admin_password\": \"$ADMIN_PASS\" },"
-    fi
     cat > "$dir/config.json" <<EOF
 {
   "\$schema": "https://www.getbifrost.ai/schema",
@@ -162,6 +159,9 @@ run_combo() {
     CURRENT_DIR="$(mktemp -d)"
     write_config "$CURRENT_DIR" "$enforce" "$admin"
     local server_log="$CURRENT_DIR/server.log"
+    if [ "$admin" = "1" ]; then
+        BIFROST_E2E_ADMIN_EMAIL="$ADMIN_USER" BIFROST_E2E_ADMIN_PASSWORD="$ADMIN_PASS" node "$SCRIPT_DIR/../management-session.mjs" --provision "$BIFROST_BINARY" "$CURRENT_DIR" || return 1
+    fi
 
     "$BIFROST_BINARY" --app-dir "$CURRENT_DIR" --port "$PORT" --log-level info > "$server_log" 2>&1 &
     CURRENT_PID=$!
@@ -187,6 +187,9 @@ run_combo() {
         cat "$server_log"
         OVERALL_EXIT=1
     else
+        if [ "$admin" = "1" ]; then
+            admin_header="$(BIFROST_E2E_AUTH_HEADER= BIFROST_ADMIN_AUTH= BIFROST_E2E_BASE_URL="http://localhost:$PORT" BIFROST_E2E_ADMIN_EMAIL="$ADMIN_USER" BIFROST_E2E_ADMIN_PASSWORD="$ADMIN_PASS" node "$SCRIPT_DIR/../management-session.mjs")" || return 1
+        fi
         local report_prefix="${REPORT_DIR}/${label}"
         local cmd=(newman run "$COLLECTION"
             --env-var "base_url=http://localhost:$PORT"

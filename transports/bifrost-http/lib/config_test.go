@@ -394,7 +394,7 @@ import (
 	"sync/atomic"
 )
 
-// First-admin file setup must default inference auth on without changing existing
+// Enabled file login policy must default inference auth on without changing existing
 // deployments, and file reconciliation must not undo it on the next restart.
 func TestLoadClientConfig_InferenceAuthSetup(t *testing.T) {
 	SetLogger(&testLogger{})
@@ -614,22 +614,19 @@ func (s inferenceAuthFailingStore) UpdateAuthConfig(ctx context.Context, c *conf
 
 func TestLoadConfig_InferenceAuthSetupFailures(t *testing.T) {
 	SetLogger(&testLogger{})
-	for _, failure := range []string{"read auth", "write client", "write auth", "missing password"} {
+	for _, failure := range []string{"read auth", "write client", "write auth"} {
 		t.Run(failure, func(t *testing.T) {
 			store := NewMockConfigStore()
 			cfg := &Config{ConfigStore: inferenceAuthFailingStore{store, failure}}
 			var data ConfigData
 			require.NoError(t, json.Unmarshal([]byte(`{"auth_config":{"is_enabled":true,"admin_username":"admin","admin_password":"StrongPassword1!"}}`), &data))
-			if failure == "missing password" {
-				data.AuthConfig.AdminPassword = nil
-			}
 			err := loadClientConfig(context.Background(), cfg, &data)
 			if err == nil {
 				err = loadAuthConfig(context.Background(), cfg, &data)
 			}
 			require.Error(t, err)
 			assert.Nil(t, store.authConfig)
-			if failure == "missing password" || failure == "read auth" {
+			if failure == "read auth" {
 				assert.Nil(t, store.clientConfig)
 			}
 		})
@@ -21008,368 +21005,95 @@ func TestIsBcryptHash(t *testing.T) {
 	}
 }
 
-func TestLoadAuthConfigFromFile_PasswordHashing(t *testing.T) {
+func TestLoadAuthConfigFromFile_IgnoresNewCredentials(t *testing.T) {
 	initTestLogger()
 	ctx := context.Background()
-
-	t.Run("plain text password gets hashed", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
+	hash, err := encrypt.Hash("File-password-1!")
+	require.NoError(t, err)
+	t.Setenv("TEST_IGNORED_ADMIN_PASSWORD", "File-password-1!")
+	for _, password := range []string{"File-password-1!", hash, "env.TEST_IGNORED_ADMIN_PASSWORD", "", strings.Repeat("x", 100)} {
+		for _, nested := range []bool{false, true} {
+			t.Run(fmt.Sprintf("nested=%v/password=%d", nested, len(password)), func(t *testing.T) {
+				store := NewMockConfigStore()
+				cfg := &Config{ConfigStore: store}
+				for startup := 0; startup < 2; startup++ {
+					auth := &configstore.AuthConfig{
+						IsEnabled:     true,
+						AdminUserName: schemas.NewSecretVar("file-admin@example.com"),
+						AdminPassword: schemas.NewSecretVar(password),
+						LocalLogin:    &configstore.LocalLoginConfig{IsEnabled: true},
+					}
+					data := &ConfigData{AuthConfig: auth}
+					if nested {
+						data.AuthConfig = nil
+						data.Governance = &configstore.GovernanceConfig{AuthConfig: auth}
+					}
+					original := auth.AdminPassword.GetValue()
+					require.NoError(t, loadClientConfig(ctx, cfg, data))
+					assert.Equal(t, original, auth.AdminPassword.GetValue(), "client loading must not hash file credentials")
+					require.NoError(t, loadAuthConfig(ctx, cfg, data))
+					require.NotNil(t, store.authConfig)
+					assert.Nil(t, store.authConfig.AdminUserName)
+					assert.Nil(t, store.authConfig.AdminPassword)
+					assert.Nil(t, cfg.GovernanceConfig.AuthConfig.AdminUserName)
+					assert.Nil(t, cfg.GovernanceConfig.AuthConfig.AdminPassword)
+					assert.False(t, store.flushSessionsCalled)
+				}
+			})
 		}
-		plainPassword := "mysecretpassword"
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("admin"),
-				AdminPassword: schemas.NewSecretVar(plainPassword),
-				IsEnabled:     true,
-			},
-		}
+	}
+}
 
-		loadAuthConfig(ctx, config, configData)
+func TestLoadAuthConfigFromFile_PreservesPersistedLegacyUpgrade(t *testing.T) {
+	initTestLogger()
+	hash, err := encrypt.Hash("Persisted-password-1!")
+	require.NoError(t, err)
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
+			store := NewMockConfigStore()
+			stored := &configstore.AuthConfig{IsEnabled: enabled, AdminUserName: schemas.NewSecretVar("persisted-admin"), AdminPassword: schemas.NewSecretVar(hash)}
+			store.authConfig = stored
+			cfg := &Config{ConfigStore: store}
+			data := &ConfigData{AuthConfig: &configstore.AuthConfig{
+				IsEnabled: true, AdminUserName: schemas.NewSecretVar("replacement"), AdminPassword: schemas.NewSecretVar("Replacement-password-1!"),
+				LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true, AllowRegistration: true},
+			}}
+			require.NoError(t, loadAuthConfig(context.Background(), cfg, data), "persisted legacy upgrade must not validate or apply a replacement file policy")
+			assert.Same(t, stored, cfg.GovernanceConfig.AuthConfig)
+			assert.Same(t, stored, store.authConfig)
+			assert.False(t, store.flushSessionsCalled)
+		})
+	}
+}
 
-		// Verify auth config was stored
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
+func TestLoadAuthConfigFromFile_WithoutStoreIgnoresCredentials(t *testing.T) {
+	initTestLogger()
+	cfg := &Config{}
+	data := &ConfigData{AuthConfig: &configstore.AuthConfig{
+		IsEnabled: true, AdminUserName: schemas.NewSecretVar("file-admin"), AdminPassword: schemas.NewSecretVar("file-password"),
+	}}
+	require.NoError(t, loadAuthConfig(context.Background(), cfg, data))
+	require.NotNil(t, cfg.GovernanceConfig.AuthConfig)
+	assert.Nil(t, cfg.GovernanceConfig.AuthConfig.AdminUserName)
+	assert.Nil(t, cfg.GovernanceConfig.AuthConfig.AdminPassword)
+	assert.Equal(t, []string{"local"}, cfg.GovernanceConfig.AuthConfig.AuthenticationMethods())
+}
 
-		// Verify password was hashed (not plain text)
-		require.NotEqual(t, plainPassword, storedAuth.AdminPassword, "password should be hashed, not plain text")
+type initializedAuthConfigStore struct{ *MockConfigStore }
 
-		// Verify the stored hash is a valid bcrypt hash
-		require.True(t, isBcryptHash(storedAuth.AdminPassword.GetValue()), "stored password should be a bcrypt hash")
+func (s initializedAuthConfigStore) GetDashboardIdentityState(context.Context) (configstore.DashboardIdentityState, error) {
+	return configstore.DashboardIdentityState{Initialized: true}, nil
+}
 
-		// Verify the hash can be used to verify the original password
-		match, err := encrypt.CompareHash(storedAuth.AdminPassword.GetValue(), plainPassword)
-		require.NoError(t, err)
-		require.True(t, match, "hashed password should match original plain text password")
-	})
-
-	t.Run("already hashed password is not re-hashed", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		// Create a bcrypt hash of a password
-		originalPassword := "originalpassword"
-		hashedPassword, err := encrypt.Hash(originalPassword)
-		require.NoError(t, err)
-
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("admin"),
-				AdminPassword: schemas.NewSecretVar(hashedPassword),
-				IsEnabled:     true,
-			},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		// Verify auth config was stored
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-
-		// Verify password was NOT re-hashed (should be the same hash)
-		require.Equal(t, hashedPassword, storedAuth.AdminPassword.GetValue(), "already hashed password should not be re-hashed")
-
-		// Verify the stored hash still works to verify the original password
-		match, err := encrypt.CompareHash(storedAuth.AdminPassword.GetValue(), originalPassword)
-		require.NoError(t, err)
-		require.True(t, match, "stored hash should still verify against original password")
-	})
-
-	t.Run("empty password without another login method is rejected", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("admin"),
-				AdminPassword: schemas.NewSecretVar(""),
-				IsEnabled:     true,
-			},
-		}
-
-		require.EqualError(t, loadAuthConfig(ctx, config, configData), "invalid auth config from file: auth_config is enabled but has no usable login method")
-
-		// Invalid login policy must not be persisted.
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.Nil(t, storedAuth)
-	})
-
-	t.Run("file config takes precedence over DB config", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		existingPassword := "$2a$10$existinghashvaluehere1234567890123456789012345678901234"
-		mockStore.authConfig = &configstore.AuthConfig{
-			AdminUserName: schemas.NewSecretVar("existingadmin"),
-			AdminPassword: schemas.NewSecretVar(existingPassword),
-			IsEnabled:     true,
-		}
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("newadmin"),
-				AdminPassword: schemas.NewSecretVar("newpassword"),
-				IsEnabled:     false,
-			},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		// Verify file config overwrote DB config
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-		require.Equal(t, "newadmin", storedAuth.AdminUserName.GetValue(), "username should be overwritten by file config")
-		require.True(t, isBcryptHash(storedAuth.AdminPassword.GetValue()), "password should be a bcrypt hash")
-		match, err := encrypt.CompareHash(storedAuth.AdminPassword.GetValue(), "newpassword")
-		require.NoError(t, err)
-		require.True(t, match, "hashed password should match the new file password")
-		require.False(t, storedAuth.IsEnabled, "enabled status should be overwritten by file config")
-	})
-
-	t.Run("file config skips update when DB already matches", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		plainPassword := "samepassword"
-		hashedPassword, err := encrypt.Hash(plainPassword)
-		require.NoError(t, err)
-
-		mockStore.authConfig = &configstore.AuthConfig{
-			AdminUserName: schemas.NewSecretVar("sameadmin"),
-			AdminPassword: schemas.NewSecretVar(hashedPassword),
-			IsEnabled:     true}
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("sameadmin"),
-				AdminPassword: schemas.NewSecretVar(plainPassword),
-				IsEnabled:     true},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		// Verify the DB hash was reused (not re-hashed) since values match
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-		require.Equal(t, hashedPassword, storedAuth.AdminPassword.GetValue(), "password hash should be unchanged when file matches DB")
-		require.Equal(t, "sameadmin", storedAuth.AdminUserName.GetValue(), "username should be unchanged")
-		require.True(t, storedAuth.IsEnabled, "enabled status should be unchanged")
-	})
-
-	t.Run("nil auth config in file is skipped", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: nil,
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		// Verify no auth config was stored
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.Nil(t, storedAuth, "no auth config should be stored when file config is nil")
-	})
-
-	t.Run("username from env variable gets resolved", func(t *testing.T) {
-		t.Setenv("TEST_ADMIN_USERNAME", "envadmin")
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("env.TEST_ADMIN_USERNAME"),
-				AdminPassword: schemas.NewSecretVar("plainpassword"),
-				IsEnabled:     true,
-			},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-
-		// Verify username was resolved from env
-		require.Equal(t, "envadmin", storedAuth.AdminUserName.GetValue(), "username should be resolved from env variable")
-		require.True(t, storedAuth.AdminUserName.IsFromSecret(), "username should be marked as from env")
-		require.Equal(t, "env.TEST_ADMIN_USERNAME", storedAuth.AdminUserName.GetRawRef(), "env var reference should be preserved")
-
-		// Verify password was hashed
-		require.True(t, isBcryptHash(storedAuth.AdminPassword.GetValue()), "password should be hashed")
-	})
-
-	t.Run("password from env variable gets resolved and hashed", func(t *testing.T) {
-		t.Setenv("TEST_ADMIN_PASSWORD", "envpassword123")
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("admin"),
-				AdminPassword: schemas.NewSecretVar("env.TEST_ADMIN_PASSWORD"),
-				IsEnabled:     true,
-			},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-
-		// Verify password was resolved from env and hashed
-		require.True(t, isBcryptHash(storedAuth.AdminPassword.GetValue()), "password should be a bcrypt hash")
-		match, err := encrypt.CompareHash(storedAuth.AdminPassword.GetValue(), "envpassword123")
-		require.NoError(t, err)
-		require.True(t, match, "hashed password should match the env variable value")
-
-		// Verify env var reference is preserved after hashing
-		require.True(t, storedAuth.AdminPassword.IsFromSecret(), "password should still be marked as from env after hashing")
-		require.Equal(t, "env.TEST_ADMIN_PASSWORD", storedAuth.AdminPassword.GetRawRef(), "password env var reference should be preserved")
-	})
-
-	t.Run("both username and password from env variables", func(t *testing.T) {
-		t.Setenv("TEST_ADMIN_USER", "envuser")
-		t.Setenv("TEST_ADMIN_PASS", "envpass456")
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("env.TEST_ADMIN_USER"),
-				AdminPassword: schemas.NewSecretVar("env.TEST_ADMIN_PASS"),
-				IsEnabled:     true,
-			},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-
-		// Verify username was resolved from env
-		require.Equal(t, "envuser", storedAuth.AdminUserName.GetValue(), "username should be resolved from env variable")
-		require.True(t, storedAuth.AdminUserName.IsFromSecret(), "username should be marked as from env")
-
-		// Verify password was resolved from env and hashed
-		require.True(t, isBcryptHash(storedAuth.AdminPassword.GetValue()), "password should be a bcrypt hash")
-		match, err := encrypt.CompareHash(storedAuth.AdminPassword.GetValue(), "envpass456")
-		require.NoError(t, err)
-		require.True(t, match, "hashed password should match the env variable value")
-
-		// Verify env var reference is preserved after hashing
-		require.True(t, storedAuth.AdminPassword.IsFromSecret(), "password should still be marked as from env after hashing")
-		require.Equal(t, "env.TEST_ADMIN_PASS", storedAuth.AdminPassword.GetRawRef(), "password env var reference should be preserved")
-	})
-
-	t.Run("env variable not set results in empty value", func(t *testing.T) {
-		// Don't set the env variable - it should result in empty value
-		mockStore := NewMockConfigStore()
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("env.NONEXISTENT_USERNAME"),
-				AdminPassword: schemas.NewSecretVar("env.NONEXISTENT_PASSWORD"),
-				IsEnabled:     true,
-			},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-
-		// Verify username is empty but env var reference is preserved
-		require.Equal(t, "", storedAuth.AdminUserName.GetValue(), "username should be empty when env var not set")
-		require.True(t, storedAuth.AdminUserName.IsFromSecret(), "username should be marked as from env")
-		require.Equal(t, "env.NONEXISTENT_USERNAME", storedAuth.AdminUserName.GetRawRef(), "env var reference should be preserved")
-
-		// Verify password is empty (not hashed since empty)
-		require.Equal(t, "", storedAuth.AdminPassword.GetValue(), "password should be empty when env var not set")
-		require.True(t, storedAuth.AdminPassword.IsFromSecret(), "password should be marked as from env")
-		require.Equal(t, "env.NONEXISTENT_PASSWORD", storedAuth.AdminPassword.GetRawRef(), "env var reference should be preserved")
-	})
-
-	t.Run("password change flushes existing sessions", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		oldPassword := "oldpassword"
-		hashedOldPassword, err := encrypt.Hash(oldPassword)
-		require.NoError(t, err)
-
-		mockStore.authConfig = &configstore.AuthConfig{
-			AdminUserName: schemas.NewSecretVar("admin"),
-			AdminPassword: schemas.NewSecretVar(hashedOldPassword),
-			IsEnabled:     true,
-		}
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("admin"),
-				AdminPassword: schemas.NewSecretVar("newpassword"),
-				IsEnabled:     true,
-			},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		// Verify sessions were flushed because password changed
-		require.True(t, mockStore.flushSessionsCalled, "sessions should be flushed when password changes")
-
-		// Verify the new password was hashed and stored
-		storedAuth, err := mockStore.GetAuthConfig(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, storedAuth)
-		require.True(t, isBcryptHash(storedAuth.AdminPassword.GetValue()), "new password should be a bcrypt hash")
-		match, err := encrypt.CompareHash(storedAuth.AdminPassword.GetValue(), "newpassword")
-		require.NoError(t, err)
-		require.True(t, match, "hashed password should match the new password")
-	})
-
-	t.Run("matching password does not flush sessions", func(t *testing.T) {
-		mockStore := NewMockConfigStore()
-		plainPassword := "samepassword"
-		hashedPassword, err := encrypt.Hash(plainPassword)
-		require.NoError(t, err)
-
-		mockStore.authConfig = &configstore.AuthConfig{
-			AdminUserName: schemas.NewSecretVar("admin"),
-			AdminPassword: schemas.NewSecretVar(hashedPassword),
-			IsEnabled:     true}
-		config := &Config{
-			ConfigStore: mockStore,
-		}
-		configData := &ConfigData{
-			AuthConfig: &configstore.AuthConfig{
-				AdminUserName: schemas.NewSecretVar("admin"),
-				AdminPassword: schemas.NewSecretVar(plainPassword),
-				IsEnabled:     true},
-		}
-
-		loadAuthConfig(ctx, config, configData)
-
-		// Verify sessions were NOT flushed because password did not change
-		require.False(t, mockStore.flushSessionsCalled, "sessions should not be flushed when password matches")
-	})
+func TestLoadAuthConfigFromFile_InitializedPolicyWinsBeforeFileValidation(t *testing.T) {
+	initTestLogger()
+	store := NewMockConfigStore()
+	store.authConfig = &configstore.AuthConfig{IsEnabled: true, LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true, SessionTTLSeconds: 3600}}
+	cfg := &Config{ConfigStore: initializedAuthConfigStore{store}}
+	file := &ConfigData{AuthConfig: &configstore.AuthConfig{IsEnabled: true, LocalLogin: &configstore.LocalLoginConfig{AllowRegistration: true}}}
+	require.NoError(t, loadAuthConfig(context.Background(), cfg, file))
+	assert.Same(t, store.authConfig, cfg.GovernanceConfig.AuthConfig)
+	assert.Equal(t, 3600, cfg.GovernanceConfig.AuthConfig.LocalLogin.SessionTTLSeconds)
 }
 
 func TestLoadAuthConfigFromFile_OIDCOnlyConfiguresRuntimeWithoutLegacyAdminCredentials(t *testing.T) {
@@ -21425,42 +21149,82 @@ func TestConfigDataUnmarshalRejectsConflictingAuthConfigAliases(t *testing.T) {
 	require.ErrorContains(t, err, "conflicting auth_config definitions")
 }
 
-func TestLoadConfig_GovernanceAuthConfig_PersistsFromFirstImport(t *testing.T) {
+func TestLoadConfig_PersistedLegacyCredentialsRemainImportable(t *testing.T) {
 	initTestLogger()
-	tempDir := createTempDir(t)
 	ctx := context.Background()
+	tempDir := createTempDir(t)
+	data := makeConfigDataWithProvidersAndDir(nil, tempDir)
+	createConfigFile(t, tempDir, data)
+	cfg, err := LoadConfig(ctx, tempDir)
+	require.NoError(t, err)
+	hash, err := encrypt.Hash("Persisted-legacy-password-1!")
+	require.NoError(t, err)
+	require.NoError(t, cfg.ConfigStore.UpdateAuthConfig(ctx, &configstore.AuthConfig{
+		IsEnabled: true, AdminUserName: schemas.NewSecretVar("persisted-admin@example.com"), AdminPassword: schemas.NewSecretVar(hash),
+	}))
+	cfg.Close(ctx)
 
-	configData := makeConfigDataWithProvidersAndDir(nil, tempDir)
-	configData.Governance = &configstore.GovernanceConfig{
-		AuthConfig: &configstore.AuthConfig{
-			AdminUserName: schemas.NewSecretVar("nested-admin"),
-			AdminPassword: schemas.NewSecretVar("nested-password"),
-			IsEnabled:     true,
-		},
+	// A replacement file must neither replace nor prevent the upgrade of an
+	// already persisted legacy identity, even when its own policy is invalid.
+	data.AuthConfig = &configstore.AuthConfig{
+		IsEnabled: true, AdminUserName: schemas.NewSecretVar("replacement@example.com"), AdminPassword: schemas.NewSecretVar("Replacement-password-1!"),
+		LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true, AllowRegistration: true},
 	}
-	createConfigFile(t, tempDir, configData)
-
-	config1, err := LoadConfig(ctx, tempDir)
+	createConfigFile(t, tempDir, data)
+	cfg, err = LoadConfig(ctx, tempDir)
 	require.NoError(t, err)
-	storedAuth, err := config1.ConfigStore.GetAuthConfig(ctx)
+	defer cfg.Close(ctx)
+	stored, err := cfg.ConfigStore.GetAuthConfig(ctx)
 	require.NoError(t, err)
-	require.NotNil(t, storedAuth)
-	require.Equal(t, "nested-admin", storedAuth.AdminUserName.GetValue())
-	require.True(t, isBcryptHash(storedAuth.AdminPassword.GetValue()))
-	require.True(t, storedAuth.IsEnabled)
-	config1.Close(ctx)
-
-	configData.Governance = nil
-	createConfigFile(t, tempDir, configData)
-
-	config2, err := LoadConfig(ctx, tempDir)
+	require.NotNil(t, stored)
+	assert.Equal(t, "persisted-admin@example.com", stored.AdminUserName.GetValue())
+	assert.Equal(t, hash, stored.AdminPassword.GetValue())
+	result, err := cfg.ConfigStore.(configstore.LegacyAdminBootstrapStore).BootstrapLegacyAdmin(ctx, configstore.LegacyAdminBootstrapInput{
+		Username: stored.AdminUserName.GetValue(), PasswordHash: stored.AdminPassword.GetValue(),
+	})
 	require.NoError(t, err)
-	defer config2.Close(ctx)
-	require.NotNil(t, config2.GovernanceConfig)
-	require.NotNil(t, config2.GovernanceConfig.AuthConfig)
-	require.Equal(t, "nested-admin", config2.GovernanceConfig.AuthConfig.AdminUserName.GetValue())
-	require.True(t, isBcryptHash(config2.GovernanceConfig.AuthConfig.AdminPassword.GetValue()))
-	require.True(t, config2.GovernanceConfig.AuthConfig.IsEnabled)
+	require.True(t, result.Imported)
+	require.NotNil(t, result.User.Email)
+	assert.Equal(t, "persisted-admin@example.com", *result.User.Email)
+	var credential tables.TableCredential
+	require.NoError(t, cfg.ConfigStore.DB().Where("user_id = ?", result.User.ID).First(&credential).Error)
+	assert.Equal(t, hash, credential.SecretHash)
+}
+
+func TestLoadConfig_FileCredentialsNeverProvisionAcrossRestarts(t *testing.T) {
+	initTestLogger()
+	ctx := context.Background()
+	for _, nested := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nested=%v", nested), func(t *testing.T) {
+			tempDir := createTempDir(t)
+			data := makeConfigDataWithProvidersAndDir(nil, tempDir)
+			auth := &configstore.AuthConfig{IsEnabled: true, AdminUserName: schemas.NewSecretVar("file-admin@example.com"), AdminPassword: schemas.NewSecretVar("File-password-1!")}
+			if nested {
+				data.Governance = &configstore.GovernanceConfig{AuthConfig: auth}
+			} else {
+				data.AuthConfig = auth
+			}
+			createConfigFile(t, tempDir, data)
+			for startup := 0; startup < 2; startup++ {
+				cfg, err := LoadConfig(ctx, tempDir)
+				require.NoError(t, err)
+				stored, err := cfg.ConfigStore.GetAuthConfig(ctx)
+				require.NoError(t, err)
+				require.NotNil(t, stored)
+				assert.Nil(t, stored.AdminUserName)
+				assert.Nil(t, stored.AdminPassword)
+				for _, model := range []any{&tables.TableUser{}, &tables.TableCredential{}} {
+					var count int64
+					require.NoError(t, cfg.ConfigStore.DB().Model(model).Count(&count).Error)
+					assert.Zero(t, count, "file credentials cannot create users or verifiers on startup %d", startup)
+				}
+				state, err := cfg.ConfigStore.(configstore.DashboardIdentityStateStore).GetDashboardIdentityState(ctx)
+				require.NoError(t, err)
+				assert.False(t, state.Initialized)
+				cfg.Close(ctx)
+			}
+		})
+	}
 }
 
 // =============================================================================
@@ -23300,34 +23064,6 @@ func TestLoadAgentsConfigSecretRefsAndGrants(t *testing.T) {
 	assert.True(t, header.IsFromSecret(), "env references pass through as secret refs")
 	assert.Equal(t, "env.AGENT_TEST_TOKEN_UNSET", header.GetRawRef())
 	assert.Empty(t, header.GetValue(), "unset env refs stay unresolved rather than becoming literals")
-}
-
-func TestResolveSetupToken_Unset(t *testing.T) {
-	t.Setenv("BIFROST_SETUP_TOKEN", "")
-	assert.Empty(t, resolveSetupToken(&ConfigData{}))
-}
-
-func TestResolveSetupToken_ConfiguredValue(t *testing.T) {
-	t.Setenv("BIFROST_SETUP_TOKEN", "")
-	configData := &ConfigData{SetupToken: schemas.NewSecretVar("my-token")}
-	assert.Equal(t, "my-token", resolveSetupToken(configData))
-}
-
-func TestResolveSetupToken_ConfiguredWhitespaceOnly_FallsBackToEnv(t *testing.T) {
-	t.Setenv("BIFROST_SETUP_TOKEN", "env-token")
-	configData := &ConfigData{SetupToken: schemas.NewSecretVar("   ")}
-	assert.Equal(t, "env-token", resolveSetupToken(configData), "whitespace-only config value must be treated as unset")
-}
-
-func TestResolveSetupToken_EnvWhitespaceOnly_TreatedAsUnset(t *testing.T) {
-	t.Setenv("BIFROST_SETUP_TOKEN", "\t \n")
-	assert.Empty(t, resolveSetupToken(&ConfigData{}), "whitespace-only env value must be treated as unset")
-}
-
-func TestResolveSetupToken_TrimsSurroundingWhitespace(t *testing.T) {
-	t.Setenv("BIFROST_SETUP_TOKEN", "")
-	configData := &ConfigData{SetupToken: schemas.NewSecretVar("  my-token  ")}
-	assert.Equal(t, "my-token", resolveSetupToken(configData))
 }
 
 func TestApplyMCPGlobalSettingsToClientConfig_ToolSyncInterval(t *testing.T) {

@@ -12,11 +12,11 @@ Earlier versions are affected. Upgrade, then restrict management ports to truste
 
 ## Changelog
 
-v2.2.5 moves the enterprise gateway onto OSS transports v2.2.5. Bedrock guardrail transforms on requests that mix text and image blocks now land on the submitted text positions, and a transform that cannot be mapped safely becomes an intervention instead of failing open. The OSS release adds a first-time setup token for new installs and long-context fast-tier pricing, and fixes an auth path-normalization bypass and code-mode allow-list enforcement.
+v2.2.5 moves the enterprise gateway onto OSS transports v2.2.5. Bedrock guardrail transforms on requests that mix text and image blocks now land on the submitted text positions, and a transform that cannot be mapped safely becomes an intervention instead of failing open. The OSS release adds initial dashboard access protection for new installs and long-context fast-tier pricing, and fixes an auth path-normalization bypass and code-mode allow-list enforcement.
 
 ## 🌎 Open Source Features
 
-- **First-Time Setup Token** - A new install now requires a setup token before the initial dashboard setup can be completed, so a freshly started instance is no longer open to anyone who can reach it. The operator sets the value through `BIFROST_SETUP_TOKEN` or `setup_token` in `config.json` before starting the gateway, and it is checked only when the first admin account is created. [Docs](https://docs.getbifrost.ai/quickstart/gateway/setting-up)
+- **Initial Dashboard Access Protection (retired)** - This release introduced an initial-access mechanism since replaced by [terminal superadmin provisioning](/quickstart/gateway/setting-up-auth).
 - **Long-Context Fast Tier Pricing** - The model pricing table gains ultrafast and priority above-272k columns, so fast-tier requests over 272k tokens, including cache writes, are billed at the published long-context rates instead of the base-context rates. Two nullable, reversible migrations ship with this: `add_ultrafast_above_272k_pricing_columns` and `add_priority_above_272k_cache_creation_pricing_column`. Both are safe for rolling deploys.
 
 ## 🐞 Fixed

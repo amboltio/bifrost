@@ -8,6 +8,7 @@
 //   node scripts/run-e2e.mjs [--workers n] [--features x,y] [--rerun file.json]
 //                            [--grep re] [--headed] [--ui] [--skip-build] [--keep]
 //                            [--down] [-- <extra playwright args>]
+import { provisionAdmin, adminEmail, adminPassword } from '../api/runners/lib/management-session.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
@@ -30,8 +31,8 @@ const DEFAULT_WORKERS = 4
 const SEED_LOG_FEATURES = ['dashboard', 'logs']
 const SEED_LOG_COUNT = 30
 const PG_PORT = process.env.BIFROST_E2E_PG_PORT || '55432'
-const ADMIN_USERNAME = process.env.BIFROST_ADMIN_USERNAME || 'admin'
-const ADMIN_PASSWORD = process.env.BIFROST_ADMIN_PASSWORD || 'bifrost-e2e-password'
+const ADMIN_USERNAME = adminEmail
+const ADMIN_PASSWORD = adminPassword
 const HEALTH_TIMEOUT_MS = 180_000
 
 const children = []
@@ -187,6 +188,7 @@ async function startWorker(w) {
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
   copyFileSync(SEED_CONFIG, join(dir, 'config.json'))
+  provisionAdmin(BINARY, dir, { ...process.env, BIFROST_E2E_PG_PORT: PG_PORT, BIFROST_E2E_PG_DB: dbName(w) })
   const logFile = join(dir, 'bifrost.log')
   const out = openSync(logFile, 'a')
   const child = spawn(BINARY, ['--app-dir', dir, '--port', String(w.port), '--log-level', 'info'], {

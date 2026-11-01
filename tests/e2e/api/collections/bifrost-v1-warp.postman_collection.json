@@ -42,8 +42,8 @@
       "type": "string"
     },
     {
-      "key": "setup_token",
-      "value": "bifrost-e2e-setup-token",
+      "key": "admin_auth_header",
+      "value": "",
       "type": "string"
     }
   ],
@@ -68,9 +68,9 @@
           "  pm.collectionVariables.set('date_3_days_ago', months[day.getUTCMonth()] + ' ' + day.getUTCDate());",
           "  pm.collectionVariables.set('date_3_days_ago_iso', day.toISOString().slice(0, 10));",
           "}",
-          "var __setupToken = pm.variables.get('setup_token');",
-          "if (__setupToken && pm.request.url.getPath().indexOf('/api/') === 0) {",
-          "  pm.request.headers.upsert({ key: 'X-Bifrost-Setup-Token', value: __setupToken });",
+          "var __adminAuthHeader = pm.variables.get('admin_auth_header');",
+          "if (__adminAuthHeader && pm.request.url.getPath().indexOf('/api/') === 0) {",
+          "  pm.request.headers.upsert({ key: 'Authorization', value: __adminAuthHeader });",
           "}"
         ]
       }

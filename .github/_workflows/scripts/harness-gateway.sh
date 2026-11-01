@@ -72,6 +72,7 @@ harness_seed_app_dir() {
 harness_start_gateway() {
   local app_dir="$1" port="$2" log_file="$3"
   local base_url="http://localhost:$port"
+  node "$REPO_ROOT/tests/e2e/api/runners/management-session.mjs" --provision "$HARNESS_BINARY" "$app_dir" || return 1
   local cmd=("$HARNESS_BINARY" --app-dir "$app_dir" --port "$port" --log-level info)
   if [ -n "${HARNESS_GATEWAY_ENV:-}" ]; then
     # shellcheck disable=SC2206 # KEY=VALUE words, split on purpose
@@ -107,6 +108,8 @@ harness_start_gateway() {
   local max_wait=120 elapsed=0
   while [ $elapsed -lt $max_wait ]; do
     if curl -fsS --max-time 2 "$base_url/health" >/dev/null 2>&1; then
+      BIFROST_E2E_AUTH_HEADER="$(BIFROST_E2E_AUTH_HEADER= BIFROST_ADMIN_AUTH= BIFROST_E2E_BASE_URL="$base_url" node "$REPO_ROOT/tests/e2e/api/runners/management-session.mjs")" || return 1
+      export BIFROST_E2E_AUTH_HEADER
       echo "✅ Bifrost healthy (PID $HARNESS_BIFROST_PID, ${elapsed}s)"
       return 0
     fi

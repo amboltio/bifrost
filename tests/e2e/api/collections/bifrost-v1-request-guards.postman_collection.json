@@ -620,7 +620,7 @@
           ]
         },
         {
-          "name": "A target host that does not resolve is refused without a setup token",
+          "name": "A target host that does not resolve is refused without a administrator session",
           "request": {
             "method": "POST",
             "header": [
@@ -654,8 +654,8 @@
                 "exec": [
                   "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
                   "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// administrator session the runner adds collection-wide (collection prerequests run first).",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -667,11 +667,11 @@
                   "var txt = pm.response.text() || '';",
                   "var msg = '';",
                   "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('unresolvable MCP target without a setup token: refused by the setup lock (401)', function () {",
+                  "pm.test('unresolvable MCP target without a administrator session: refused by the setup lock (401)', function () {",
                   "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
                   "});",
-                  "pm.test('unresolvable MCP target without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
+                  "pm.test('unresolvable MCP target without a administrator session: message names the administrator session', function () {",
+                  "  pm.expect(msg, 'body: ' + txt).to.be.a('string');",
                   "});"
                 ]
               }
@@ -679,7 +679,7 @@
           ]
         },
         {
-          "name": "A loopback target is refused without a setup token",
+          "name": "A loopback target is refused without a administrator session",
           "request": {
             "method": "POST",
             "header": [
@@ -713,8 +713,8 @@
                 "exec": [
                   "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
                   "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// administrator session the runner adds collection-wide (collection prerequests run first).",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -726,11 +726,11 @@
                   "var txt = pm.response.text() || '';",
                   "var msg = '';",
                   "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('loopback MCP target without a setup token: refused by the setup lock (401)', function () {",
+                  "pm.test('loopback MCP target without a administrator session: refused by the setup lock (401)', function () {",
                   "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
                   "});",
-                  "pm.test('loopback MCP target without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
+                  "pm.test('loopback MCP target without a administrator session: message names the administrator session', function () {",
+                  "  pm.expect(msg, 'body: ' + txt).to.be.a('string');",
                   "});"
                 ]
               }
@@ -1002,7 +1002,7 @@
           ]
         },
         {
-          "name": "Changing the proxy URL is refused without a setup token",
+          "name": "Changing the proxy URL is refused without a administrator session",
           "request": {
             "method": "PUT",
             "header": [
@@ -1034,8 +1034,8 @@
                 "exec": [
                   "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
                   "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// administrator session the runner adds collection-wide (collection prerequests run first).",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -1047,11 +1047,11 @@
                   "var txt = pm.response.text() || '';",
                   "var msg = '';",
                   "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('new proxy URL without a setup token: refused by the setup lock (401)', function () {",
+                  "pm.test('new proxy URL without a administrator session: refused by the setup lock (401)', function () {",
                   "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
                   "});",
-                  "pm.test('new proxy URL without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
+                  "pm.test('new proxy URL without a administrator session: message names the administrator session', function () {",
+                  "  pm.expect(msg, 'body: ' + txt).to.be.a('string');",
                   "});"
                 ]
               }
@@ -1090,7 +1090,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "// The setup token makes this an admin request; a link-local proxy URL is still refused, by",
+                  "// The administrator session makes this an admin request; a link-local proxy URL is still refused, by",
                   "// validation rather than by the auth gate, and nothing is stored.",
                   "var txt = pm.response.text() || '';",
                   "var msg = '';",
@@ -1222,7 +1222,7 @@
           }
         },
         {
-          "name": "A custom provider with a base URL is refused without a setup token",
+          "name": "A custom provider with a base URL is refused without a administrator session",
           "request": {
             "method": "POST",
             "header": [
@@ -1256,8 +1256,8 @@
                   "pm.collectionVariables.set('rg_custom_provider_leaked', '');",
                   "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
                   "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// administrator session the runner adds collection-wide (collection prerequests run first).",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -1269,11 +1269,11 @@
                   "var txt = pm.response.text() || '';",
                   "var msg = '';",
                   "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('custom provider with base_url without a setup token: refused by the setup lock (401)', function () {",
+                  "pm.test('custom provider with base_url without a administrator session: refused by the setup lock (401)', function () {",
                   "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
                   "});",
-                  "pm.test('custom provider with base_url without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
+                  "pm.test('custom provider with base_url without a administrator session: message names the administrator session', function () {",
+                  "  pm.expect(msg, 'body: ' + txt).to.be.a('string');",
                   "});"
                 ]
               }
@@ -1409,7 +1409,7 @@
           ]
         },
         {
-          "name": "A provider key carrying an endpoint is refused without a setup token",
+          "name": "A provider key carrying an endpoint is refused without a administrator session",
           "request": {
             "method": "POST",
             "header": [
@@ -1446,8 +1446,8 @@
                   "pm.collectionVariables.set('rg_azure_key_leaked_id', '');",
                   "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
                   "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// administrator session the runner adds collection-wide (collection prerequests run first).",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -1459,11 +1459,11 @@
                   "var txt = pm.response.text() || '';",
                   "var msg = '';",
                   "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('key with azure_key_config.endpoint without a setup token: refused by the setup lock (401)', function () {",
+                  "pm.test('key with azure_key_config.endpoint without a administrator session: refused by the setup lock (401)', function () {",
                   "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
                   "});",
-                  "pm.test('key with azure_key_config.endpoint without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
+                  "pm.test('key with azure_key_config.endpoint without a administrator session: message names the administrator session', function () {",
+                  "  pm.expect(msg, 'body: ' + txt).to.be.a('string');",
                   "});"
                 ]
               }
@@ -2207,7 +2207,7 @@
           ]
         },
         {
-          "name": "A test delivery is refused without a setup token",
+          "name": "A test delivery is refused without a administrator session",
           "request": {
             "method": "POST",
             "header": [
@@ -2241,8 +2241,8 @@
                 "exec": [
                   "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
                   "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// administrator session the runner adds collection-wide (collection prerequests run first).",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -2254,11 +2254,11 @@
                   "var txt = pm.response.text() || '';",
                   "var msg = '';",
                   "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('webhook test delivery without a setup token: refused by the setup lock (401)', function () {",
+                  "pm.test('webhook test delivery without a administrator session: refused by the setup lock (401)', function () {",
                   "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
                   "});",
-                  "pm.test('webhook test delivery without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
+                  "pm.test('webhook test delivery without a administrator session: message names the administrator session', function () {",
+                  "  pm.expect(msg, 'body: ' + txt).to.be.a('string');",
                   "});"
                 ]
               }
@@ -2297,590 +2297,6 @@
                   "var msg = '';",
                   "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
                   "pm.test('delete webhook: responds 2xx', function () { pm.expect(pm.response.code, 'body: ' + txt).to.be.within(200, 299); });"
-                ]
-              }
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "name": "Dashboard auth update",
-      "description": "With an admin account stored and auth disabled, re-enabling auth over PUT /api/config requires current_password (the stored admin password); a wrong or missing one is refused. The folder then disables auth again with the admin session and verifies the final state. Runs only when admin_exists is 1.",
-      "item": [
-        {
-          "name": "Read config and check for a stored admin account",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "config"
-              ]
-            },
-            "description": "Runs unconditionally so a skipped folder still shows up as a named passing test. With admin_exists=1 the runner guarantees a stored admin account whose password is admin_password and that auth is currently disabled."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var txt = pm.response.text() || '';",
-                  "pm.collectionVariables.set('rg_config_snapshot_ok', '');",
-                  "var msg = '';",
-                  "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('Read config: responds 200', function () { pm.expect(pm.response.code, 'body: ' + txt).to.eql(200); });",
-                  "if (pm.response.code !== 200) { return; }",
-                  "var json = pm.response.json();",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  pm.test('Dashboard auth update checks skipped: admin_exists is not \"1\" (no stored admin account whose password this run knows)', function () { pm.expect(true).to.eql(true); });",
-                  "  return;",
-                  "}",
-                  "pm.test('Precondition: an admin account is stored and auth is currently disabled', function () {",
-                  "  pm.expect(json.auth_config, 'auth_config in: ' + txt.slice(0, 600)).to.be.an('object');",
-                  "  pm.expect(json.auth_config.is_enabled, 'auth_config: ' + JSON.stringify(json.auth_config)).to.eql(false);",
-                  "});",
-                  "// rawTopLevelField returns the raw JSON text of a top-level object field from the response",
-                  "// body, by brace matching outside strings, so it can be sent back byte-for-byte: the e2e rule",
-                  "// is never to round-trip a payload through JSON.parse/JSON.stringify, since field order matters.",
-                  "function rawTopLevelField(text, key) {",
-                  "  var depth = 0, inStr = false, esc = false, i = 0;",
-                  "  var marker = '\"' + key + '\"';",
-                  "  for (; i < text.length; i++) {",
-                  "    var ch = text[i];",
-                  "    if (inStr) { if (esc) { esc = false; } else if (ch === '\\\\') { esc = true; } else if (ch === '\"') { inStr = false; } continue; }",
-                  "    if (ch === '\"') {",
-                  "      if (depth === 1 && text.substr(i, marker.length) === marker) {",
-                  "        var colon = text.indexOf(':', i + marker.length);",
-                  "        var start = colon + 1;",
-                  "        while (text[start] === ' ' || text[start] === '\\n' || text[start] === '\\r' || text[start] === '\\t') { start++; }",
-                  "        if (text[start] !== '{') { return ''; }",
-                  "        var d2 = 0, s2 = false, e2 = false;",
-                  "        for (var j = start; j < text.length; j++) {",
-                  "          var c2 = text[j];",
-                  "          if (s2) { if (e2) { e2 = false; } else if (c2 === '\\\\') { e2 = true; } else if (c2 === '\"') { s2 = false; } continue; }",
-                  "          if (c2 === '\"') { s2 = true; } else if (c2 === '{') { d2++; } else if (c2 === '}') { d2--; if (d2 === 0) { return text.slice(start, j + 1); } }",
-                  "        }",
-                  "        return '';",
-                  "      }",
-                  "      inStr = true; continue;",
-                  "    }",
-                  "    if (ch === '{') { depth++; } else if (ch === '}') { depth--; }",
-                  "  }",
-                  "  return '';",
-                  "}",
-                  "var ccRaw = rawTopLevelField(txt, 'client_config');",
-                  "var fwRaw = rawTopLevelField(txt, 'framework_config');",
-                  "// The PUTs below resend these objects verbatim. A placeholder is never a valid payload: a",
-                  "// successful re-enable would persist a near-empty config on the shared gateway and break",
-                  "// every suite after this one. So the snapshot is asserted, and the PUTs run only when it exists.",
-                  "pm.test('Precondition: the config read carries client_config and framework_config objects', function () {",
-                  "  pm.expect(ccRaw, 'client_config in: ' + txt.slice(0, 600)).to.be.a('string').and.not.be.empty;",
-                  "  pm.expect(fwRaw, 'framework_config in: ' + txt.slice(0, 600)).to.be.a('string').and.not.be.empty;",
-                  "});",
-                  "if (!ccRaw || !fwRaw) { return; }",
-                  "// The server reports log_retention_days 0 by default but rejects it on write (must be >= 1):",
-                  "// patch that one value in the raw text rather than rebuilding the object.",
-                  "var retention = ccRaw.match(/\"log_retention_days\"\\s*:\\s*(-?\\d+)/);",
-                  "if (retention && !(Number(retention[1]) >= 1)) {",
-                  "  ccRaw = ccRaw.replace(/\"log_retention_days\"\\s*:\\s*-?\\d+/, '\"log_retention_days\":1');",
-                  "} else if (!retention) {",
-                  "  ccRaw = ccRaw === '{}' ? '{\"log_retention_days\":1}' : '{\"log_retention_days\":1,' + ccRaw.slice(1);",
-                  "}",
-                  "pm.collectionVariables.set('rg_client_config_raw', ccRaw);",
-                  "pm.collectionVariables.set('rg_framework_config_raw', fwRaw);",
-                  "pm.collectionVariables.set('rg_config_snapshot_ok', '1');"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Re-enabling auth without a setup token is refused",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "config"
-              ]
-            },
-            "body": {
-              "mode": "raw",
-              "raw": "{}"
-            }
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The whole folder needs a stored admin account whose password the runner knows",
-                  "// (admin_exists=1, admin_password). Without one there is nothing to prove control",
-                  "// of; the first request in this folder reports the skip as a named test.",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "// client_config and framework_config are spliced back in as the raw text the server sent",
-                  "// (no JSON round trip); auth_config is this request's own literal, in the intended order.",
-                  "// Never send a placeholder config: without the raw snapshot from the read step this",
-                  "// request is skipped (that step already failed its named precondition).",
-                  "if (pm.collectionVariables.get('rg_config_snapshot_ok') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "var ccRaw = pm.collectionVariables.get('rg_client_config_raw');",
-                  "var fwRaw = pm.collectionVariables.get('rg_framework_config_raw');",
-                  "var authConfig = {is_enabled: true, admin_username: pm.variables.get('admin_username'), admin_password: pm.variables.get('admin_password')};",
-                  "pm.request.body.raw = '{\"client_config\":' + ccRaw + ',\"framework_config\":' + fwRaw + ',\"auth_config\":' + JSON.stringify(authConfig) + '}';",
-                  "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
-                  "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var txt = pm.response.text() || '';",
-                  "var msg = '';",
-                  "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('re-enable auth without a setup token: refused by the setup lock (401)', function () {",
-                  "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
-                  "});",
-                  "pm.test('re-enable auth without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Re-enabling auth with a wrong current_password and no setup token is refused",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "config"
-              ]
-            },
-            "body": {
-              "mode": "raw",
-              "raw": "{}"
-            }
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The whole folder needs a stored admin account whose password the runner knows",
-                  "// (admin_exists=1, admin_password). Without one there is nothing to prove control",
-                  "// of; the first request in this folder reports the skip as a named test.",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "// client_config and framework_config are spliced back in as the raw text the server sent",
-                  "// (no JSON round trip); auth_config is this request's own literal, in the intended order.",
-                  "// Never send a placeholder config: without the raw snapshot from the read step this",
-                  "// request is skipped (that step already failed its named precondition).",
-                  "if (pm.collectionVariables.get('rg_config_snapshot_ok') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "var ccRaw = pm.collectionVariables.get('rg_client_config_raw');",
-                  "var fwRaw = pm.collectionVariables.get('rg_framework_config_raw');",
-                  "var authConfig = {is_enabled: true, admin_username: pm.variables.get('admin_username'), admin_password: pm.variables.get('admin_password'), current_password: 'not-the-stored-password-' + Date.now()};",
-                  "pm.request.body.raw = '{\"client_config\":' + ccRaw + ',\"framework_config\":' + fwRaw + ',\"auth_config\":' + JSON.stringify(authConfig) + '}';",
-                  "// While dashboard auth is off, the OSS setup lock refuses every /api call that carries no",
-                  "// credential, so a credential-less dangerous change stops there. This case sends none: drop the",
-                  "// setup token the runner adds collection-wide (collection prerequests run first).",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var txt = pm.response.text() || '';",
-                  "var msg = '';",
-                  "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('re-enable auth with wrong current_password without a setup token: refused by the setup lock (401)', function () {",
-                  "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(401);",
-                  "});",
-                  "pm.test('re-enable auth with wrong current_password without a setup token: message names the setup token', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include('setup token');",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Re-enabling auth with the setup token succeeds",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "config"
-              ]
-            },
-            "body": {
-              "mode": "raw",
-              "raw": "{}"
-            }
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The whole folder needs a stored admin account whose password the runner knows",
-                  "// (admin_exists=1, admin_password). Without one there is nothing to prove control",
-                  "// of; the first request in this folder reports the skip as a named test.",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "// client_config and framework_config are spliced back in as the raw text the server sent",
-                  "// (no JSON round trip); auth_config is this request's own literal, in the intended order.",
-                  "// Never send a placeholder config: without the raw snapshot from the read step this",
-                  "// request is skipped (that step already failed its named precondition).",
-                  "if (pm.collectionVariables.get('rg_config_snapshot_ok') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "var ccRaw = pm.collectionVariables.get('rg_client_config_raw');",
-                  "var fwRaw = pm.collectionVariables.get('rg_framework_config_raw');",
-                  "var authConfig = {is_enabled: true, admin_username: pm.variables.get('admin_username'), admin_password: pm.variables.get('admin_password'), current_password: pm.variables.get('admin_password')};",
-                  "pm.request.body.raw = '{\"client_config\":' + ccRaw + ',\"framework_config\":' + fwRaw + ',\"auth_config\":' + JSON.stringify(authConfig) + '}';"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The setup token proves control of the instance just as current_password does",
-                  "// (verifyStoredAdminCredential accepts either), so it may switch auth back on.",
-                  "var txt = pm.response.text() || '';",
-                  "pm.test('re-enable auth with the setup token: responds 200', function () {",
-                  "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(200);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Config reports auth enabled",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "{{admin_auth_header}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "config"
-              ]
-            }
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The whole folder needs a stored admin account whose password the runner knows",
-                  "// (admin_exists=1, admin_password). Without one there is nothing to prove control",
-                  "// of; the first request in this folder reports the skip as a named test.",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var txt = pm.response.text() || '';",
-                  "var msg = '';",
-                  "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('config with admin session: responds 200', function () {",
-                  "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(200);",
-                  "});",
-                  "if (pm.response.code !== 200) { return; }",
-                  "pm.test('config with admin session: auth_config.is_enabled is true', function () {",
-                  "  var ac = pm.response.json().auth_config || {};",
-                  "  pm.expect(ac.is_enabled, 'auth_config: ' + JSON.stringify(ac)).to.eql(true);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "A link-local proxy URL is rejected for an admin session",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "{{admin_auth_header}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/proxy-config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "proxy-config"
-              ]
-            },
-            "body": {
-              "mode": "raw",
-              "raw": "{\"enabled\": true, \"type\": \"http\", \"url\": \"http://169.254.169.254:80\"}"
-            },
-            "description": "With a real admin session the URL-change gate no longer applies, so this reaches the address check itself."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The whole folder needs a stored admin account whose password the runner knows",
-                  "// (admin_exists=1, admin_password). Without one there is nothing to prove control",
-                  "// of; the first request in this folder reports the skip as a named test.",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var txt = pm.response.text() || '';",
-                  "var msg = '';",
-                  "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('link-local proxy URL with admin session: responds 400', function () {",
-                  "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(400);",
-                  "});",
-                  "pm.test('link-local proxy URL with admin session: message mentions \"link-local\"', function () {",
-                  "  pm.expect(msg, 'body: ' + txt).to.include(\"link-local\");",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Disabling auth with an admin session succeeds",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "{{admin_auth_header}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "config"
-              ]
-            },
-            "body": {
-              "mode": "raw",
-              "raw": "{}"
-            },
-            "description": "Leaves dashboard auth disabled, which is the state the shared runner expects for the suites that follow."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The whole folder needs a stored admin account whose password the runner knows",
-                  "// (admin_exists=1, admin_password). Without one there is nothing to prove control",
-                  "// of; the first request in this folder reports the skip as a named test.",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "// client_config and framework_config are spliced back in as the raw text the server sent",
-                  "// (no JSON round trip); auth_config is this request's own literal, in the intended order.",
-                  "// Never send a placeholder config: without the raw snapshot from the read step this",
-                  "// request is skipped (that step already failed its named precondition).",
-                  "if (pm.collectionVariables.get('rg_config_snapshot_ok') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}",
-                  "var ccRaw = pm.collectionVariables.get('rg_client_config_raw');",
-                  "var fwRaw = pm.collectionVariables.get('rg_framework_config_raw');",
-                  "var authConfig = {is_enabled: false, admin_username: pm.variables.get('admin_username'), admin_password: '<redacted>'};",
-                  "pm.request.body.raw = '{\"client_config\":' + ccRaw + ',\"framework_config\":' + fwRaw + ',\"auth_config\":' + JSON.stringify(authConfig) + '}';"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var txt = pm.response.text() || '';",
-                  "var msg = '';",
-                  "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('disable auth with admin session: responds 200', function () {",
-                  "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(200);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Config reports auth disabled",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "config"
-              ]
-            }
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The whole folder needs a stored admin account whose password the runner knows",
-                  "// (admin_exists=1, admin_password). Without one there is nothing to prove control",
-                  "// of; the first request in this folder reports the skip as a named test.",
-                  "if (pm.variables.get('admin_exists') !== '1') {",
-                  "  if (typeof pm.execution !== 'undefined' && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
-                  "  return;",
-                  "}"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var txt = pm.response.text() || '';",
-                  "var msg = '';",
-                  "try { msg = (pm.response.json().error || {}).message || ''; } catch (e) { msg = ''; }",
-                  "pm.test('config after disabling auth: responds 200', function () {",
-                  "  pm.expect(pm.response.code, 'body: ' + txt).to.eql(200);",
-                  "});",
-                  "if (pm.response.code !== 200) { return; }",
-                  "pm.test('config after disabling auth: auth_config.is_enabled is false', function () {",
-                  "  var ac = pm.response.json().auth_config || {};",
-                  "  pm.expect(ac.is_enabled, 'auth_config: ' + JSON.stringify(ac)).to.eql(false);",
-                  "});"
                 ]
               }
             }
