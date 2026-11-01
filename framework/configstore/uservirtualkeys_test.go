@@ -12,6 +12,7 @@ import (
 
 func TestUserVirtualKeyAssignmentsRevokeAndReplaceManualRows(t *testing.T) {
 	store := setupIdentityTestStore(t, ":memory:")
+	require.NoError(t, store.DB().AutoMigrate(&tables.TableVirtualKey{}))
 	ctx := context.Background()
 	user := &tables.TableUser{ID: uuid.NewString(), Email: stringPointerForTest("vk-owner@example.com"), DisplayName: "VK owner", Status: tables.UserStatusActive}
 	require.NoError(t, store.CreateUser(ctx, user))

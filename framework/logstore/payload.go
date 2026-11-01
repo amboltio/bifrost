@@ -14,6 +14,8 @@ const (
 	maxMCPToolInputPreviewRunes = 200
 	maxA2APayloadPreviewRunes   = 2048
 	a2aObjectSchemaVersion      = 1
+	maxRelayBodyPreviewRunes    = 2048
+	relayObjectSchemaVersion    = 1
 )
 
 // payloadFields lists the DB column names of large TEXT fields that are
@@ -526,6 +528,54 @@ func AgentLogHasPayload(l *AgentLog) bool {
 	return l != nil && (l.RequestBody != nil || l.ResponseBody != nil || l.EventBody != nil || l.RawRequest != nil || l.RawResponse != nil)
 }
 
+type relayPayloadV1 struct {
+	SchemaVersion int     `json:"schema_version"`
+	RequestBody   *string `json:"request_body,omitempty"`
+	ResponseBody  *string `json:"response_body,omitempty"`
+}
+
+// MarshalRelayLogPayload serializes a Relay Logs row's full bodies for object storage.
+func MarshalRelayLogPayload(l *RelayLog) ([]byte, error) {
+	return sonic.Marshal(relayPayloadV1{
+		SchemaVersion: relayObjectSchemaVersion,
+		RequestBody:   l.RequestBody,
+		ResponseBody:  l.ResponseBody,
+	})
+}
+
+// MergeRelayLogPayloadFromJSON restores the full bodies read back from object storage.
+func MergeRelayLogPayloadFromJSON(l *RelayLog, data []byte) error {
+	var payload relayPayloadV1
+	if err := sonic.Unmarshal(data, &payload); err != nil {
+		return fmt.Errorf("logstore: unmarshal relay log payload: %w", err)
+	}
+	if payload.SchemaVersion != relayObjectSchemaVersion {
+		return fmt.Errorf("logstore: unsupported relay object schema version %d", payload.SchemaVersion)
+	}
+	l.RequestBody = payload.RequestBody
+	l.ResponseBody = payload.ResponseBody
+	return nil
+}
+
+// PrepareRelayLogDBEntry turns a Relay Logs row into its database form in hybrid mode: the
+// bodies shrink to a preview (or nothing, when content is hidden) and the row points at the
+// object holding them in full.
+func PrepareRelayLogDBEntry(l *RelayLog, objectKey string) {
+	if l.ContentHidden {
+		l.RequestBody = nil
+		l.ResponseBody = nil
+	} else {
+		l.RequestBody = truncateStringPointer(l.RequestBody, maxRelayBodyPreviewRunes)
+		l.ResponseBody = truncateStringPointer(l.ResponseBody, maxRelayBodyPreviewRunes)
+	}
+	l.PayloadReference = &objectKey
+}
+
+// RelayLogHasPayload reports whether a Relay Logs row carries a body to offload.
+func RelayLogHasPayload(l *RelayLog) bool {
+	return l != nil && (l.RequestBody != nil || l.ResponseBody != nil)
+}
+
 // MarshalMCPToolLogPayload serializes a full MCP tool log for object storage.
 // The object-store copy is intentionally complete; the DB row is only a
 // lightweight index plus a short input preview.
@@ -872,33 +922,63 @@ func BuildAgentLogTags(l *AgentLog) map[string]string {
 	return tags
 }
 
-// ObjectKey constructs the S3 object key for a log entry.
+func BuildRelayLogTags(l *RelayLog) map[string]string {
+	tags := make(map[string]string, 6)
+	if l.RelayName != "" {
+		tags["relay_name"] = truncateTag(l.RelayName, 256)
+	}
+	if l.Kind != "" {
+		tags["kind"] = truncateTag(l.Kind, 256)
+	}
+	if l.Status != "" {
+		tags["status"] = truncateTag(l.Status, 256)
+	}
+	if l.VirtualKeyID != nil && *l.VirtualKeyID != "" {
+		tags["virtual_key_id"] = truncateTag(*l.VirtualKeyID, 256)
+	}
+	tags["has_error"] = "false"
+	if l.Status == "error" {
+		tags["has_error"] = "true"
+	}
+	tags["date"] = l.Timestamp.UTC().Format("2006-01-02")
+	return tags
+}
+
+// Object key suffixes. The suffix records how the object is encoded, so a
+// bucket can hold objects written before and after a format change.
+const (
+	jsonObjectExt    = ".json.gz"
+	parquetObjectExt = ".parquet"
+)
+
+// objectKey builds {prefix}/{dir}/YYYY/MM/DD/HH/{id}{ext}.
+func objectKey(prefix, dir string, timestamp time.Time, logID, ext string) string {
+	ts := timestamp.UTC()
+	return fmt.Sprintf("%s/%s/%04d/%02d/%02d/%02d/%s%s",
+		prefix, dir,
+		ts.Year(), ts.Month(), ts.Day(), ts.Hour(),
+		logID, ext,
+	)
+}
+
+// ObjectKey constructs the S3 object key for a JSON log entry.
 func ObjectKey(prefix string, timestamp time.Time, logID string) string {
-	ts := timestamp.UTC()
-	return fmt.Sprintf("%s/logs/%04d/%02d/%02d/%02d/%s.json.gz",
-		prefix,
-		ts.Year(), ts.Month(), ts.Day(), ts.Hour(),
-		logID,
-	)
+	return objectKey(prefix, "logs", timestamp, logID, jsonObjectExt)
 }
 
-// MCPToolObjectKey constructs the S3 object key for an MCP tool log entry.
+// MCPToolObjectKey constructs the S3 object key for a JSON MCP tool log entry.
 func MCPToolObjectKey(prefix string, timestamp time.Time, logID string) string {
-	ts := timestamp.UTC()
-	return fmt.Sprintf("%s/mcp-logs/%04d/%02d/%02d/%02d/%s.json.gz",
-		prefix,
-		ts.Year(), ts.Month(), ts.Day(), ts.Hour(),
-		logID,
-	)
+	return objectKey(prefix, "mcp-logs", timestamp, logID, jsonObjectExt)
 }
 
+// RelayLogObjectKey constructs the S3 object key for a JSON Relay Logs entry.
+func RelayLogObjectKey(prefix string, timestamp time.Time, logID string) string {
+	return objectKey(prefix, "relay-logs", timestamp, logID, jsonObjectExt)
+}
+
+// AgentLogObjectKey constructs the S3 object key for a JSON A2A log entry.
 func AgentLogObjectKey(prefix string, timestamp time.Time, logID string) string {
-	ts := timestamp.UTC()
-	return fmt.Sprintf("%s/agent-logs/%04d/%02d/%02d/%02d/%s.json.gz",
-		prefix,
-		ts.Year(), ts.Month(), ts.Day(), ts.Hour(),
-		logID,
-	)
+	return objectKey(prefix, "agent-logs", timestamp, logID, jsonObjectExt)
 }
 
 // PayloadFieldNames returns the list of DB column names that are payload fields.

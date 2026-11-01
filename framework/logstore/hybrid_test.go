@@ -2,6 +2,7 @@ package logstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -1150,6 +1151,45 @@ func TestHybrid_DeleteLog(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// partialDeleteStore deletes the logs and then reports the topic cleanup
+// failure ClickHouse reports, which no SQLite store can be made to.
+type partialDeleteStore struct{ LogStore }
+
+func (s partialDeleteStore) DeleteLog(ctx context.Context, id string) error {
+	if err := s.LogStore.DeleteLog(ctx, id); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: cleanup failed", ErrPartialLogDelete)
+}
+
+func (s partialDeleteStore) DeleteLogs(ctx context.Context, ids []string) error {
+	if err := s.LogStore.DeleteLogs(ctx, ids); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: cleanup failed", ErrPartialLogDelete)
+}
+
+// A partial delete removed the rows, so their payloads leave object storage
+// too, and the caller still gets the error.
+func TestHybrid_PartialDeleteStillDeletesObjects(t *testing.T) {
+	hybrid, inner, objStore := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	for _, id := range []string{"partial-1", "partial-2"} {
+		entry := &Log{ID: id, Timestamp: time.Now().UTC(), Provider: "anthropic", Model: "claude-3", Status: "success", Object: "chat.completion", InputHistory: `[{"role":"user","content":"delete me"}]`}
+		require.NoError(t, entry.SerializeFields())
+		require.NoError(t, hybrid.CreateIfNotExists(ctx, entry))
+		waitForOffload(t, inner, id)
+	}
+	require.Equal(t, 2, objStore.Len())
+	hybrid.inner = partialDeleteStore{LogStore: inner}
+
+	require.ErrorIs(t, hybrid.DeleteLog(ctx, "partial-1"), ErrPartialLogDelete)
+	assert.Equal(t, 1, objStore.Len())
+	require.ErrorIs(t, hybrid.DeleteLogs(ctx, []string{"partial-2"}), ErrPartialLogDelete)
+	assert.Equal(t, 0, objStore.Len())
+}
+
 func TestHybrid_Tags(t *testing.T) {
 	hybrid, _, objStore := newTestHybrid(t)
 	defer hybrid.Close(context.Background())
@@ -2048,4 +2088,523 @@ func TestHybrid_BatchUpdateAppliesFinalVisibility(t *testing.T) {
 	found, err := hybrid.FindByID(ctx, "unhide")
 	require.NoError(t, err)
 	assert.Contains(t, found.OutputMessage, output, "a visible row serves its output")
+}
+
+// newParquetTestHybrid is newTestHybrid with format "parquet" selected, as
+// NewLogStore does for object_storage.format = "parquet".
+func newParquetTestHybrid(t *testing.T) (*HybridLogStore, LogStore, *objectstore.InMemoryObjectStore) {
+	t.Helper()
+	hybrid, inner, objStore := newTestHybrid(t)
+	hybrid.setObjectFormat(objectstore.FormatParquet, objectstore.CompressionSnappy)
+	return hybrid, inner, objStore
+}
+
+// requireParquetObject asserts key holds a parquet body written with the
+// parquet content type, and returns it decoded to JSON.
+func requireParquetObject(t *testing.T, objStore *objectstore.InMemoryObjectStore, key string) string {
+	t.Helper()
+	raw, err := objStore.Get(context.Background(), key)
+	require.NoError(t, err, "object %s", key)
+	require.True(t, objectstore.IsParquet(raw), "object %s is not parquet", key)
+	assert.Equal(t, objectstore.ContentTypeParquet, objStore.ContentType(key))
+	decoded, err := objectstore.DecodeParquetToJSONObject(raw)
+	require.NoError(t, err)
+	return string(decoded)
+}
+
+func TestHybrid_ParquetFormat_LogRoundTrip(t *testing.T) {
+	hybrid, inner, objStore := newParquetTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	input := "Hello, parquet"
+	entry := &Log{
+		ID: "pq-log-1", Timestamp: ts, Provider: "openai", Model: "gpt-4o", Status: "success", Object: "chat.completion",
+		InputHistoryParsed: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &input}},
+		},
+		OutputMessageParsed: &schemas.ChatMessage{Content: &schemas.ChatMessageContent{ContentStr: strPtr("Hi from parquet")}},
+	}
+	require.NoError(t, entry.SerializeFields())
+	wantInput, wantOutput := entry.InputHistory, entry.OutputMessage
+	require.NoError(t, hybrid.CreateIfNotExists(ctx, entry))
+	waitForOffload(t, inner, entry.ID)
+
+	key := objectKey("test", "logs", ts, entry.ID, parquetObjectExt)
+	assert.Equal(t, []string{key}, objStore.Keys(), "only the parquet key is written")
+	stored := requireParquetObject(t, objStore, key)
+	assert.Contains(t, stored, "Hello, parquet")
+
+	found, err := hybrid.FindByID(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Equal(t, wantInput, found.InputHistory)
+	assert.Equal(t, wantOutput, found.OutputMessage)
+
+	require.NoError(t, hybrid.DeleteLog(ctx, entry.ID))
+	assert.Equal(t, 0, objStore.Len())
+}
+
+func TestHybrid_ParquetFormat_BatchUpdateMergesIntoStoredObject(t *testing.T) {
+	hybrid, inner, objStore := newParquetTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	input, output := "the parquet question", "the parquet answer"
+	entry := &Log{
+		ID: "pq-merge", Timestamp: ts, CreatedAt: ts, Object: "chat.completion", Provider: "openai", Model: "gpt-4o",
+		Status:             "processing",
+		InputHistoryParsed: []schemas.ChatMessage{{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &input}}},
+	}
+	require.NoError(t, hybrid.CreateIfNotExists(ctx, entry))
+	waitForOffload(t, inner, entry.ID)
+
+	require.NoError(t, hybrid.BatchUpdate(ctx, []*Log{{ID: entry.ID, Status: "success", OutputMessageParsed: &schemas.ChatMessage{
+		Role: schemas.ChatMessageRoleAssistant, Content: &schemas.ChatMessageContent{ContentStr: &output},
+	}}}))
+
+	key := objectKey("test", "logs", ts, entry.ID, parquetObjectExt)
+	waitForUploads(t, func() bool {
+		raw, err := objStore.Get(ctx, key)
+		if err != nil || !objectstore.IsParquet(raw) {
+			return false
+		}
+		decoded, err := objectstore.DecodeParquetToJSONObject(raw)
+		return err == nil && strings.Contains(string(decoded), output)
+	})
+	stored := requireParquetObject(t, objStore, key)
+	assert.Contains(t, stored, input, "merge keeps the stored input")
+
+	found, err := hybrid.FindByID(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Contains(t, found.InputHistory, input)
+	assert.Contains(t, found.OutputMessage, output)
+}
+
+func TestHybrid_ParquetFormat_MCPToolLogRoundTrip(t *testing.T) {
+	hybrid, inner, objStore := newParquetTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+
+	entry := &MCPToolLog{
+		ID: "pq-mcp-1", RequestID: "req-pq-mcp", Timestamp: time.Now().UTC(), ToolName: "echo", ServerLabel: "local", Status: "success",
+		ArgumentsParsed: map[string]any{"input": strings.Repeat("a", 260)},
+		ResultParsed:    map[string]any{"ok": true, "count": 3},
+	}
+	require.NoError(t, hybrid.CreateMCPToolLog(ctx, entry))
+	waitForMCPOffload(t, inner, entry.ID)
+
+	key := objectKey("test", "mcp-logs", entry.Timestamp, entry.ID, parquetObjectExt)
+	requireParquetObject(t, objStore, key)
+
+	found, err := hybrid.FindMCPToolLog(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("a", 260), found.ArgumentsParsed.(map[string]interface{})["input"])
+	assert.Equal(t, true, found.ResultParsed.(map[string]interface{})["ok"])
+	assert.EqualValues(t, 3, found.ResultParsed.(map[string]interface{})["count"])
+
+	require.NoError(t, hybrid.DeleteMCPToolLogs(ctx, []string{entry.ID}))
+	assert.Equal(t, 0, objStore.Len())
+}
+
+func TestHybrid_ParquetFormat_AgentLogRoundTrip(t *testing.T) {
+	hybrid, inner, objStore := newParquetTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	ts := time.Date(2026, 7, 20, 13, 14, 15, 0, time.UTC)
+	requestBody := `{"jsonrpc":"2.0","method":"SendMessage"}`
+	responseBody := `{"jsonrpc":"2.0","result":{"taskId":"task-1"}}`
+	entry := &AgentLog{
+		ID: "pq-a2a-1", Timestamp: ts, RecordKind: "request", Operation: "SendMessage", Status: "success",
+		AgentName: "fixture", RequestID: "req-pq-a2a", RequestBody: &requestBody, ResponseBody: &responseBody,
+	}
+	require.NoError(t, agentLogsCreateError(hybrid.BatchCreateAgentLogsIfNotExists(ctx, []*AgentLog{entry})))
+	waitForUploads(t, func() bool {
+		row, err := inner.FindAgentLog(ctx, entry.ID)
+		return err == nil && row.HasObject
+	})
+
+	key := objectKey("test", "agent-logs", ts, entry.ID, parquetObjectExt)
+	dbOnly, err := inner.FindAgentLog(ctx, entry.ID)
+	require.NoError(t, err)
+	require.NotNil(t, dbOnly.PayloadReference)
+	assert.Equal(t, key, *dbOnly.PayloadReference, "the row references the parquet object")
+	requireParquetObject(t, objStore, key)
+
+	found, err := hybrid.FindAgentLog(ctx, entry.ID)
+	require.NoError(t, err)
+	require.NotNil(t, found.RequestBody)
+	require.NotNil(t, found.ResponseBody)
+	assert.Equal(t, requestBody, *found.RequestBody)
+	assert.Equal(t, responseBody, *found.ResponseBody)
+}
+
+// A deployment that switches object_storage.format from json to parquet keeps
+// serving, merging and deleting the objects it wrote before the switch.
+func TestHybrid_ParquetFormat_ReadsLegacyJSONObjects(t *testing.T) {
+	jsonHybrid, inner, objStore := newTestHybrid(t)
+	ctx := context.Background()
+	// Both hybrids wrap the same inner store; closing either closes it, so the
+	// json one is closed last.
+	defer jsonHybrid.Close(ctx)
+	ts := time.Now().UTC()
+
+	input, output := "written as json", "answered after the switch"
+	entry := &Log{
+		ID: "legacy-1", Timestamp: ts, CreatedAt: ts, Object: "chat.completion", Provider: "openai", Model: "gpt-4o",
+		Status:             "processing",
+		InputHistoryParsed: []schemas.ChatMessage{{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &input}}},
+	}
+	require.NoError(t, jsonHybrid.CreateIfNotExists(ctx, entry))
+	waitForOffload(t, inner, entry.ID)
+	legacy := ObjectKey("test", ts, entry.ID)
+	require.Equal(t, []string{legacy}, objStore.Keys())
+	assert.Equal(t, objectstore.ContentTypeJSON, objStore.ContentType(legacy))
+
+	// Restart with format = parquet over the same database and bucket.
+	hybrid := newHybridLogStore(inner, objStore, "test", hybridTestLogger{}, nil, nil)
+	hybrid.setObjectFormat(objectstore.FormatParquet, objectstore.CompressionZstd)
+	defer hybrid.Close(ctx)
+
+	found, err := hybrid.FindByID(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Contains(t, found.InputHistory, input, "legacy json object is still served")
+
+	require.NoError(t, hybrid.BatchUpdate(ctx, []*Log{{ID: entry.ID, Status: "success", OutputMessageParsed: &schemas.ChatMessage{
+		Role: schemas.ChatMessageRoleAssistant, Content: &schemas.ChatMessageContent{ContentStr: &output},
+	}}}))
+	key := objectKey("test", "logs", ts, entry.ID, parquetObjectExt)
+	waitForUploads(t, func() bool { _, err := objStore.Get(ctx, key); return err == nil })
+	stored := requireParquetObject(t, objStore, key)
+	assert.Contains(t, stored, input, "merge reads the legacy object's input")
+	assert.Contains(t, stored, output)
+
+	found, err = hybrid.FindByID(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Contains(t, found.OutputMessage, output, "the parquet object wins once written")
+	waitForUploads(t, func() bool { return objStore.Len() == 1 })
+	assert.Equal(t, []string{key}, objStore.Keys(), "the rewrite removes the legacy json object it replaced")
+
+	require.NoError(t, hybrid.DeleteLogs(ctx, []string{entry.ID}))
+	assert.Equal(t, 0, objStore.Len())
+}
+
+// Switching object_storage.format from parquet back to json keeps serving,
+// merging and deleting the parquet objects, and a rewrite leaves one object.
+func TestHybrid_JSONFormat_ReadsParquetObjectsAfterSwitchBack(t *testing.T) {
+	parquetHybrid, inner, objStore := newParquetTestHybrid(t)
+	ctx := context.Background()
+	defer parquetHybrid.Close(ctx) // shares inner with the json hybrid; closed last
+	ts := time.Now().UTC()
+
+	input, output := "written as parquet", "answered after switching back"
+	entry := &Log{
+		ID: "switch-back-1", Timestamp: ts, CreatedAt: ts, Object: "chat.completion", Provider: "openai", Model: "gpt-4o",
+		Status:             "processing",
+		InputHistoryParsed: []schemas.ChatMessage{{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &input}}},
+	}
+	require.NoError(t, parquetHybrid.CreateIfNotExists(ctx, entry))
+	waitForOffload(t, inner, entry.ID)
+	parquetKey := objectKey("test", "logs", ts, entry.ID, parquetObjectExt)
+	require.Equal(t, []string{parquetKey}, objStore.Keys())
+
+	mcp := &MCPToolLog{
+		ID: "switch-back-mcp", RequestID: "req-switch-back", Timestamp: ts, ToolName: "search", ServerLabel: "docs", Status: "processing",
+		ArgumentsParsed: map[string]any{"query": "from parquet"},
+	}
+	require.NoError(t, parquetHybrid.CreateMCPToolLog(ctx, mcp))
+	waitForMCPOffload(t, inner, mcp.ID)
+
+	hybrid := newHybridLogStore(inner, objStore, "test", hybridTestLogger{}, nil, nil)
+	hybrid.setObjectFormat(objectstore.FormatJSON, objectstore.CompressionGzip)
+	defer hybrid.Close(ctx)
+
+	found, err := hybrid.FindByID(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Contains(t, found.InputHistory, input, "parquet object is still served after switching back to json")
+	foundMCP, err := hybrid.FindMCPToolLog(ctx, mcp.ID)
+	require.NoError(t, err)
+	args, ok := foundMCP.ArgumentsParsed.(map[string]interface{})
+	require.True(t, ok, "MCP arguments not hydrated from the parquet object, got %#v", foundMCP.ArgumentsParsed)
+	assert.Equal(t, "from parquet", args["query"])
+
+	require.NoError(t, hybrid.BatchUpdate(ctx, []*Log{{ID: entry.ID, Status: "success", OutputMessageParsed: &schemas.ChatMessage{
+		Role: schemas.ChatMessageRoleAssistant, Content: &schemas.ChatMessageContent{ContentStr: &output},
+	}}}))
+	jsonKey := ObjectKey("test", ts, entry.ID)
+	waitForUploads(t, func() bool {
+		data, err := objStore.Get(ctx, jsonKey)
+		return err == nil && strings.Contains(string(data), output)
+	})
+	data, err := objStore.Get(ctx, jsonKey)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), input, "merge keeps the input stored in the parquet object")
+	waitForUploads(t, func() bool { _, err := objStore.Get(ctx, parquetKey); return err != nil })
+
+	require.NoError(t, hybrid.UpdateMCPToolLog(ctx, mcp.ID, MCPToolLog{Status: "success", ResultParsed: map[string]any{"answer": "done"}}))
+	mcpJSONKey := MCPToolObjectKey("test", ts, mcp.ID)
+	waitForUploads(t, func() bool { _, err := objStore.Get(ctx, mcpJSONKey); return err == nil })
+	waitForUploads(t, func() bool {
+		_, err := objStore.Get(ctx, objectKey("test", "mcp-logs", ts, mcp.ID, parquetObjectExt))
+		return err != nil
+	})
+	foundMCP, err = hybrid.FindMCPToolLog(ctx, mcp.ID)
+	require.NoError(t, err)
+	args, ok = foundMCP.ArgumentsParsed.(map[string]interface{})
+	require.True(t, ok, "MCP arguments not hydrated after update, got %#v", foundMCP.ArgumentsParsed)
+	assert.Equal(t, "from parquet", args["query"], "update keeps the parquet-era arguments")
+
+	assert.ElementsMatch(t, []string{jsonKey, mcpJSONKey}, objStore.Keys(), "each log keeps a single object")
+	require.NoError(t, hybrid.DeleteLog(ctx, entry.ID))
+	require.NoError(t, hybrid.DeleteMCPToolLogs(ctx, []string{mcp.ID}))
+	assert.Equal(t, 0, objStore.Len())
+}
+
+// Deleting a json-format log also removes a parquet object left from a
+// parquet period, so a format switch never orphans objects.
+func TestHybrid_JSONFormat_DeleteRemovesParquetObject(t *testing.T) {
+	parquetHybrid, inner, objStore := newParquetTestHybrid(t)
+	ctx := context.Background()
+	defer parquetHybrid.Close(ctx)
+	entry := &Log{
+		ID: "switch-back-del", Timestamp: time.Now().UTC(), Object: "chat.completion", Provider: "openai", Model: "gpt-4o",
+		Status: "success", InputHistory: `[{"role":"user","content":"delete me"}]`,
+	}
+	require.NoError(t, parquetHybrid.CreateIfNotExists(ctx, entry))
+	waitForOffload(t, inner, entry.ID)
+
+	hybrid := newHybridLogStore(inner, objStore, "test", hybridTestLogger{}, nil, nil)
+	hybrid.setObjectFormat(objectstore.FormatJSON, objectstore.CompressionNone)
+	defer hybrid.Close(ctx)
+	require.NoError(t, hybrid.DeleteLogs(ctx, []string{entry.ID}))
+	assert.Equal(t, 0, objStore.Len())
+}
+
+func relayLogWithBodies(id string, ts time.Time, requestBody, responseBody string) *RelayLog {
+	return &RelayLog{
+		ID: id, RequestID: id, Timestamp: ts, RelayName: "web-search", Method: "POST", Path: "/search",
+		Status: RelayLogStatusSuccess, StatusCode: 200, RequestBody: &requestBody, ResponseBody: &responseBody,
+	}
+}
+
+func waitForRelayOffload(t *testing.T, inner LogStore, id string) {
+	t.Helper()
+	waitForUploads(t, func() bool {
+		row, err := inner.FindRelayLog(context.Background(), id)
+		return err == nil && row.HasObject
+	})
+}
+
+// TestHybrid_RelayLogBodiesOffloadAndHydrate pins the offload Relay Logs share with Agent logs: the
+// row keeps a preview and the object key, the object keeps the full bodies, and the detail read
+// returns them in full while the list keeps the preview.
+func TestHybrid_RelayLogBodiesOffloadAndHydrate(t *testing.T) {
+	hybrid, inner, _ := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	ts := time.Date(2026, 10, 29, 9, 30, 0, 0, time.UTC)
+	requestBody := `{"query":"` + strings.Repeat("q", 10_000) + `"}`
+	responseBody := `{"results":"` + strings.Repeat("r", 20_000) + `"}`
+	entry := relayLogWithBodies("relay-1", ts, requestBody, responseBody)
+
+	inserted, err := hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{entry})
+	require.NoError(t, err)
+	require.Equal(t, []string{"relay-1"}, inserted)
+	waitForRelayOffload(t, inner, entry.ID)
+
+	dbOnly, err := inner.FindRelayLog(ctx, entry.ID)
+	require.NoError(t, err)
+	require.NotNil(t, dbOnly.RequestBody)
+	require.NotNil(t, dbOnly.ResponseBody)
+	assert.Equal(t, maxRelayBodyPreviewRunes, len(*dbOnly.RequestBody), "the row keeps a preview")
+	assert.Equal(t, requestBody[:maxRelayBodyPreviewRunes], *dbOnly.RequestBody)
+	assert.Equal(t, maxRelayBodyPreviewRunes, len(*dbOnly.ResponseBody))
+	require.NotNil(t, dbOnly.PayloadReference)
+	assert.Equal(t, RelayLogObjectKey("test", ts, entry.ID), *dbOnly.PayloadReference)
+	assert.Equal(t, requestBody, *entry.RequestBody, "the caller's entry is not cut")
+
+	found, err := hybrid.FindRelayLog(ctx, entry.ID)
+	require.NoError(t, err)
+	require.NotNil(t, found.RequestBody)
+	require.NotNil(t, found.ResponseBody)
+	assert.Equal(t, requestBody, *found.RequestBody, "the detail read hydrates the full request body")
+	assert.Equal(t, responseBody, *found.ResponseBody, "the detail read hydrates the full response body")
+
+	page, err := hybrid.SearchRelayLogs(ctx, RelayLogFilters{}, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Logs, 1)
+	assert.Equal(t, maxRelayBodyPreviewRunes, len(*page.Logs[0].RequestBody), "lists read the preview only")
+}
+
+// TestHybrid_RelayLogWithoutBodiesStaysInDatabaseOnly pins that a row with no body uploads nothing.
+func TestHybrid_RelayLogWithoutBodiesStaysInDatabaseOnly(t *testing.T) {
+	hybrid, inner, objStore := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	entry := &RelayLog{ID: "relay-empty", RequestID: "relay-empty", Timestamp: time.Now().UTC(), RelayName: "web-search", Method: "GET", Path: "/usage", Status: RelayLogStatusSuccess, StatusCode: 200}
+
+	_, err := hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{entry})
+	require.NoError(t, err)
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 0, objStore.Len())
+	row, err := inner.FindRelayLog(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.False(t, row.HasObject)
+	assert.Nil(t, row.PayloadReference)
+}
+
+// TestHybrid_HiddenRelayLogRetainsObjectWithoutHydration pins retained hidden content: the object
+// keeps the bodies, the row keeps none, and reads never reveal them.
+func TestHybrid_HiddenRelayLogRetainsObjectWithoutHydration(t *testing.T) {
+	hybrid, inner, objStore := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	ts := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	entry := relayLogWithBodies("relay-hidden", ts, `{"query":"secret"}`, `{"answer":"secret"}`)
+	entry.ContentHidden = true
+
+	_, err := hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{entry})
+	require.NoError(t, err)
+	waitForRelayOffload(t, inner, entry.ID)
+
+	_, err = objStore.Get(ctx, RelayLogObjectKey("test", ts, entry.ID))
+	require.NoError(t, err, "the bodies are retained in object storage")
+	dbOnly, err := inner.FindRelayLog(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Nil(t, dbOnly.RequestBody)
+	assert.Nil(t, dbOnly.ResponseBody)
+	found, err := hybrid.FindRelayLog(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Nil(t, found.RequestBody, "hidden content is never hydrated")
+	assert.Nil(t, found.ResponseBody)
+}
+
+// TestHybrid_RelayLogUploadFailureKeepsDatabasePreview pins the fallback when the upload fails: the
+// row stays without an object and reads serve the preview.
+func TestHybrid_RelayLogUploadFailureKeepsDatabasePreview(t *testing.T) {
+	hybrid, inner, objStore := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	objStore.PutErr = fmt.Errorf("bucket unavailable")
+	requestBody := strings.Repeat("a", 5_000)
+	entry := relayLogWithBodies("relay-failed", time.Now().UTC(), requestBody, `{"ok":true}`)
+
+	_, err := hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{entry})
+	require.NoError(t, err)
+	waitForUploads(t, func() bool { return hybrid.droppedUploads.Load() > 0 })
+
+	row, err := inner.FindRelayLog(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.False(t, row.HasObject)
+	found, err := hybrid.FindRelayLog(ctx, entry.ID)
+	require.NoError(t, err)
+	require.NotNil(t, found.RequestBody)
+	assert.Equal(t, requestBody[:maxRelayBodyPreviewRunes], *found.RequestBody, "the preview is served")
+	assert.Equal(t, `{"ok":true}`, *found.ResponseBody, "a body under the preview size is whole on the row")
+}
+
+// TestHybrid_RelayLogDuplicateDoesNotOverwritePayload pins that a duplicate insert uploads nothing,
+// so the stored object keeps the first call's bodies.
+func TestHybrid_RelayLogDuplicateDoesNotOverwritePayload(t *testing.T) {
+	hybrid, inner, _ := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	ts := time.Date(2026, 10, 29, 11, 0, 0, 0, time.UTC)
+	first := relayLogWithBodies("relay-dup", ts, `{"query":"first"}`, `{"answer":"first"}`)
+	_, err := hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{first})
+	require.NoError(t, err)
+	waitForRelayOffload(t, inner, first.ID)
+
+	inserted, err := hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{relayLogWithBodies("relay-dup", ts, `{"query":"second"}`, `{"answer":"second"}`)})
+	require.NoError(t, err)
+	assert.Empty(t, inserted)
+	time.Sleep(100 * time.Millisecond)
+	found, err := hybrid.FindRelayLog(ctx, first.ID)
+	require.NoError(t, err)
+	assert.Equal(t, `{"query":"first"}`, *found.RequestBody)
+}
+
+// TestHybrid_DeleteRelayLogsRemovesObjects pins that deleting a row deletes its object, together with
+// the object of the job row that settles it.
+func TestHybrid_DeleteRelayLogsRemovesObjects(t *testing.T) {
+	hybrid, inner, objStore := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+	ts := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	parent := relayLogWithBodies("relay-parent", ts, `{"query":"x"}`, `{"job":"j-1"}`)
+	job := relayLogWithBodies("relay-job", ts, `{}`, `{"status":"done"}`)
+	job.Kind, job.ParentLogID = RelayLogKindJob, schemas.Ptr("relay-parent")
+	keep := relayLogWithBodies("relay-keep", ts, `{"query":"y"}`, `{"ok":true}`)
+	_, err := hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{parent, job, keep})
+	require.NoError(t, err)
+	for _, id := range []string{"relay-parent", "relay-job", "relay-keep"} {
+		waitForRelayOffload(t, inner, id)
+	}
+
+	require.NoError(t, hybrid.DeleteRelayLogs(ctx, []string{"relay-parent"}))
+	_, err = objStore.Get(ctx, RelayLogObjectKey("test", ts, "relay-parent"))
+	assert.Error(t, err, "the row's object is deleted")
+	_, err = objStore.Get(ctx, RelayLogObjectKey("test", ts, "relay-job"))
+	assert.Error(t, err, "the settling job row's object is deleted with it")
+	_, err = objStore.Get(ctx, RelayLogObjectKey("test", ts, "relay-keep"))
+	assert.NoError(t, err, "other rows keep their objects")
+	_, err = inner.FindRelayLog(ctx, "relay-job")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+// putHookObjectStore runs a hook before each Put, to delete a row while its upload is in flight.
+type putHookObjectStore struct {
+	*objectstore.InMemoryObjectStore
+	beforePut func()
+}
+
+func (s *putHookObjectStore) Put(ctx context.Context, key string, data []byte, tags map[string]string) error {
+	if s.beforePut != nil {
+		s.beforePut()
+	}
+	return s.InMemoryObjectStore.Put(ctx, key, data, tags)
+}
+
+// TestHybrid_DeletedRelayLogLeavesNoObject pins that deleting a row whose upload has not finished
+// leaves no object behind: an upload for a row already gone writes nothing, and an object written
+// while its row was being deleted is removed once marking the row finds it missing.
+func TestHybrid_DeletedRelayLogLeavesNoObject(t *testing.T) {
+	ctx := context.Background()
+	t.Run("deleted before the upload runs", func(t *testing.T) {
+		hybrid, inner, objStore := newTestHybrid(t)
+		defer hybrid.Close(ctx)
+		ts := time.Date(2026, 10, 29, 13, 0, 0, 0, time.UTC)
+		entry := relayLogWithBodies("relay-gone", ts, `{"query":"x"}`, `{"ok":true}`)
+		_, err := inner.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{entry})
+		require.NoError(t, err)
+		require.NoError(t, inner.DeleteRelayLogs(ctx, []string{entry.ID}))
+		payload, err := MarshalRelayLogPayload(entry)
+		require.NoError(t, err)
+		key := RelayLogObjectKey("test", ts, entry.ID)
+		hybrid.pendingBytes.Add(int64(len(payload)))
+		hybrid.processUpload(&uploadWork{logID: entry.ID, timestamp: ts, key: key, kind: uploadKindRelay, payload: payload})
+		_, err = objStore.Get(ctx, key)
+		assert.Error(t, err, "no object is written for a row that no longer exists")
+	})
+	t.Run("deleted while the upload is in flight", func(t *testing.T) {
+		dir := t.TempDir()
+		inner, err := newSqliteLogStore(ctx, &SQLiteConfig{Path: filepath.Join(dir, "hybrid.db")}, hybridTestLogger{})
+		require.NoError(t, err)
+		objStore := &putHookObjectStore{InMemoryObjectStore: objectstore.NewInMemoryObjectStore()}
+		hybrid := newHybridLogStore(inner, objStore, "test", hybridTestLogger{}, nil, nil)
+		defer hybrid.Close(ctx)
+		ts := time.Date(2026, 10, 29, 14, 0, 0, 0, time.UTC)
+		entry := relayLogWithBodies("relay-racing", ts, `{"query":"x"}`, `{"ok":true}`)
+		objStore.beforePut = func() { _ = hybrid.DeleteRelayLogs(ctx, []string{entry.ID}) }
+
+		_, err = hybrid.BatchCreateRelayLogsIfNotExists(ctx, []*RelayLog{entry})
+		require.NoError(t, err)
+		key := RelayLogObjectKey("test", ts, entry.ID)
+		waitForUploads(t, func() bool {
+			_, findErr := inner.FindRelayLog(ctx, entry.ID)
+			_, getErr := objStore.Get(ctx, key)
+			return errors.Is(findErr, ErrNotFound) && getErr != nil
+		})
+	})
 }
