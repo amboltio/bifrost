@@ -27,6 +27,7 @@ type (
 
 // LocalGovernanceStore provides in-memory cache for governance data with fast, non-blocking access
 type LocalGovernanceStore struct {
+	virtualKeyUpdateMu sync.Mutex // config installs only; inference remains lock-free
 	// inMemoryStore supplies the MCP clients open to every virtual key when building the
 	// grant a key carries. Optional: without it, no client is treated as open.
 	inMemoryStore InMemoryStore
@@ -3814,11 +3815,29 @@ func collectExtraScopedIDs(ctx context.Context, virtualKeyID, userID string) []S
 
 // PUBLIC API METHODS
 
-// CreateVirtualKeyInMemory adds a new virtual key to the in-memory store (lock-free)
+// CreateVirtualKeyInMemory adds a new virtual key to the in-memory store.
 func (gs *LocalGovernanceStore) CreateVirtualKeyInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey) {
 	if vk == nil {
 		return // Nothing to create
 	}
+	gs.virtualKeyUpdateMu.Lock()
+	defer gs.virtualKeyUpdateMu.Unlock()
+	if gs.virtualKeySnapshotIsStale(vk) {
+		return
+	}
+	gs.createVirtualKeyInMemory(ctx, vk)
+}
+
+func (gs *LocalGovernanceStore) virtualKeySnapshotIsStale(vk *configstoreTables.TableVirtualKey) bool {
+	if value, ok := gs.virtualKeysByID.Load(vk.ID); ok {
+		if current, ok := value.(*configstoreTables.TableVirtualKey); ok && current != nil {
+			return current.UpdatedAt.After(vk.UpdatedAt)
+		}
+	}
+	return false
+}
+
+func (gs *LocalGovernanceStore) createVirtualKeyInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey) {
 
 	clone := *vk
 
@@ -3858,10 +3877,15 @@ func (gs *LocalGovernanceStore) CreateVirtualKeyInMemory(ctx context.Context, vk
 	gs.storeVirtualKey(clone.Value.GetValue(), &clone)
 }
 
-// UpdateVirtualKeyInMemory updates an existing virtual key in the in-memory store (lock-free)
+// UpdateVirtualKeyInMemory updates an existing virtual key in the in-memory store.
 func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, budgetBaselines map[string]float64, rateLimitTokensBaselines map[string]int64, rateLimitRequestsBaselines map[string]int64) {
 	if vk == nil {
 		return // Nothing to update
+	}
+	gs.virtualKeyUpdateMu.Lock()
+	defer gs.virtualKeyUpdateMu.Unlock()
+	if gs.virtualKeySnapshotIsStale(vk) {
+		return
 	}
 
 	// Do not update the current usage of the rate limit, as it will be updated by the usage tracker.
@@ -4053,7 +4077,7 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 		}
 		gs.storeVirtualKey(newValue, &clone)
 	} else {
-		gs.CreateVirtualKeyInMemory(ctx, vk)
+		gs.createVirtualKeyInMemory(ctx, vk)
 	}
 }
 

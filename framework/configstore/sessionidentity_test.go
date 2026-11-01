@@ -260,3 +260,50 @@ func TestRDBLocalPasswordCredentialUpgradeAndChangeInvalidateSessions(t *testing
 	require.NotNil(t, session)
 	require.NotNil(t, session.RevokedAt)
 }
+
+func TestRDBResetManagedPasswordAtomicAndPreservesDisabledState(t *testing.T) {
+	store := setupLegacyBootstrapStore(t)
+	require.NoError(t, store.DB().AutoMigrate(&tables.TableAuditEvent{}, &tables.TableOutboxEvent{}, &tables.TableRecoveryToken{}))
+	ctx := context.Background()
+	now := time.Now().UTC()
+	user := &tables.TableUser{Email: ptr("reset-disabled@example.test"), Status: tables.UserStatusDisabled, DisabledAt: &now}
+	require.NoError(t, store.CreateUser(ctx, user))
+	credential := &tables.TableCredential{UserID: user.ID, Kind: tables.CredentialKindPassword, SecretHash: "old-hash", Version: 1, IsActive: true}
+	require.NoError(t, store.CreateCredential(ctx, credential))
+	require.NoError(t, store.CreateSession(ctx, &tables.SessionsTable{Token: "reset-session", UserID: &user.ID, ExpiresAt: now.Add(time.Hour), AuthVersion: user.AuthVersion}))
+	makeEvents := func(key string) (*tables.TableAuditEvent, *tables.TableOutboxEvent) {
+		return &tables.TableAuditEvent{ActorPrincipal: "user:admin", TargetType: "user", TargetID: &user.ID, Action: "identity.user.password_reset"},
+			&tables.TableOutboxEvent{Topic: "identity.user.changed", DeduplicationKey: key, Payload: map[string]any{"user_id": user.ID}}
+	}
+	audit, outbox := makeEvents("reset-duplicate")
+	require.NoError(t, store.CreateOutboxEvent(ctx, outbox))
+	audit, outbox = makeEvents("reset-duplicate")
+	require.Error(t, store.ResetManagedPasswordAudited(ctx, user.ID, "new-hash", nil, now, audit, outbox))
+	unchanged, err := store.GetCredentialByUserIDAndKind(ctx, user.ID, tables.CredentialKindPassword)
+	require.NoError(t, err)
+	assert.Equal(t, "old-hash", unchanged.SecretHash)
+	session, err := store.GetSession(ctx, "reset-session")
+	require.NoError(t, err)
+	assert.Nil(t, session.RevokedAt)
+	unchangedUser, err := store.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, user.AuthVersion, unchangedUser.AuthVersion)
+	audit, outbox = makeEvents("reset-success")
+	require.NoError(t, store.ResetManagedPasswordAudited(ctx, user.ID, "new-hash", nil, now, audit, outbox))
+	changed, err := store.GetCredentialByUserIDAndKind(ctx, user.ID, tables.CredentialKindPassword)
+	require.NoError(t, err)
+	assert.Equal(t, "new-hash", changed.SecretHash)
+	assert.Equal(t, credential.Version+1, changed.Version)
+	changedUser, err := store.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, tables.UserStatusDisabled, changedUser.Status)
+	assert.Equal(t, user.AuthVersion+1, changedUser.AuthVersion)
+	assert.NotNil(t, changedUser.DisabledAt)
+	session, err = store.GetSession(ctx, "reset-session")
+	require.NoError(t, err)
+	assert.NotNil(t, session.RevokedAt)
+	oidcUser := &tables.TableUser{Email: ptr("oidc-only-reset@example.test")}
+	require.NoError(t, store.CreateUser(ctx, oidcUser))
+	audit, outbox = makeEvents("oidc-reset")
+	require.ErrorIs(t, store.ResetManagedPasswordAudited(ctx, oidcUser.ID, "new-hash", nil, now, audit, outbox), ErrLocalPasswordUnavailable)
+}

@@ -331,6 +331,11 @@ export class VirtualKeysPage extends BasePage {
     // Save the virtual key by clicking the save button
     await this.saveBtn.click();
 
+    // Newly issued secrets are visible only in this transient dialog.
+    await expect(this.page.getByTestId("vk-issued-secret-dialog")).toBeVisible();
+    await expect(this.page.getByTestId("vk-issued-secret-value")).toHaveText("••••••••••••••••");
+    await this.page.getByTestId("vk-issued-secret-close").click();
+
     // Wait for the new row to appear in the table. This is a stronger success
     // signal than sonner toasts, which can overlap between tests and animations.
     await this.searchVirtualKeys(config.name);
@@ -846,6 +851,8 @@ export class VirtualKeysPage extends BasePage {
    * Close any open sheet/dialog
    */
   async closeSheet(): Promise<void> {
+    const issuance = this.page.getByTestId("vk-issued-secret-close");
+    if (await issuance.isVisible().catch(() => false)) await issuance.click();
     const isSheetVisible = await this.sheet.isVisible().catch(() => false);
     if (isSheetVisible) {
       // We have to click on the close button to close the sheet

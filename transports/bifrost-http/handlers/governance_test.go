@@ -1659,7 +1659,7 @@ func TestRotateVirtualKey_OnlyChangesValueAndReloads(t *testing.T) {
 	}
 }
 
-func TestRotateVirtualKey_CooldownStoresPreviousValue(t *testing.T) {
+func TestRotateVirtualKey_ManualRevokesImmediatelyDespiteCooldown(t *testing.T) {
 	SetLogger(&mockLogger{})
 
 	store := &mockRotateConfigStore{
@@ -1679,7 +1679,6 @@ func TestRotateVirtualKey_CooldownStoresPreviousValue(t *testing.T) {
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.SetUserValue("vk_id", "vk-1")
-	before := time.Now().UTC()
 
 	h.rotateVirtualKey(ctx)
 
@@ -1690,18 +1689,14 @@ func TestRotateVirtualKey_CooldownStoresPreviousValue(t *testing.T) {
 	if updated.Value.GetValue() == "sk-bf-old" {
 		t.Fatal("expected virtual key value to rotate")
 	}
-	if updated.PreviousValue.GetValue() != "sk-bf-old" {
-		t.Fatalf("expected previous value to hold the retired value, got %q", updated.PreviousValue.GetValue())
+	if updated.PreviousValue.IsSet() {
+		t.Fatal("manual rotation must revoke the retired value immediately")
 	}
 	if updated.RotatedAt == nil {
 		t.Fatal("expected rotated_at to be set")
 	}
-	if updated.PreviousValueExpiresAt == nil {
-		t.Fatal("expected previous_value_expires_at to be set")
-	}
-	wantExpiry := before.Add(5 * time.Minute)
-	if updated.PreviousValueExpiresAt.Before(wantExpiry.Add(-time.Minute)) || updated.PreviousValueExpiresAt.After(wantExpiry.Add(time.Minute)) {
-		t.Fatalf("expected expiry near %v, got %v", wantExpiry, updated.PreviousValueExpiresAt)
+	if updated.PreviousValueExpiresAt != nil {
+		t.Fatal("manual rotation must not open a grace window")
 	}
 }
 

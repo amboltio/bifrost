@@ -381,7 +381,7 @@ func (h *SessionHandler) changePassword(ctx *fasthttp.RequestCtx) {
 	}
 	if err := localAuth.ChangePassword(ctx, principal.UserID, payload.CurrentPassword, payload.NewPassword); err != nil {
 		if errors.Is(err, identity.ErrInvalidCredentials) {
-			SendError(ctx, fasthttp.StatusUnauthorized, "Invalid username or password")
+			SendError(ctx, fasthttp.StatusBadRequest, "Current password is incorrect")
 			return
 		}
 		logger.Error("failed to change local password: %v", err)
@@ -459,6 +459,23 @@ func (h *SessionHandler) currentUser(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	hasPassword := false
+	canResetPassword := isSuperAdmin
+	if store, ok := h.configStore.(interface {
+		GetRolesByUserID(context.Context, string) ([]tables.TableRole, error)
+	}); ok {
+		roles, err := store.GetRolesByUserID(ctx, user.ID)
+		if err != nil {
+			SendError(ctx, 503, "User permissions unavailable")
+			return
+		}
+		for _, role := range roles {
+			for _, permission := range role.Permissions {
+				if permission == "users.reset_password" {
+					canResetPassword = true
+				}
+			}
+		}
+	}
 	if store, ok := h.configStore.(interface {
 		ListCredentialsByUserID(context.Context, string) ([]tables.TableCredential, error)
 	}); ok {
@@ -477,7 +494,8 @@ func (h *SessionHandler) currentUser(ctx *fasthttp.RequestCtx) {
 		configstore.UserProfile
 		IsSuperAdmin     bool `json:"is_super_admin"`
 		HasLocalPassword bool `json:"has_local_password"`
-	}{configstore.NewUserProfile(*user), isSuperAdmin, hasPassword})
+		CanResetPassword bool `json:"can_reset_password"`
+	}{configstore.NewUserProfile(*user), isSuperAdmin, hasPassword, canResetPassword})
 }
 
 // listSessions returns safe metadata for the authenticated user's devices.

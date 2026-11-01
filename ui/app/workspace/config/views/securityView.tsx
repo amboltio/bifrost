@@ -629,12 +629,12 @@ export default function SecurityView() {
 				<div className="flex items-center justify-between space-x-2 rounded-sm border p-4">
 					<div className="space-y-0.5">
 						<label htmlFor="vk-rotation-cooldown" className="text-sm font-medium">
-							Cooldown After Virtual Key Rotation
+							Scheduled Rotation Grace Period
 						</label>
 						<p className="text-muted-foreground text-sm">
-							After rotating a virtual key, the previous value keeps authenticating for this long, giving callers time to switch to the new
-							key. Use a duration like <b>30s</b>, <b>5m</b>, or <b>1h</b>. Leave empty (or 0) to have the old value stop working
-							immediately. Maximum 30 days.
+							Scheduled rotations can keep the previous value valid while callers switch keys. Manual rotations always revoke the old key
+							immediately. Use <b>30s</b>, <b>5m</b>, or <b>1h</b>. Leave empty (or 0) to disable the scheduled grace period. Maximum 30
+							days.
 						</p>
 					</div>
 					<Input

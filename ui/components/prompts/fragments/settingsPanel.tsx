@@ -33,6 +33,8 @@ export function SettingsPanel() {
 		modelParams,
 		setModelParams: onModelParamsChange,
 		apiKeyId,
+		virtualKeySecret,
+		setVirtualKeySecret,
 		setApiKeyId,
 		variables,
 		setVariables,
@@ -124,9 +126,9 @@ export function SettingsPanel() {
 	const [selectedVirtualKey, setSelectedVirtualKey] = useState<VirtualKey | null>(null);
 	useEffect(() => {
 		setSelectedVirtualKey((prev) => {
-			const match = providerVirtualKeys.find((vk) => vk.value === apiKeyId);
+			const match = providerVirtualKeys.find((vk) => `virtual-key:${vk.id}` === apiKeyId);
 			if (match) return match;
-			return prev?.value === apiKeyId ? prev : null;
+			return prev && `virtual-key:${prev.id}` === apiKeyId ? prev : null;
 		});
 	}, [apiKeyId, providerVirtualKeys]);
 
@@ -237,7 +239,7 @@ export function SettingsPanel() {
 									/>
 								</div>
 
-								{!!provider && (enforceVirtualKeys ? hasVirtualKeysForProvider : true) && (
+								{!!provider && true && (
 									<ApiKeySelectorView
 										providerKeys={providerKeys}
 										virtualKeys={providerVirtualKeys}
@@ -250,6 +252,21 @@ export function SettingsPanel() {
 									/>
 								)}
 
+								<div className="flex flex-col gap-2">
+									<Label htmlFor="playground-virtual-key-secret">Virtual key secret</Label>
+									<Input
+										id="playground-virtual-key-secret"
+										type="password"
+										autoComplete="off"
+										value={virtualKeySecret}
+										onChange={(event) => setVirtualKeySecret(event.target.value)}
+										data-testid="playground-virtual-key-secret"
+										placeholder="Enter your key to authenticate requests"
+									/>
+									<p className="text-muted-foreground text-xs">
+										Stored keys provide access filters only. Enter a key you possess to run requests. This secret is not saved with prompts.
+									</p>
+								</div>
 								{Object.keys(variables).length > 0 && (
 									<>
 										<Separator />

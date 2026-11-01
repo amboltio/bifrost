@@ -365,7 +365,7 @@
           ],
           "minimum": 0,
           "maximum": 2592000000000000,
-          "description": "Cooldown after virtual key rotation: grace period during which the previous key value still authenticates. Accepts a Go duration string (e.g. \"5m\", \"1h\"); integer values are nanoseconds (Go duration JSON encoding), so prefer strings. 0 or an empty string disables the grace period (the old value stops working immediately). Maximum 30 days (2592000000000000 ns); string durations are bounds-checked at runtime.",
+          "description": "Grace period for scheduled virtual key rotations during which the previous key still authenticates. Manual management rotations always revoke the previous value immediately. Accepts a Go duration string (e.g. \"5m\", \"1h\"); integer values are nanoseconds (Go duration JSON encoding), so prefer strings. 0 or an empty string disables the scheduled grace period. Maximum 30 days (2592000000000000 ns); string durations are bounds-checked at runtime.",
           "default": 0
         },
         "mcp_agent_depth": {

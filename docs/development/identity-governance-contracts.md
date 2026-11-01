@@ -9,6 +9,50 @@ runtime behavior is available. The dashboard reads
 
 ## Authentication configuration
 
+### Password management and virtual-key secrecy
+
+- `POST /api/session/change-password` accepts `current_password` and
+  `new_password` for the authenticated canonical account. It requires an active
+  local credential and local login to be enabled. A wrong current password is
+  a `400`; successful replacement revokes all of the user's sessions and clears
+  the session cookie, so the user signs in again.
+- `POST /api/governance/users/{id}/password` accepts `new_password` and
+  `confirm_password`. It requires `users.reset_password`; delegated managers
+  cannot reset super-admins. Super-admins may reset other super-admins.
+  Replacement, auth-version change, session/recovery-token revocation, audit and
+  outbox commit together. A disabled account stays disabled. Accounts without
+  an active local credential return `409`; no local login is created for an
+  OIDC-only account. The existing `/reset-password` endpoint still issues a
+  recovery token and retains its prior contract.
+- `GET /api/session/current-user` includes `has_local_password`,
+  `is_super_admin` and `can_reset_password` for account controls. These controls
+  do not depend on access to the privileged `/api/config` endpoint.
+- Management virtual-key DTOs now return an empty `value` and a separate
+  `value_prefix` of at most ten characters. A short secret is never disclosed in
+  full. This applies to nested entities, configuration exports and credential
+  headers in log previews. Exports contain settings, not reusable credentials.
+- Creation and single rotation return `issued_secret` once; bulk rotation
+  returns `issued_secrets` entries with `id`, `name` and `secret`. Issuance
+  responses use `Cache-Control: no-store`. Clients must save the secret at that
+  moment; subsequent reads and updates cannot retrieve it. The dashboard keeps
+  these values only in a transient, initially hidden dialog and immediately
+  clears mutation results from RTK Query state.
+- Manual rotation keeps the same logical key, grants, settings and usage while
+  immediately invalidating the retired credential, regardless of the scheduled
+  rotation grace setting. Persistence uses a credential-only compare-and-swap;
+  installation rejects older database snapshots. Vault-backed rotations use
+  separate paths per issuance so a rollback cannot overwrite the live secret.
+  Failed-issuance and retired-owned-reference cleanup is best effort, bounded to
+  five seconds and logged on failure. External Vault references are not removed.
+- Playground selectors use key IDs for filtering. Requests require a key the
+  caller explicitly supplies; generated MCP snippets use a placeholder. The
+  server does not exchange a selected key ID for a secret on the caller's behalf.
+
+Release/promotional cards and product-news fetching are removed from the
+dashboard. Operational warnings, setup/restart messages and job progress remain.
+
+### Configuration format
+
 `governance.auth_config` is the canonical configuration location. The historic
 top-level `auth_config` alias remains accepted while existing deployments move;
 when both are present they must be equivalent after defaults are applied.

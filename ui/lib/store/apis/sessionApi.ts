@@ -50,6 +50,9 @@ export interface LogoutResponse {
 }
 
 export interface CurrentUserResponse {
+	is_super_admin: boolean;
+	has_local_password: boolean;
+	can_reset_password: boolean;
 	id: string;
 	email?: string;
 	display_name: string;
@@ -59,6 +62,12 @@ export interface CurrentUserResponse {
 export const sessionApi = baseApi.injectEndpoints({
 	overrideExisting: false,
 	endpoints: (builder) => ({
+		changeOwnPassword: builder.mutation<void, { current_password: string; new_password: string }>({
+			query: (body) => ({ url: "/session/change-password", method: "POST", body }),
+		}),
+		setManagedPassword: builder.mutation<void, { userId: string; new_password: string; confirm_password: string }>({
+			query: ({ userId, ...body }) => ({ url: `/governance/users/${encodeURIComponent(userId)}/password`, method: "POST", body }),
+		}),
 		// Check if auth is enabled
 		isAuthEnabled: builder.query<IsAuthEnabledResponse, void>({
 			query: () => ({
@@ -131,4 +140,11 @@ export const sessionApi = baseApi.injectEndpoints({
 	}),
 });
 
-export const { useIsAuthEnabledQuery, useGetCurrentUserQuery, useLoginMutation, useLogoutMutation } = sessionApi;
+export const {
+	useChangeOwnPasswordMutation,
+	useSetManagedPasswordMutation,
+	useIsAuthEnabledQuery,
+	useGetCurrentUserQuery,
+	useLoginMutation,
+	useLogoutMutation,
+} = sessionApi;

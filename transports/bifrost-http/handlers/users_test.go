@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/authorization"
 	"github.com/maximhq/bifrost/framework/configstore"
@@ -27,6 +28,55 @@ type userManagementHandlerStoreStub struct {
 	recoveryTokens []*tables.TableRecoveryToken
 	revokedUsers   []string
 	auditActions   []string
+	passwordHash   string
+}
+
+func (s *userManagementHandlerStoreStub) ResetManagedPasswordAudited(_ context.Context, userID, hash string, _ *string, _ time.Time, audit *tables.TableAuditEvent, _ *tables.TableOutboxEvent) error {
+	s.passwordHash = hash
+	s.auditActions = append(s.auditActions, audit.Action)
+	s.revokedUsers = append(s.revokedUsers, userID)
+	return nil
+}
+
+func TestUsersHandlerSetsManagedPassword(t *testing.T) {
+	for _, tc := range []struct {
+		name, actor, targetRole, body, origin string
+		status                                int
+	}{
+		{name: "super admin resets another super admin", actor: "admin", targetRole: tables.RoleIDSuperAdmin, body: `{"new_password":"replacement password","confirm_password":"replacement password"}`, status: fasthttp.StatusNoContent},
+		{name: "manager cannot reset super admin", actor: "manager", targetRole: tables.RoleIDSuperAdmin, body: `{"new_password":"replacement password","confirm_password":"replacement password"}`, status: fasthttp.StatusForbidden},
+		{name: "password policy", actor: "admin", body: `{"new_password":"short","confirm_password":"short"}`, status: fasthttp.StatusBadRequest},
+		{name: "confirmation required", actor: "admin", body: `{"new_password":"replacement password","confirm_password":"different password"}`, status: fasthttp.StatusBadRequest},
+		{name: "origin rejected", actor: "admin", origin: "https://evil.test", body: `{"new_password":"replacement password","confirm_password":"replacement password"}`, status: fasthttp.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newUserManagementHandlerStoreStub()
+			store.users["target"] = &tables.TableUser{ID: "target", Status: tables.UserStatusDisabled}
+			if tc.targetRole != "" {
+				store.assignments["target"] = []string{tc.targetRole}
+			}
+			r := router.New()
+			NewUsersHandler(store).RegisterRoutes(r)
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.SetRequestURI("http://localhost/api/governance/users/target/password")
+			ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+			if tc.origin != "" {
+				ctx.Request.Header.Set("Origin", tc.origin)
+			}
+			ctx.Request.SetBodyString(tc.body)
+			ctx.SetUserValue(schemas.BifrostContextKeyUserID, tc.actor)
+			r.Handler(ctx)
+			require.Equal(t, tc.status, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+			assert.NotContains(t, string(ctx.Response.Body()), "replacement password")
+			if tc.status == fasthttp.StatusNoContent {
+				assert.Contains(t, store.passwordHash, "$argon2id$")
+				assert.Equal(t, []string{"target"}, store.revokedUsers)
+				assert.Equal(t, []string{"identity.user.password_reset"}, store.auditActions)
+			} else {
+				assert.Empty(t, store.passwordHash)
+			}
+		})
+	}
 }
 
 var _ userManagementHandlerStore = (*userManagementHandlerStoreStub)(nil)

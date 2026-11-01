@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -38,6 +40,38 @@ func newRotationTestStore(t *testing.T) *configstore.RDBConfigStore {
 	rdb, ok := store.(*configstore.RDBConfigStore)
 	require.True(t, ok, "sqlite config store is the RDB implementation")
 	return rdb
+}
+
+func TestImmediateRotationCredentialCASPreservesConcurrentSettings(t *testing.T) {
+	store := newRotationTestStore(t)
+	ctx := context.Background()
+	active := true
+	require.NoError(t, store.CreateVirtualKey(ctx, &configstoreTables.TableVirtualKey{ID: "cas-key", Name: "Original", Description: "Original settings", IsActive: &active, Value: *schemas.NewSecretVar("sk-bf-old-cas-credential")}))
+	stale, err := store.GetVirtualKey(ctx, "cas-key")
+	require.NoError(t, err)
+	expected := stale.ValueHash
+	current, err := store.GetVirtualKey(ctx, "cas-key")
+	require.NoError(t, err)
+	current.Name = "Concurrent rename"
+	current.Description = "Concurrent description"
+	require.NoError(t, store.UpdateVirtualKey(ctx, current))
+	stale.Value = *schemas.NewSecretVar("sk-bf-new-cas-credential")
+	now := time.Now().UTC()
+	stale.RotatedAt = &now
+	stale.ClearPreviousValue()
+	require.NoError(t, store.ExecuteTransaction(ctx, func(tx *gorm.DB) error { return store.UpdateVirtualKeyCredential(ctx, stale, expected, tx) }))
+	rotated, err := store.GetVirtualKey(ctx, "cas-key")
+	require.NoError(t, err)
+	assert.Equal(t, "Concurrent rename", rotated.Name)
+	assert.Equal(t, "Concurrent description", rotated.Description)
+	assert.Equal(t, "sk-bf-new-cas-credential", rotated.Value.GetValue())
+	_, err = store.GetVirtualKeyQuotaByValue(ctx, "sk-bf-old-cas-credential")
+	assert.ErrorIs(t, err, configstore.ErrNotFound)
+	stale.Value = *schemas.NewSecretVar("sk-bf-losing-cas-credential")
+	require.ErrorIs(t, store.ExecuteTransaction(ctx, func(tx *gorm.DB) error { return store.UpdateVirtualKeyCredential(ctx, stale, expected, tx) }), configstore.ErrNotFound)
+	rotated, err = store.GetVirtualKey(ctx, "cas-key")
+	require.NoError(t, err)
+	assert.Equal(t, "sk-bf-new-cas-credential", rotated.Value.GetValue())
 }
 
 func seedRotationRefreshToken(t *testing.T, store *configstore.RDBConfigStore, id, bfMode, bfSub string) {
@@ -168,4 +202,160 @@ func TestRotateVirtualKeyRollsBackGrantRevocationWhenKeyUpdateFails(t *testing.T
 	stored, err := rdb.GetVirtualKey(ctx, "vk-rotated")
 	require.NoError(t, err)
 	assert.Equal(t, "sk-bf-vk-rotated", stored.Value.GetValue())
+}
+
+// rotationTestVault models the external side effect that SQL rollback cannot undo.
+// Every read resolves the actual stored reference, so a hash/ref mismatch is visible.
+type rotationTestVault struct {
+	values  map[string]string
+	writes  []string
+	removed []string
+}
+
+func newRotationTestVault(t *testing.T) *rotationTestVault {
+	t.Helper()
+	vault := &rotationTestVault{values: make(map[string]string)}
+	oldStore, oldResolve, oldRemove := schemas.VaultStoreHook, schemas.VaultResolveHook, schemas.VaultRemoveHook
+	schemas.VaultStoreHook = func(_ context.Context, path string, value *string) error {
+		vault.values[path] = *value
+		vault.writes = append(vault.writes, path)
+		*value = "vault." + path
+		return nil
+	}
+	schemas.VaultResolveHook = func(_ context.Context, value *string) error {
+		path := strings.TrimPrefix(*value, "vault.")
+		secret, exists := vault.values[path]
+		if !exists {
+			return errors.New("test vault reference not found")
+		}
+		*value = secret
+		return nil
+	}
+	schemas.VaultRemoveHook = func(_ context.Context, path string) error {
+		delete(vault.values, path)
+		vault.removed = append(vault.removed, path)
+		return nil
+	}
+	t.Cleanup(func() {
+		schemas.VaultStoreHook, schemas.VaultResolveHook, schemas.VaultRemoveHook = oldStore, oldResolve, oldRemove
+	})
+	return vault
+}
+
+func seedVaultRotationKey(t *testing.T, store *configstore.RDBConfigStore, id string, previous bool) *configstoreTables.TableVirtualKey {
+	t.Helper()
+	key := &configstoreTables.TableVirtualKey{
+		ID: id, Name: id, IsActive: schemas.Ptr(true),
+		Value: *schemas.NewSecretVar("sk-bf-original-vault-credential"),
+	}
+	if previous {
+		key.PreviousValue = *schemas.NewSecretVar("sk-bf-older-vault-credential")
+		key.PreviousValueExpiresAt = schemas.Ptr(time.Now().Add(time.Hour))
+	}
+	require.NoError(t, store.CreateVirtualKey(context.Background(), key))
+	loaded, err := store.GetVirtualKey(context.Background(), id)
+	require.NoError(t, err)
+	require.True(t, loaded.Value.IsFromVault())
+	require.Equal(t, "sk-bf-original-vault-credential", loaded.Value.GetValue())
+	return loaded
+}
+
+func TestImmediateVaultRotationSQLFailurePreservesOriginalSecret(t *testing.T) {
+	vault := newRotationTestVault(t)
+	store := newRotationTestStore(t)
+	ctx := context.Background()
+	original := seedVaultRotationKey(t, store, "vault-rollback", false)
+	originalPath := original.Value.GetRef()
+	initialWrites := len(vault.writes)
+	seedRotationRefreshToken(t, store, "vault-rollback-grant", string(schemas.MCPAuthModeVK), original.ID)
+
+	writeFailure := errors.New("injected failure after credential SQL update")
+	wroteCredential := false
+	require.NoError(t, store.DB().Callback().Update().After("gorm:update").Register("test:vault_rotation_sql_failure", func(tx *gorm.DB) {
+		if tx.Statement.Table == original.TableName() && tx.Error == nil && tx.RowsAffected == 1 {
+			wroteCredential = true
+			tx.AddError(writeFailure)
+		}
+	}))
+	t.Cleanup(func() { store.DB().Callback().Update().Remove("test:vault_rotation_sql_failure") })
+
+	_, err := NewVirtualKeyRotator(store, rotationTestGovernanceManager{store: store}).RotateVirtualKeyImmediately(ctx, original.ID)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, writeFailure.Error())
+	require.True(t, wroteCredential, "failure must occur after SQL updated the row, not before its Vault hook")
+	assert.Equal(t, original.Value.GetValue(), vault.values[originalPath], "rollback must not overwrite the original external secret")
+	require.Greater(t, len(vault.writes), initialWrites)
+	for _, path := range vault.writes[initialWrites:] {
+		assert.NotEqual(t, originalPath, path)
+		assert.Contains(t, path, "/rotations/")
+		assert.NotContains(t, vault.values, path, "failed issuance must not leave an allocated secret")
+		assert.Contains(t, vault.removed, path)
+	}
+	assert.NotContains(t, vault.removed, originalPath)
+	stored, err := store.GetVirtualKey(ctx, original.ID)
+	require.NoError(t, err)
+	assert.Equal(t, original.Value.GetRawRef(), stored.Value.GetRawRef())
+	assert.Equal(t, original.ValueHash, stored.ValueHash)
+	assert.Equal(t, original.Value.GetValue(), stored.Value.GetValue())
+	_, err = store.GetOAuth2RefreshTokenByHash(ctx, "hash-vault-rollback-grant")
+	assert.NoError(t, err, "grant revocation must roll back with the credential")
+}
+
+func TestImmediateVaultRotationPersistsMatchingHashAndRemovesRetiredRefs(t *testing.T) {
+	vault := newRotationTestVault(t)
+	store := newRotationTestStore(t)
+	ctx := context.Background()
+	original := seedVaultRotationKey(t, store, "vault-success", true)
+	oldPaths := []string{original.Value.GetRef(), original.PreviousValue.GetRef()}
+	for _, path := range oldPaths {
+		require.Contains(t, vault.values, path)
+	}
+
+	rotated, err := NewVirtualKeyRotator(store, rotationTestGovernanceManager{store: store}).RotateVirtualKeyImmediately(ctx, original.ID)
+	require.NoError(t, err)
+	require.True(t, rotated.Value.IsFromVault())
+	assert.NotEqual(t, original.Value.GetRawRef(), rotated.Value.GetRawRef())
+	assert.Contains(t, rotated.Value.GetRef(), "/rotations/")
+	assert.NotEqual(t, original.Value.GetValue(), rotated.Value.GetValue())
+	assert.Equal(t, rotated.Value.GetValue(), vault.values[rotated.Value.GetRef()])
+	assert.Equal(t, encrypt.HashSHA256(rotated.Value.GetValue()), rotated.ValueHash, "hash must cover the resolved secret, not its Vault reference")
+	assert.False(t, rotated.PreviousValue.IsSet())
+	for _, path := range oldPaths {
+		assert.NotContains(t, vault.values, path)
+		assert.Contains(t, vault.removed, path)
+	}
+	assert.NotContains(t, vault.removed, rotated.Value.GetRef())
+	_, err = store.GetVirtualKeyQuotaByValue(ctx, original.Value.GetValue())
+	assert.ErrorIs(t, err, configstore.ErrNotFound)
+	authenticated, err := store.GetVirtualKeyQuotaByValue(ctx, rotated.Value.GetValue())
+	require.NoError(t, err)
+	assert.Equal(t, original.ID, authenticated.ID)
+}
+
+type failedVaultRotationReload struct{ rotationTestGovernanceManager }
+
+func (failedVaultRotationReload) ReloadVirtualKey(context.Context, string) (*configstoreTables.TableVirtualKey, error) {
+	return nil, errors.New("injected in-memory reload failure")
+}
+
+func TestImmediateVaultRotationRetainsCommittedSecretOnReloadFailure(t *testing.T) {
+	vault := newRotationTestVault(t)
+	store := newRotationTestStore(t)
+	ctx := context.Background()
+	original := seedVaultRotationKey(t, store, "vault-reload-failure", false)
+	manager := failedVaultRotationReload{rotationTestGovernanceManager{store: store}}
+
+	_, err := NewVirtualKeyRotator(store, manager).RotateVirtualKeyImmediately(ctx, original.ID)
+	require.ErrorContains(t, err, "failed to reload in-memory state")
+	stored, err := store.GetVirtualKey(ctx, original.ID)
+	require.NoError(t, err)
+	require.True(t, stored.Value.IsFromVault())
+	assert.NotEqual(t, original.Value.GetRawRef(), stored.Value.GetRawRef())
+	assert.NotEqual(t, original.Value.GetValue(), stored.Value.GetValue())
+	assert.NotEmpty(t, stored.Value.GetValue(), "committed reference must still resolve after reload failure")
+	assert.Equal(t, stored.Value.GetValue(), vault.values[stored.Value.GetRef()])
+	assert.Equal(t, encrypt.HashSHA256(stored.Value.GetValue()), stored.ValueHash)
+	assert.NotContains(t, vault.removed, stored.Value.GetRef(), "reload failure must not run rollback cleanup after commit")
+	_, err = store.GetVirtualKeyQuotaByValue(ctx, stored.Value.GetValue())
+	assert.NoError(t, err, "a later successful reload must be able to recover the committed credential")
 }
