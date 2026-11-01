@@ -125,7 +125,7 @@ export function buildMCPHeaders({
 	if (authMethod === "idp_token") return { Authorization: `Bearer ${IDP_TOKEN_PLACEHOLDER}` };
 
 	if (!virtualKey) return {};
-	const headers: Record<string, string> = { "x-bf-vk": virtualKey.value };
+	const headers: Record<string, string> = { "x-bf-vk": "<YOUR_VIRTUAL_KEY>" };
 	const includeClients = getIncludeClients(selectedServers);
 	if (includeClients) headers["x-bf-mcp-include-clients"] = includeClients;
 	return headers;

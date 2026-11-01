@@ -4,14 +4,17 @@ import type { VirtualKeysManagementPage } from './pages/virtualKeysManagement.pa
 import { createVirtualKeyData } from './virtual-keys.data'
 
 type VirtualKeyApiResponse = {
+  issued_secret: string
   virtual_key: {
     id: string
     name: string
     value: string
+    value_prefix: string
   }
 }
 
 type BulkRotateVirtualKeysApiResponse = {
+  issued_secrets: Array<{ id: string; name: string; secret: string }>
   virtual_keys: Array<{
     id: string
     name: string
@@ -147,15 +150,14 @@ test.describe('Virtual Key Management', () => {
     await virtualKeysManagementPage.closeSheet()
   })
 
-  test('should copy virtual key value', async ({ virtualKeysManagementPage }) => {
+  test('should never offer copying a stored virtual key value', async ({ virtualKeysManagementPage }) => {
     const vkName = `Copy Value VK ${Date.now()}`
     const vkData = createVirtualKeyData({ name: vkName })
 
     managementVKs.push(vkName)
     await virtualKeysManagementPage.createVirtualKey(vkData)
 
-    // Copy the key value - method waits for success toast
-    await virtualKeysManagementPage.copyVirtualKeyValue(vkName)
+    await expect(virtualKeysManagementPage.page.getByTestId(`vk-copy-btn-${vkName}`)).toHaveCount(0)
 
     // Verify copy succeeded: row still exists and key is intact
     const vkExists = await virtualKeysManagementPage.virtualKeyExists(vkName)
@@ -282,14 +284,17 @@ test.describe('Virtual Key Management', () => {
       })) as VirtualKeyApiResponse
 
       managementVKs.push(vkName)
-      const oldValue = createResp.virtual_key.value
+      const oldValue = createResp.issued_secret
 
       const rotateResp = (await virtualKeysApi.rotate(request, createResp.virtual_key.id)) as VirtualKeyApiResponse
-      expect(rotateResp.virtual_key.value).toMatch(/^sk-bf-/)
-      expect(rotateResp.virtual_key.value).not.toBe(oldValue)
+      expect(rotateResp.virtual_key.value).toBe('')
+      expect(rotateResp.issued_secret).toMatch(/^sk-bf-/)
+      expect(rotateResp.issued_secret).not.toBe(oldValue)
 
       const getResp = (await virtualKeysApi.get(request, createResp.virtual_key.id)) as VirtualKeyApiResponse
-      expect(getResp.virtual_key.value).toBe(rotateResp.virtual_key.value)
+      expect(getResp.virtual_key.value).toBe('')
+      expect(getResp.virtual_key.value_prefix).toBe(rotateResp.issued_secret.slice(0, 10))
+      expect(getResp.issued_secret).toBeUndefined()
     })
 
     test('should bulk rotate valid API IDs and report missing IDs', async ({ request }) => {
@@ -321,9 +326,10 @@ test.describe('Virtual Key Management', () => {
       ].sort())
       expect(bulkResp.errors?.['missing-vk-id']).toBe('virtual key not found')
 
-      const rotatedByID = new Map(bulkResp.virtual_keys.map((vk) => [vk.id, vk.value]))
-      expect(rotatedByID.get(first.virtual_key.id)).not.toBe(first.virtual_key.value)
-      expect(rotatedByID.get(second.virtual_key.id)).not.toBe(second.virtual_key.value)
+      const rotatedByID = new Map(bulkResp.issued_secrets.map((vk) => [vk.id, vk.secret]))
+      expect(rotatedByID.get(first.virtual_key.id)).not.toBe(first.issued_secret)
+      expect(rotatedByID.get(second.virtual_key.id)).not.toBe(second.issued_secret)
+      expect(bulkResp.virtual_keys.every((vk) => vk.value === '')).toBe(true)
     })
   })
 })

@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/bytedance/sonic"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,111 @@ import (
 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
+
+func TestManagementResponsesNeverExposeStoredVirtualKeys(t *testing.T) {
+	for _, status := range []int{200, 201} {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.SetRequestURI("/api/governance/teams/example")
+		payload := map[string]any{"team": map[string]any{"virtual_keys": []any{
+			map[string]any{"id": "vk", "value": "bfvk-123456789-secret", "previous_value": "retired-secret"},
+			map[string]any{"id": "short", "value": map[string]any{"value": "abc", "env_var": "PRIVATE_KEY"}},
+		}}, "issued_secret": "new-issuance-only", "headers": map[string]any{"X-Bf-Vk": "header-secret"}}
+		SendJSONWithStatus(ctx, payload, status)
+		body := string(ctx.Response.Body())
+		for _, secret := range []string{"bfvk-123456789-secret", "retired-secret", "PRIVATE_KEY", "header-secret", `"abc"`} {
+			if strings.Contains(body, secret) {
+				t.Fatalf("stored credential leaked: %s", body)
+			}
+		}
+		// Use a map to check the actual snake-case DTO fields.
+		var decoded map[string]any
+		if err := json.Unmarshal(ctx.Response.Body(), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		keys := decoded["team"].(map[string]any)["virtual_keys"].([]any)
+		if keys[0].(map[string]any)["value"] != "" || keys[0].(map[string]any)["value_prefix"] != "bfvk-12345" {
+			t.Fatalf("wrong prefix-only DTO: %s", body)
+		}
+		if payload["team"].(map[string]any)["virtual_keys"].([]any)[0].(map[string]any)["value"] != "bfvk-123456789-secret" {
+			t.Fatal("response redaction mutated source")
+		}
+		if decoded["issued_secret"] != "new-issuance-only" {
+			t.Fatal("explicit issuance missing")
+		}
+	}
+}
+
+func TestManagementCredentialRedactionPreservesIntegerPrecisionAndInference(t *testing.T) {
+	body := []byte(`{"governance":{"virtual_keys":[{"value":"credential-secret","budget":9007199254740993}]}}`)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/chat/completions")
+	got, err := redactManagementVirtualKeys(ctx, body)
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("inference response changed: %s %v", got, err)
+	}
+	ctx.Request.SetRequestURI("/api/config")
+	got, err = redactManagementVirtualKeys(ctx, body)
+	if err != nil || strings.Contains(string(got), "credential-secret") || !strings.Contains(string(got), "9007199254740993") {
+		t.Fatalf("unsafe config export: %s %v", got, err)
+	}
+}
+
+func TestManagementLogPreviewsCannotRetrieveVirtualKeyCredentials(t *testing.T) {
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/logs")
+	SendJSON(ctx, map[string]any{"logs": []any{
+		map[string]any{"virtual_key_id": "safe-id", "raw_request": `{"headers":{"authorization":"Bearer sk-bf-stored-secret","x-bf-vk":"sk-bf-stored-secret"},"body":{"model":"example"}}`},
+		map[string]any{"raw_request": `{"headers":{"x-bf-vk":"sk-bf-truncated-secret`},
+	}})
+	body := string(ctx.Response.Body())
+	if strings.Contains(body, "sk-bf-stored-secret") || strings.Contains(body, "sk-bf-truncated-secret") || !strings.Contains(body, "example") {
+		t.Fatalf("unsafe log preview: %s", body)
+	}
+}
+
+func BenchmarkManagementCredentialRedaction(b *testing.B) {
+	body := []byte(`{"virtual_keys":[{"id":"key","value":"sk-bf-credential-secret","name":"Production"}]}`)
+	for _, path := range []string{"/v1/chat/completions", "/api/governance/virtual-keys"} {
+		b.Run(path, func(b *testing.B) {
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.SetRequestURI(path)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := redactManagementVirtualKeys(ctx, body); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkSendJSONCredentialBoundary(b *testing.B) {
+	legacy := func(ctx *fasthttp.RequestCtx, data interface{}) {
+		ctx.SetContentType("application/json")
+		body, err := sonic.ConfigStd.Marshal(data)
+		if err != nil {
+			b.Fatal(err)
+		}
+		body = lib.StripExtraFieldsIfInHeaders(ctx, body)
+		ctx.SetBody(append(body, '\n'))
+	}
+	for _, item := range []struct {
+		name string
+		send func(*fasthttp.RequestCtx, interface{})
+	}{{"before", legacy}, {"after", SendJSON}} {
+		b.Run(item.name, func(b *testing.B) {
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.SetRequestURI("/v1/models")
+			data := map[string]any{"model": "test", "object": "list"}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				item.send(ctx, data)
+			}
+		})
+	}
+}
 
 // TestSendJSON_StandardBytes pins the exact json.NewEncoder byte contract that the
 // switch to sonic must not regress: HTML escaping, sorted map keys (deterministic

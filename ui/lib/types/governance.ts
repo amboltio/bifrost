@@ -100,7 +100,8 @@ export interface RedactedDBKey {
 export interface VirtualKey {
 	id: string;
 	name: string;
-	value: string; // The actual key value
+	value: string; // Always empty in management responses.
+	value_prefix?: string; // Display only, never an authentication credential.
 	description?: string;
 	provider_configs?: VirtualKeyProviderConfig[];
 	mcp_configs?: VirtualKeyMCPConfig[];
@@ -293,7 +294,14 @@ export interface BulkRotateVirtualKeysRequest {
 	ids: string[];
 }
 
+export interface IssuedVirtualKeySecret {
+	id: string;
+	name: string;
+	secret: string;
+}
+
 export interface BulkRotateVirtualKeysResponse {
+	issued_secrets: IssuedVirtualKeySecret[];
 	message: string;
 	virtual_keys: VirtualKey[];
 	errors?: Record<string, string>;

@@ -1,4 +1,5 @@
 import FullPageLoader from "@/components/fullPageLoader";
+import { PasswordDialog } from "@/components/passwordDialog";
 import EffectiveAccess from "@/components/governance/effectiveAccess";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,6 +9,7 @@ import {
 	useDisableManagedUserMutation,
 	useGetAccessProfilesQuery,
 	useGetManagedRolesQuery,
+	useGetCurrentUserQuery,
 	useGetManagedUsersQuery,
 	useGetUserAccessProfilesQuery,
 	useGetUserVirtualKeyAssignmentsQuery,
@@ -19,6 +21,8 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 export default function UsersView() {
+	const [resetUserId, setResetUserId] = useState<string | null>(null);
+	const { data: currentUser } = useGetCurrentUserQuery();
 	const { data, isLoading, error } = useGetManagedUsersQuery({ limit: 100 });
 	const { data: rolesData } = useGetManagedRolesQuery();
 	const [createUser, { isLoading: isCreating }] = useCreateManagedUserMutation();
@@ -116,6 +120,7 @@ export default function UsersView() {
 
 	return (
 		<div className="mx-auto w-full max-w-6xl space-y-6 p-6" data-testid="users-governance-view">
+			{resetUserId && <PasswordDialog userId={resetUserId} onClose={() => setResetUserId(null)} />}
 			<div className="flex items-center gap-2">
 				<UserRound className="text-primary h-5 w-5" />
 				<div>
@@ -131,6 +136,16 @@ export default function UsersView() {
 							{data.users.map((user) => (
 								<div key={user.id} className="flex items-start justify-between gap-4 p-4" data-testid={`user-row-${user.id}`}>
 									<div className="min-w-0">
+										{currentUser?.can_reset_password && (
+											<Button
+												variant="outline"
+												size="sm"
+												data-testid={`user-reset-password-${user.id}`}
+												onClick={() => setResetUserId(user.id)}
+											>
+												Reset password
+											</Button>
+										)}
 										<div className="text-sm font-medium">{user.display_name || user.email || "Unnamed user"}</div>
 										<div className="text-muted-foreground mt-1 text-sm">{user.email || "No email"}</div>
 										<div className="mt-2 flex flex-wrap gap-1">

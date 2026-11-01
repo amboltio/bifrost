@@ -93,6 +93,9 @@ import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 
+import { IssuedVirtualKeyDialog } from "@/components/issuedVirtualKeyDialog";
+import type { IssuedVirtualKeySecret } from "@/lib/types/governance";
+
 interface VirtualKeySheetProps {
 	virtualKey?: VirtualKey | null;
 	// When set, the new VK is created under this owner - a team, business unit or customer. The
@@ -400,6 +403,7 @@ function withoutKeyGovernance<T extends CreateVirtualKeyRequest | UpdateVirtualK
 }
 
 export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCancel }: VirtualKeySheetProps) {
+	const [issuedSecrets, setIssuedSecrets] = useState<IssuedVirtualKeySecret[]>([]);
 	const [isOpen, setIsOpen] = useState(true);
 	const navigate = useNavigate();
 	const isEditing = !!virtualKey;
@@ -480,9 +484,9 @@ export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCa
 	// RTK Query hooks. Skipped without the permission, which also keeps their error toasts quiet.
 	const { error: providersError } = useGetProvidersQuery(undefined, { skip: !hasProvidersAccess });
 	const { error: keysError } = useGetAllKeysQuery(undefined, { skip: !hasKeysAccess });
-	const [createVirtualKey, { isLoading: isCreating }] = useCreateVirtualKeyMutation();
+	const [createVirtualKey, { isLoading: isCreating, reset: resetCreation }] = useCreateVirtualKeyMutation();
 	const [updateVirtualKey, { isLoading: isUpdating }] = useUpdateVirtualKeyMutation();
-	const [rotateVirtualKey, { isLoading: isRotating }] = useRotateVirtualKeyMutation();
+	const [rotateVirtualKey, { isLoading: isRotating, reset: resetRotation }] = useRotateVirtualKeyMutation();
 	const [attachVirtualKeyUsers, { isLoading: isAttachingUser }] = useAttachVirtualKeyUsersMutation();
 	const [detachVirtualKeyUser, { isLoading: isDetachingUser }] = useDetachVirtualKeyUserMutation();
 	const [setBudgetOverride] = useSetVirtualKeyBudgetOverrideMutation();
@@ -1130,14 +1134,10 @@ export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCa
 		}
 		try {
 			const result = await rotateVirtualKey(virtualKey.id).unwrap();
-			const graceUntil = result.virtual_key?.previous_value_expires_at;
-			toast.success(
-				graceUntil
-					? `Virtual key rotated successfully. The previous key remains valid until ${new Date(graceUntil).toLocaleString()}.`
-					: "Virtual key rotated successfully",
-			);
+			resetRotation();
+			setIssuedSecrets([{ id: result.virtual_key.id, name: result.virtual_key.name, secret: result.issued_secret }]);
+			toast.success("Virtual key rotated. The previous key no longer works.");
 			setShowRotateWarning(false);
-			onSave();
 		} catch (error) {
 			toast.error(getErrorMessage(error));
 		}
@@ -1364,6 +1364,8 @@ export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCa
 				}
 
 				const created = await createVirtualKey(isGovernedByOwnerProfile ? withoutKeyGovernance(createData) : createData).unwrap();
+				resetCreation();
+				setIssuedSecrets([{ id: created.virtual_key.id, name: created.virtual_key.name, secret: created.issued_secret }]);
 				if (targetUserId) {
 					// The key exists at this point; surface the assignment failure separately so the
 					// user knows the key was created but is unassigned.
@@ -1376,7 +1378,6 @@ export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCa
 						toast.error("Virtual key created, but assigning it to the user failed", {
 							description: getErrorMessage(error),
 						});
-						onSave();
 						return;
 					}
 				}
@@ -1384,13 +1385,12 @@ export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCa
 					if (!isGovernedByOwnerProfile) await reconcileVmcpAssignments(created.virtual_key.id);
 				} catch (error) {
 					toast.error("Virtual key created, but assigning Virtual MCPs failed", { description: getErrorMessage(error) });
-					onSave();
 					return;
 				}
 				toast.success("Virtual key created successfully");
 			}
 
-			onSave();
+			if (virtualKey) onSave();
 		} catch (error: any) {
 			if (error?.status === 409) {
 				form.setError("name", { message: getErrorMessage(error) });
@@ -1420,6 +1420,17 @@ export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCa
 		setShowBudgetResetPrompt(false);
 		await submitVirtualKeyForm(data, resetBudgetUsage);
 	};
+
+	if (issuedSecrets.length > 0)
+		return (
+			<IssuedVirtualKeyDialog
+				secrets={issuedSecrets}
+				onClose={() => {
+					setIssuedSecrets([]);
+					onSave();
+				}}
+			/>
+		);
 
 	return (
 		<Sheet open={isOpen} onOpenChange={(open) => !open && handleClose()}>
@@ -2139,8 +2150,7 @@ export default function VirtualKeySheet({ virtualKey, defaultOwner, onSave, onCa
 									<AlertDialogDescription>
 										This will replace the secret value for &quot;
 										{virtualKey?.name}&quot;. The key ID, budgets, rate limits, provider permissions, MCP access, and assignments stay the
-										same. The previous key value stops working immediately unless a rotation cooldown is configured, in which case it
-										remains valid until the cooldown ends.
+										same. The previous key value stops working immediately.
 									</AlertDialogDescription>
 								</AlertDialogHeader>
 								<AlertDialogFooter>

@@ -336,7 +336,7 @@ func managementRoutePermission(method, path string) (authorization.Permission, b
 		return "", false
 	}
 	switch {
-	case parts[1] == "reset-password" && method == fasthttp.MethodPost:
+	case (parts[1] == "reset-password" || parts[1] == "password") && method == fasthttp.MethodPost:
 		return authorization.PermissionUsersResetPassword, true
 	case parts[1] == "revoke-sessions" && method == fasthttp.MethodPost:
 		return authorization.PermissionUsersRevokeSessions, true

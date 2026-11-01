@@ -2421,9 +2421,11 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 	h.hydrateVKGovernance(ctx, preloadedVk)
 
 	lib.RecordAuditChange(ctx, "virtual_key.created", "virtual_key", vk.ID, vk.Name, nil, auditVirtualKey(preloadedVk))
+	ctx.Response.Header.Set("Cache-Control", "no-store")
 	SendJSON(ctx, map[string]any{
-		"message":     "Virtual key created successfully",
-		"virtual_key": preloadedVk,
+		"message":       "Virtual key created successfully",
+		"issued_secret": preloadedVk.Value.GetValue(),
+		"virtual_key":   preloadedVk,
 	})
 }
 
@@ -3184,7 +3186,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 // rotateVirtualKeyByID rotates one virtual key through the shared
 // VirtualKeyRotator so the endpoints and background producers stay identical.
 func (h *GovernanceHandler) rotateVirtualKeyByID(ctx context.Context, vkID string) (*configstoreTables.TableVirtualKey, error) {
-	return NewVirtualKeyRotator(h.configStore, h.governanceManager).RotateVirtualKey(ctx, vkID)
+	return NewVirtualKeyRotator(h.configStore, h.governanceManager).RotateVirtualKeyImmediately(ctx, vkID)
 }
 
 // recordVirtualKeyRotated records a rotation without either key value.
@@ -3209,9 +3211,11 @@ func (h *GovernanceHandler) rotateVirtualKey(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	recordVirtualKeyRotated(ctx, preloadedVk)
+	ctx.Response.Header.Set("Cache-Control", "no-store")
 	SendJSON(ctx, map[string]interface{}{
-		"message":     "Virtual key rotated successfully",
-		"virtual_key": preloadedVk,
+		"message":       "Virtual key rotated successfully",
+		"issued_secret": preloadedVk.Value.GetValue(),
+		"virtual_key":   preloadedVk,
 	})
 }
 
@@ -3263,6 +3267,12 @@ func (h *GovernanceHandler) rotateVirtualKeys(ctx *fasthttp.RequestCtx) {
 		"message":      "Virtual keys rotated successfully",
 		"virtual_keys": rotated,
 	}
+	issued := make([]map[string]string, 0, len(rotated))
+	for _, vk := range rotated {
+		issued = append(issued, map[string]string{"id": vk.ID, "name": vk.Name, "secret": vk.Value.GetValue()})
+	}
+	response["issued_secrets"] = issued
+	ctx.Response.Header.Set("Cache-Control", "no-store")
 	if len(failures) > 0 {
 		response["errors"] = failures
 	}

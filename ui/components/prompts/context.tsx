@@ -60,6 +60,8 @@ interface PromptContextValue {
 	modelParams: ModelParams;
 	setModelParams: React.Dispatch<React.SetStateAction<ModelParams>>;
 	apiKeyId: string;
+	virtualKeySecret: string;
+	setVirtualKeySecret: React.Dispatch<React.SetStateAction<string>>;
 	setApiKeyId: React.Dispatch<React.SetStateAction<string>>;
 
 	// Jinja2 variables
@@ -172,6 +174,8 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 	const [model, setModel] = useState("");
 	const [modelParams, setModelParams] = useState<ModelParams>({ stream: true });
 	const [apiKeyId, setApiKeyId] = useState("__auto__");
+	const [virtualKeySecret, setVirtualKeySecret] = useState("");
+	useEffect(() => setVirtualKeySecret(""), [apiKeyId, selectedPromptId]);
 	const [isStreaming, setIsStreaming] = useState(false);
 	const activeRunRef = useRef<symbol | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
@@ -480,7 +484,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 			await executePrompt(
 				messages,
 				pendingMessage,
-				{ provider, model, modelParams, apiKeyId, variables, customHeaders },
+				{ provider, model, modelParams, apiKeyId, virtualKeySecret, variables, customHeaders },
 				{
 					onStreamingStart: (allMessages, placeholder) => {
 						if (!isActive()) return;
@@ -532,7 +536,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 				abortController.signal,
 			);
 		},
-		[messages, provider, model, modelParams, apiKeyId, variables, customHeaders],
+		[messages, provider, model, modelParams, apiKeyId, virtualKeySecret, variables, customHeaders],
 	);
 
 	const handleSubmitToolResult = useCallback(
@@ -562,7 +566,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 			await executePrompt(
 				newMessages,
 				undefined,
-				{ provider, model, modelParams, apiKeyId, variables, customHeaders },
+				{ provider, model, modelParams, apiKeyId, virtualKeySecret, variables, customHeaders },
 				{
 					onStreamingStart: (allMessages, placeholder) => {
 						if (!isActive()) return;
@@ -614,13 +618,13 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 				abortController.signal,
 			);
 		},
-		[messages, provider, model, modelParams, apiKeyId, variables, customHeaders],
+		[messages, provider, model, modelParams, apiKeyId, virtualKeySecret, variables, customHeaders],
 	);
 
 	const handleExecuteToolCall = useCallback(
 		async (afterIndex: number, toolCall: ToolCall) => {
 			try {
-				const content = await executeToolCall(toolCall, { apiKeyId, customHeaders });
+				const content = await executeToolCall(toolCall, { apiKeyId, virtualKeySecret, customHeaders });
 				await handleSubmitToolResult(afterIndex, toolCall.id, content);
 			} catch (err) {
 				if (err instanceof MCPAuthRequiredError) throw err;
@@ -629,7 +633,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 				});
 			}
 		},
-		[apiKeyId, customHeaders, handleSubmitToolResult],
+		[apiKeyId, virtualKeySecret, customHeaders, handleSubmitToolResult],
 	);
 
 	const handleSubmitAllToolResults = useCallback(
@@ -665,7 +669,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 			await executePrompt(
 				newMessages,
 				undefined,
-				{ provider, model, modelParams, apiKeyId, variables, customHeaders },
+				{ provider, model, modelParams, apiKeyId, virtualKeySecret, variables, customHeaders },
 				{
 					onStreamingStart: (allMessages, placeholder) => {
 						if (!isActive()) return;
@@ -717,7 +721,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 				abortController.signal,
 			);
 		},
-		[messages, provider, model, modelParams, apiKeyId, variables, customHeaders, handleSubmitToolResult],
+		[messages, provider, model, modelParams, apiKeyId, virtualKeySecret, variables, customHeaders, handleSubmitToolResult],
 	);
 
 	const handleExecuteAllToolCalls = useCallback(
@@ -730,7 +734,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 
 			const settled = await Promise.allSettled(
 				toolCalls.map(async (tc) => {
-					const content = await executeToolCall(tc, { apiKeyId, customHeaders });
+					const content = await executeToolCall(tc, { apiKeyId, virtualKeySecret, customHeaders });
 					return { toolCallId: tc.id, content };
 				}),
 			);
@@ -761,7 +765,7 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 
 			return successes.length > 0 ? successes : undefined;
 		},
-		[apiKeyId, customHeaders, handleExecuteToolCall, handleSubmitAllToolResults],
+		[apiKeyId, virtualKeySecret, customHeaders, handleExecuteToolCall, handleSubmitAllToolResults],
 	);
 
 	const handleStopStreaming = useCallback(() => {
@@ -773,9 +777,9 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 
 	const fetchToolResult = useCallback(
 		async (toolCall: ToolCall): Promise<string> => {
-			return executeToolCall(toolCall, { apiKeyId, customHeaders });
+			return executeToolCall(toolCall, { apiKeyId, virtualKeySecret, customHeaders });
 		},
-		[apiKeyId, customHeaders],
+		[apiKeyId, virtualKeySecret, customHeaders],
 	);
 
 	const value: PromptContextValue = {
@@ -804,6 +808,8 @@ export function PromptProvider({ children }: { children: ReactNode }) {
 		modelParams,
 		setModelParams,
 		apiKeyId,
+		virtualKeySecret,
+		setVirtualKeySecret,
 		setApiKeyId,
 		variables,
 		setVariables,

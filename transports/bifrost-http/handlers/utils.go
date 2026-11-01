@@ -3,6 +3,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -245,6 +246,13 @@ func SendJSON(ctx *fasthttp.RequestCtx, data interface{}) {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to encode response: %v", err))
 		return
 	}
+	if bytes.HasPrefix(ctx.Path(), []byte("/api/")) {
+		body, err = redactManagementVirtualKeys(ctx, body)
+		if err != nil {
+			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to encode response")
+			return
+		}
+	}
 	body = lib.StripExtraFieldsIfInHeaders(ctx, body)
 	ctx.SetBody(append(body, '\n'))
 }
@@ -258,6 +266,13 @@ func SendJSONWithStatus(ctx *fasthttp.RequestCtx, data interface{}, statusCode i
 		logger.Warn(fmt.Sprintf("Failed to encode JSON response: %v", err))
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to encode response: %v", err))
 		return
+	}
+	if bytes.HasPrefix(ctx.Path(), []byte("/api/")) {
+		body, err = redactManagementVirtualKeys(ctx, body)
+		if err != nil {
+			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to encode response")
+			return
+		}
 	}
 	body = lib.StripExtraFieldsIfInHeaders(ctx, body)
 	ctx.SetBody(append(body, '\n'))

@@ -3,6 +3,17 @@ import { MCP_MAX_PROTOCOL_VERSIONS } from "@/lib/constants/mcp";
 import { isRedacted } from "@/lib/utils/validation";
 import { z } from "zod";
 
+export const passwordReplacementSchema = z
+	.object({
+		current_password: z.string(),
+		new_password: z.string().min(12, "Use at least 12 characters").max(4096),
+		confirm_password: z.string(),
+	})
+	.refine((value) => value.new_password === value.confirm_password, {
+		message: "Passwords do not match",
+		path: ["confirm_password"],
+	});
+
 // Global error map - turns Zod's default messages into readable, human-friendly ones.
 // Individual schemas can still override by passing their own message.
 z.config({

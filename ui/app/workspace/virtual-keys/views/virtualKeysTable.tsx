@@ -1,3 +1,5 @@
+import { IssuedVirtualKeyDialog } from "@/components/issuedVirtualKeyDialog";
+import type { IssuedVirtualKeySecret } from "@/lib/types/governance";
 import PageTitle from "@/components/pageTitle";
 import { DisabledReasonMenuItem } from "@/components/ui/disabledReason";
 import { BudgetDisplay } from "@/components/budgetDisplay";
@@ -27,7 +29,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useCopyToClipboard } from "@/hooks/useCopyToClipboard";
 import { resetDurationLabels } from "@/lib/constants/governance";
 import { getUserPicker } from "@/lib/registries/userPicker";
 import { useVirtualKeyAccessAudit } from "@enterprise/lib/hooks/useVirtualKeyAccessAudit";
@@ -53,7 +54,6 @@ import {
 	Building2,
 	ChevronLeft,
 	ChevronRight,
-	Copy,
 	Download,
 	Edit,
 	Eye,
@@ -78,7 +78,7 @@ import { useVirtualKeyUsage } from "../hooks/useVirtualKeyUsage";
 import VirtualKeyDetailSheet from "./virtualKeyDetailsSheet";
 import { VirtualKeysEmptyState } from "./virtualKeysEmptyState";
 import VirtualKeySheet from "./virtualKeySheet";
-import { assignedToLabel, csvAssignedToCell, latestGraceDeadline } from "./virtualKeysTable.utils";
+import { assignedToLabel, csvAssignedToCell } from "./virtualKeysTable.utils";
 
 // Registers the enterprise user picker as a side effect; a no-op in OSS builds,
 // where the user filter stays hidden because no picker is registered.
@@ -89,7 +89,17 @@ const formatResetDuration = (duration: string) => resetDurationLabels[duration] 
 type ExportScope = "current_page" | "all";
 
 function virtualKeysToCSV(vks: VirtualKey[]): string {
-	const headers = ["Name", "Status", "Assigned To", "Assigned User Email", "Budget Limit", "Budget Spent", "Budget Reset", "Description", "Created At"];
+	const headers = [
+		"Name",
+		"Status",
+		"Assigned To",
+		"Assigned User Email",
+		"Budget Limit",
+		"Budget Spent",
+		"Budget Reset",
+		"Description",
+		"Created At",
+	];
 	const rows = vks.map((vk) => {
 		const isExhausted =
 			vk.budgets?.some((b) => b.current_usage >= getEffectiveBudgetLimit(b)) ||
@@ -105,7 +115,17 @@ function virtualKeysToCSV(vks: VirtualKey[]): string {
 		const budgetLimit = vk.budgets?.length ? vk.budgets.map((b) => formatCurrency(getEffectiveBudgetLimit(b))).join("; ") : "";
 		const budgetSpent = vk.budgets?.length ? vk.budgets.map((b) => formatCurrency(b.current_usage)).join("; ") : "";
 		const budgetReset = vk.budgets?.length ? vk.budgets.map((b) => formatResetDuration(b.reset_duration)).join("; ") : "";
-		return [vk.name, status, assignedTo, vk.assigned_user?.email ?? "", budgetLimit, budgetSpent, budgetReset, vk.description || "", vk.created_at];
+		return [
+			vk.name,
+			status,
+			assignedTo,
+			vk.assigned_user?.email ?? "",
+			budgetLimit,
+			budgetSpent,
+			budgetReset,
+			vk.description || "",
+			vk.created_at,
+		];
 	});
 	return [headers, ...rows].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
 }
@@ -474,6 +494,7 @@ export default function VirtualKeysTable({
 	const [exportMaxLimit, setExportMaxLimit] = useState("");
 	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 	const [showBulkRotateDialog, setShowBulkRotateDialog] = useState(false);
+	const [issuedSecrets, setIssuedSecrets] = useState<IssuedVirtualKeySecret[]>([]);
 	const [fetchVirtualKeys, { isFetching: isExporting }] = useLazyGetVirtualKeysQuery();
 
 	// Derive objects from props so they stay in sync with RTK cache updates
@@ -506,7 +527,7 @@ export default function VirtualKeysTable({
 
 	const [deleteVirtualKey, { isLoading: isDeleting }] = useDeleteVirtualKeyMutation();
 	const [updateVirtualKey] = useUpdateVirtualKeyMutation();
-	const [bulkRotateVirtualKeys, { isLoading: isBulkRotating }] = useBulkRotateVirtualKeysMutation();
+	const [bulkRotateVirtualKeys, { isLoading: isBulkRotating, reset: resetBulkRotation }] = useBulkRotateVirtualKeysMutation();
 
 	const visibleIds = useMemo(() => virtualKeys.map((vk) => vk.id), [virtualKeys]);
 	const selectedVisibleIds = useMemo(() => visibleIds.filter((id) => selectedIds.has(id)), [selectedIds, visibleIds]);
@@ -568,6 +589,8 @@ export default function VirtualKeysTable({
 
 		try {
 			const result = await bulkRotateVirtualKeys({ ids }).unwrap();
+			resetBulkRotation();
+			setIssuedSecrets(result.issued_secrets);
 			const rotatedIds = new Set(result.virtual_keys.map((vk) => vk.id));
 			setSelectedIds((prev) => {
 				const next = new Set(prev);
@@ -586,13 +609,9 @@ export default function VirtualKeysTable({
 			setShowBulkRotateDialog(false);
 
 			const failureCount = result.errors ? Object.keys(result.errors).length : 0;
-			const graceUntil = latestGraceDeadline(result.virtual_keys);
-			const graceNote = graceUntil ? ` Previous keys remain valid until ${new Date(graceUntil).toLocaleString()}.` : "";
-			if (failureCount > 0) {
-				toast.warning(`Rotated ${result.virtual_keys.length} virtual keys. ${failureCount} failed.${graceNote}`);
-			} else {
-				toast.success(`Rotated ${result.virtual_keys.length} virtual keys.${graceNote}`);
-			}
+			if (failureCount > 0)
+				toast.warning(`Rotated ${result.virtual_keys.length} virtual keys. ${failureCount} failed. Previous rotated keys no longer work.`);
+			else toast.success(`Rotated ${result.virtual_keys.length} virtual keys. Previous keys no longer work.`);
 		} catch (error) {
 			toast.error(getErrorMessage(error));
 		}
@@ -695,13 +714,6 @@ export default function VirtualKeysTable({
 		}
 		setRevealedKeys(newRevealed);
 	};
-
-	const maskKey = (key: string, revealed: boolean) => {
-		if (revealed) return key;
-		return key.substring(0, 8) + "•".repeat(Math.max(0, key.length - 8));
-	};
-
-	const { copy: copyToClipboard } = useCopyToClipboard();
 
 	const hasActiveFilters = debouncedSearch || customerFilter || teamFilter || userFilter || metadataFilterKey;
 
@@ -903,14 +915,16 @@ export default function VirtualKeysTable({
 				</DialogContent>
 			</Dialog>
 
+			{issuedSecrets.length > 0 && <IssuedVirtualKeyDialog secrets={issuedSecrets} onClose={() => setIssuedSecrets([])} />}
+
 			<AlertDialog open={showBulkRotateDialog} onOpenChange={setShowBulkRotateDialog}>
 				<AlertDialogContent>
 					<AlertDialogHeader>
 						<AlertDialogTitle>Rotate selected virtual keys?</AlertDialogTitle>
 						<AlertDialogDescription>
 							This will replace the secret value for {selectedCount} selected virtual {selectedCount === 1 ? "key" : "keys"}. IDs, budgets,
-							rate limits, provider permissions, MCP access, and assignments stay the same. Previous key values stop working immediately
-							unless a rotation cooldown is configured, in which case they remain valid until the cooldown ends.
+							rate limits, provider permissions, MCP access, and assignments stay the same. Previous key values stop working immediately and
+							the newly issued secrets are shown only once.
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
@@ -1135,7 +1149,7 @@ export default function VirtualKeysTable({
 											<TableCell onClick={(e) => e.stopPropagation()}>
 												<div className="flex items-center gap-2">
 													<code className="cursor-default py-1 font-mono text-sm" data-testid="vk-key-value">
-														{maskKey(vk.value, isRevealed)}
+														{isRevealed ? `${(vk.value_prefix ?? "").slice(0, 10)}…` : "••••••••••"}
 													</code>
 													<div className="flex items-center">
 														<Button
@@ -1145,18 +1159,6 @@ export default function VirtualKeysTable({
 															data-testid={`vk-visibility-btn-${vk.name}`}
 														>
 															{isRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-														</Button>
-														<Button
-															variant="ghost"
-															size="sm"
-															onClick={() => {
-																// Not awaited: the clipboard write must not wait on the beacon.
-																reportVkAccess(vk.id, "copy");
-																copyToClipboard(vk.value);
-															}}
-															data-testid={`vk-copy-btn-${vk.name}`}
-														>
-															<Copy className="h-4 w-4" />
 														</Button>
 													</div>
 												</div>

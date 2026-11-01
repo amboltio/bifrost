@@ -101,6 +101,7 @@ export class VirtualKeysManagementPage extends VirtualKeysPage {
     await confirmBtn.click();
 
     await this.waitForSuccessToast("Rotated");
+    await this.closeSheet();
     await this.goto();
   }
 }

@@ -126,6 +126,7 @@ func (h *UsersHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.B
 	r.PUT("/api/governance/users/{id}", lib.ChainMiddlewares(h.updateUser, middlewares...))
 	r.DELETE("/api/governance/users/{id}", lib.ChainMiddlewares(h.disableUser, middlewares...))
 	r.POST("/api/governance/users/{id}/reset-password", lib.ChainMiddlewares(h.resetPassword, middlewares...))
+	r.POST("/api/governance/users/{id}/password", lib.ChainMiddlewares(h.setPassword, middlewares...))
 	r.POST("/api/governance/users/{id}/revoke-sessions", lib.ChainMiddlewares(h.revokeSessions, middlewares...))
 	r.PUT("/api/governance/users/{id}/roles", lib.ChainMiddlewares(h.replaceRoles, middlewares...))
 }
@@ -593,6 +594,51 @@ func (h *UsersHandler) resetPassword(ctx *fasthttp.RequestCtx) {
 	// The plaintext token exists only in this response. The persistence layer
 	// stores its SHA-256 digest and never includes it in user DTOs or audit data.
 	SendJSONWithStatus(ctx, map[string]any{"token": rawToken, "expires_at": expiresAt}, fasthttp.StatusCreated)
+}
+
+// setPassword is the explicit direct-replacement contract. The existing
+// reset-password route continues to issue a one-time recovery token.
+func (h *UsersHandler) setPassword(ctx *fasthttp.RequestCtx) {
+	if !allowSessionStateChange(ctx) {
+		SendError(ctx, fasthttp.StatusForbidden, "Invalid request origin")
+		return
+	}
+	user, ok := h.requiredUser(ctx)
+	if !ok || !h.authorizeTargetUser(ctx, user.ID) {
+		return
+	}
+	store, ok := h.store.(configstore.ManagedPasswordStore)
+	if !ok {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "Password management is unavailable")
+		return
+	}
+	request := struct {
+		NewPassword     string `json:"new_password"`
+		ConfirmPassword string `json:"confirm_password"`
+	}{}
+	if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if request.NewPassword != request.ConfirmPassword {
+		SendError(ctx, fasthttp.StatusBadRequest, "Passwords do not match")
+		return
+	}
+	hash, err := h.passwords.Hash(request.NewPassword)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+	audit, outbox := h.userAudit(ctx, user.ID, "identity.user.password_reset", nil)
+	err = store.ResetManagedPasswordAudited(ctx, user.ID, hash, canonicalActorUserID(ctx), h.now().UTC(), audit, outbox)
+	if errors.Is(err, configstore.ErrLocalPasswordUnavailable) {
+		SendError(ctx, fasthttp.StatusConflict, "This account has no local password. Manage its password at the identity provider.")
+		return
+	}
+	if h.writeStoreError(ctx, err) {
+		return
+	}
+	ctx.SetStatusCode(fasthttp.StatusNoContent)
 }
 
 func (h *UsersHandler) revokeSessions(ctx *fasthttp.RequestCtx) {

@@ -1,4 +1,5 @@
 import NotificationCenter from "@/components/notificationCenter";
+import { PasswordDialog } from "@/components/passwordDialog";
 import { ThemeToggle } from "@/components/themeToggle";
 import WarpLauncher from "@/components/warp/warpLauncher";
 import { deriveTitleFromPathname } from "@/components/topbar.utils";
@@ -16,7 +17,14 @@ import { IS_ENTERPRISE } from "@/lib/constants/config";
 import { useDescriptionSlotRef, useMobileFilterSlotRef, useTopbarTitle } from "@/lib/contexts/topbarContext";
 import type { TopbarTitleValue } from "@/lib/contexts/topbarContext.utils";
 import { useBranding } from "@/lib/hooks/useBranding";
-import { useAppDispatch, useGetCoreConfigQuery, useGetVersionQuery, useLogoutMutation } from "@/lib/store";
+import {
+	useAppDispatch,
+	useGetCoreConfigQuery,
+	useGetCurrentUserQuery,
+	useIsAuthEnabledQuery,
+	useGetVersionQuery,
+	useLogoutMutation,
+} from "@/lib/store";
 import { baseApi } from "@/lib/store/apis/baseApi";
 import { cn } from "@/lib/utils";
 import ViewAsBanner from "@enterprise/components/view-as/viewAsBanner";
@@ -139,6 +147,7 @@ export default function Topbar() {
 	const [logout] = useLogoutMutation();
 	const dispatch = useAppDispatch();
 	const { data: coreConfig } = useGetCoreConfigQuery({});
+	const { data: authStatus } = useIsAuthEnabledQuery();
 	// Shares the sidebar's RTK Query cache entry, so this costs no extra request.
 	const { data: version } = useGetVersionQuery();
 	const { resolvedTheme } = useTheme();
@@ -155,12 +164,14 @@ export default function Topbar() {
 
 	const canViewAs = useCanViewAs();
 	const [viewAsOpen, setViewAsOpen] = useState(false);
+	const [passwordOpen, setPasswordOpen] = useState(false);
 	// Every request in a view-as tab is read-only, so signing out there would be refused; offer leaving the view instead.
 	const isViewingAs = !!getViewAsUserId();
 
 	const isAuthEnabled = coreConfig?.auth_config?.is_enabled || false;
 	const showUserPill = IS_ENTERPRISE && !!userInfo;
-	const canLogout = showUserPill || isAuthEnabled;
+	const canLogout = showUserPill || isAuthEnabled || authStatus?.has_valid_token;
+	const { data: currentUser } = useGetCurrentUserQuery(undefined, { skip: !authStatus?.has_valid_token });
 
 	const displayName = userInfo?.name || userInfo?.email || userInfo?.preferred_username || "User";
 	// Only show the email as a second line when it isn't already the headline.
@@ -199,6 +210,7 @@ export default function Topbar() {
 			    it's a display preference, not an account action. */}
 			<span ref={setMobileFilterSlot} className="flex shrink-0 items-center md:hidden" />
 			<NotificationCenter />
+			{passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}
 			<ThemeToggle />
 			<WarpLauncher />
 
@@ -245,6 +257,11 @@ export default function Topbar() {
 					)}
 
 					<DropdownMenuGroup>
+						{currentUser?.has_local_password && authStatus?.authentication_methods?.includes("local") && !isViewingAs && (
+							<DropdownMenuItem data-testid="account-change-password" onSelect={() => setPasswordOpen(true)}>
+								Change password
+							</DropdownMenuItem>
+						)}
 						{externalLinks.map((item) => (
 							<DropdownMenuItem key={item.title} asChild>
 								<a href={item.url} target="_blank" rel="noopener noreferrer" className="cursor-pointer">

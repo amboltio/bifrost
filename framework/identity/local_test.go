@@ -85,6 +85,8 @@ func TestLocalAuthenticationServiceUpgradesLegacyCredentialAndChangesPassword(t 
 	assert.Equal(t, tables.CredentialKindPassword, upgraded.Kind)
 	assert.Contains(t, upgraded.SecretHash, "$argon2id$v=1$")
 
+	require.ErrorIs(t, service.ChangePassword(context.Background(), user.ID, "wrong password", "new password"), ErrInvalidCredentials)
+	assert.False(t, store.changed)
 	require.NoError(t, service.ChangePassword(context.Background(), user.ID, "old password", "new password"))
 	assert.True(t, store.changed)
 	_, err = service.Authenticate(context.Background(), "user@example.test", "old password", "127.0.0.1")

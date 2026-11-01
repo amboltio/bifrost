@@ -47,7 +47,7 @@ export function ApiKeySelectorView({
 		return opts.filter((o) => o.label.toLowerCase().includes(q));
 	}, [providerKeys, requireVirtualKey, query]);
 
-	const virtualKeyOptions = useMemo(() => virtualKeys.map((vk) => ({ label: vk.name, value: vk.value })), [virtualKeys]);
+	const virtualKeyOptions = useMemo(() => virtualKeys.map((vk) => ({ label: vk.name, value: `virtual-key:${vk.id}` })), [virtualKeys]);
 
 	// Only one page of virtual keys is loaded at a time, so the selected key can
 	// drop out of the list as the search narrows. Names seen once are kept so the
@@ -71,7 +71,7 @@ export function ApiKeySelectorView({
 			if (val === "__auto__") return requireVirtualKey ? "" : "Auto (default)";
 			const providerKey = providerKeys.find((k) => k.key_id === val);
 			if (providerKey) return providerKey.name;
-			const virtualKey = virtualKeys.find((vk) => vk.value === val);
+			const virtualKey = virtualKeys.find((vk) => `virtual-key:${vk.id}` === val);
 			if (virtualKey) return virtualKey.name;
 			// Never fall back to `val` — for a virtual key that is the secret itself.
 			return labelCacheRef.current.get(val) ?? "";

@@ -794,6 +794,24 @@ func TestGovernanceStore_UpdateVirtualKeyInMemory_RotatedValueRemovesOldLookup(t
 	assert.Equal(t, 25.0, newVK.Budgets[0].CurrentUsage)
 }
 
+func TestGovernanceStore_StaleReloadCannotRestoreRotatedCredential(t *testing.T) {
+	vk := buildVirtualKey("stale-test", "sk-bf-old", "Test", true)
+	vk.UpdatedAt = time.Now().UTC()
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{VirtualKeys: []configstoreTables.TableVirtualKey{*vk}}, nil, nil)
+	require.NoError(t, err)
+	newer := *vk
+	newer.Value = *schemas.NewSecretVar("sk-bf-new")
+	newer.UpdatedAt = vk.UpdatedAt.Add(time.Second)
+	store.UpdateVirtualKeyInMemory(context.Background(), &newer, nil, nil, nil)
+	// A delayed earlier reload arrives after the new credential was installed.
+	store.UpdateVirtualKeyInMemory(context.Background(), vk, nil, nil, nil)
+	_, oldFound := store.GetVirtualKey(context.Background(), "sk-bf-old")
+	assert.False(t, oldFound)
+	current, found := store.GetVirtualKey(context.Background(), "sk-bf-new")
+	require.True(t, found)
+	assert.Equal(t, newer.Value.GetValue(), current.Value.GetValue())
+}
+
 func TestGovernanceStore_UpdateVirtualKeyInMemory_GracePeriodKeepsPreviousValue(t *testing.T) {
 	logger := NewMockLogger()
 	vk := buildVirtualKey("vk1", "sk-bf-old", "Test VK", true)

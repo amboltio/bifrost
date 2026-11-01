@@ -575,6 +575,186 @@
   ],
   "item": [
     {
+      "name": "Credential secrecy (management only)",
+      "description": "Opt-in management regression. Set include_preview=1 and management_session_cookie to an authenticated local administrator session. Does not call LLM providers. Creation and rotation disclose only newly issued secrets; stored entity DTOs never disclose them.",
+      "item": [
+        {
+          "name": "[PREVIEW] credential secrecy / create one-time issuance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('exact status', function () { pm.expect(pm.response.code, pm.response.text()).to.eql(200); });",
+                  "var j=pm.response.json(); pm.expect(j.virtual_key.value).to.eql(''); pm.expect(j.issued_secret).to.be.a('string').and.not.empty; pm.expect(j.virtual_key.value_prefix).to.eql(j.issued_secret.slice(0,10)); pm.collectionVariables.set('credential_secrecy_id',j.virtual_key.id); pm.collectionVariables.set('credential_secrecy_old',j.issued_secret);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "token={{management_session_cookie}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\":\"credential secrecy {{$timestamp}}\",\"description\":\"Preserve this setting\",\"is_active\":true}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/governance/virtual-keys"
+          }
+        },
+        {
+          "name": "[PREVIEW] credential secrecy / detail is prefix only",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('exact status', function () { pm.expect(pm.response.code, pm.response.text()).to.eql(200); });",
+                  "var j=pm.response.json(); pm.expect(j.virtual_key.value).to.eql(''); pm.expect(j).not.to.have.property('issued_secret'); pm.expect(pm.response.text()).not.to.include(pm.collectionVariables.get('credential_secrecy_old'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "token={{management_session_cookie}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/governance/virtual-keys/{{credential_secrecy_id}}"
+          }
+        },
+        {
+          "name": "[PREVIEW] credential secrecy / rotation issues a new credential",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('exact status', function () { pm.expect(pm.response.code, pm.response.text()).to.eql(200); });",
+                  "var j=pm.response.json(); pm.expect(j.issued_secret).not.to.eql(pm.collectionVariables.get('credential_secrecy_old')); pm.expect(j.virtual_key.value).to.eql(''); pm.expect(j.virtual_key.description).to.eql('Preserve this setting'); pm.collectionVariables.set('credential_secrecy_new',j.issued_secret);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "token={{management_session_cookie}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/governance/virtual-keys/{{credential_secrecy_id}}/rotate"
+          }
+        },
+        {
+          "name": "[PREVIEW] credential secrecy / old credential revoked immediately",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('exact status', function () { pm.expect(pm.response.code, pm.response.text()).to.eql(401); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-bf-vk",
+                "value": "{{credential_secrecy_old}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/governance/virtual-keys/quota"
+          }
+        },
+        {
+          "name": "[PREVIEW] credential secrecy / new credential retains quota access",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('exact status', function () { pm.expect(pm.response.code, pm.response.text()).to.eql(200); });",
+                  "pm.expect(pm.response.text()).not.to.include(pm.collectionVariables.get('credential_secrecy_new'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-bf-vk",
+                "value": "{{credential_secrecy_new}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/governance/virtual-keys/quota"
+          }
+        },
+        {
+          "name": "[PREVIEW] credential secrecy / cleanup",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('exact status', function () { pm.expect(pm.response.code, pm.response.text()).to.eql(200); });",
+                  "pm.collectionVariables.unset('credential_secrecy_id'); pm.collectionVariables.unset('credential_secrecy_old'); pm.collectionVariables.unset('credential_secrecy_new');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "token={{management_session_cookie}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/governance/virtual-keys/{{credential_secrecy_id}}"
+          }
+        }
+      ]
+    },
+    {
       "name": "1. Native Bifrost API",
       "description": "Bifrost's own OpenAI-shaped surface. Use a `provider/model` string in the `model` field to route to any configured backend.",
       "item": [

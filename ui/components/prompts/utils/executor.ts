@@ -2,7 +2,10 @@ import { Message, type CompletionUsage, type ToolCall, type VariableMap, replace
 import { getErrorMessage } from "@/lib/store";
 import type { ModelParams } from "@/lib/types/prompts";
 
+import { buildPromptHeaders } from "./credentials";
+
 export interface ExecutionConfig {
+	virtualKeySecret?: string;
 	provider: string;
 	model: string;
 	modelParams: ModelParams;
@@ -17,31 +20,6 @@ function getBaseUrl() {
 	} else {
 		return "";
 	}
-}
-
-function buildHeaders(config: Pick<ExecutionConfig, "apiKeyId" | "customHeaders">): Record<string, string> {
-	const headers: Record<string, string> = { "Content-Type": "application/json" };
-	if (config.apiKeyId && config.apiKeyId !== "__auto__") {
-		if (config.apiKeyId.startsWith("sk-bf-")) {
-			headers["Authorization"] = `Bearer ${config.apiKeyId}`;
-		} else {
-			headers["x-bf-api-key-id"] = config.apiKeyId;
-		}
-	}
-	if (config.customHeaders) {
-		const reserved = new Set(["content-type", "authorization", "x-bf-api-key-id"]);
-		for (const [name, value] of Object.entries(config.customHeaders)) {
-			const trimmedName = name.trim();
-			const trimmedValue = value.trim();
-			if (!trimmedName || !trimmedValue) continue;
-			if (reserved.has(trimmedName.toLowerCase())) {
-				console.warn(`Ignoring custom header "${trimmedName}" — reserved by the playground.`);
-				continue;
-			}
-			headers[trimmedName] = trimmedValue;
-		}
-	}
-	return headers;
 }
 
 export interface ExecutionCallbacks {
@@ -75,7 +53,7 @@ export async function executePrompt(
 	const resolvedMessages = config.variables ? replaceVariablesInMessages(allMessages, config.variables) : allMessages;
 
 	try {
-		const headers = buildHeaders(config);
+		const headers = buildPromptHeaders(config);
 
 		const { api_key_id: _, ...requestParams } = config.modelParams;
 		const response = await fetch(`${getBaseUrl()}/v1/chat/completions`, {
@@ -221,8 +199,11 @@ export class MCPAuthRequiredError extends Error {
 	}
 }
 
-export async function executeToolCall(toolCall: ToolCall, config: Pick<ExecutionConfig, "apiKeyId" | "customHeaders">): Promise<string> {
-	const headers = buildHeaders(config);
+export async function executeToolCall(
+	toolCall: ToolCall,
+	config: Pick<ExecutionConfig, "apiKeyId" | "virtualKeySecret" | "customHeaders">,
+): Promise<string> {
+	const headers = buildPromptHeaders(config);
 
 	const response = await fetch(`${getBaseUrl()}/v1/mcp/tool/execute`, {
 		method: "POST",
