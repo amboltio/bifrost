@@ -41,7 +41,7 @@
 ### 4. Integration and PR
 - [x] Run focused and affected complete Go suites, UI production build/typecheck and focused frontend tests; run isolated real gateway smoke/browser verification.
 - [x] Review the complete diff and search for obsolete setup-token references; resolve findings.
-- [ ] Record auth-gate benchmark results and exact terminal instructions. Commit, push the new branch, open PR against `dev` and verify remote head.
+- [x] Record auth-gate benchmark results and exact terminal instructions. Commit, push the new branch, open PR against `dev` and verify remote head.
 
 ## Execution ledger
 
@@ -57,3 +57,4 @@
 - Retained memory added: one fixed-size `sync.Mutex` per middleware, used only for cold policy loading and config publication; initialized requests and inference do not acquire it. CLI hashing/config mutations execute off the inference request path.
 - Explicit relative SQLite paths preserve the server's existing current-working-directory semantics. Container terminal commands share the gateway's working directory; Makefile-owned provisioning now runs from the same directory as its server.
 - Explicitly disabled config stores retain their pre-existing stateless behavior; this change does not alter that operator-selected mode. CLI provisioning requires a persistent supported store.
+- Implementation committed as `d893e4745`, pushed on `codex/cli-superadmin-no-web-setup`, and opened as [PR #7](https://github.com/amboltio/bifrost/pull/7) against `dev`. GitHub confirmed the implementation head when creating the PR. No merge or deployment was performed.
