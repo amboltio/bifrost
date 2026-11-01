@@ -32,6 +32,8 @@ docker run -p 8080:8080 maximhq/bifrost
 
 **Step 2:** Configure via Web UI
 
+For a deployment built from this fork, first [create a superadmin from the terminal](#superadmin-cli), then sign in to the web UI.
+
 ```bash
 # Open the built-in web interface
 open http://localhost:8080
@@ -54,6 +56,68 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 - [Gateway Setup](https://docs.getbifrost.ai/quickstart/gateway/setting-up) - HTTP API deployment
 - [Go SDK Setup](https://docs.getbifrost.ai/quickstart/go-sdk/setting-up) - Direct integration
+
+---
+
+## Superadmin CLI
+
+Builds of this fork include `createsuperadmin` in the gateway binary. Use the binary or container image built from this repository; upstream NPX packages and Docker images do not automatically include this fork's changes. A fresh dashboard stays locked until an operator creates an administrator from the server terminal.
+
+### Coolify
+
+Open the running Bifrost application's terminal in Coolify and run:
+
+```sh
+/app/main createsuperadmin --app-dir /app/data
+```
+
+Enter the administrator's email, display name, password and password confirmation. Password input is hidden. Choose a strong password with at least 12 ASCII characters. After creation, open the dashboard and sign in with the email and password. If the page still shows the provisioning instructions, click **Check again** or refresh it. A running empty gateway does not need a restart to accept the new administrator.
+
+### Docker or a local binary
+
+From the Docker host, replace `bifrost` with your running container's name:
+
+```sh
+docker exec -it bifrost /app/main createsuperadmin --app-dir /app/data
+```
+
+For a locally built gateway, run its binary from the same working directory as the server:
+
+```sh
+./bifrost-http createsuperadmin --app-dir /path/to/data
+```
+
+Use the **same app directory, working directory, database configuration and encryption key as the running gateway**. `/app/data` is the default container data directory; adjust it if your deployment uses another location. The command reads `config.json` there and opens the configured SQLite or PostgreSQL store. Explicit relative SQLite paths resolve against the working directory. Keep the existing environment/secret references available, including `BIFROST_ENCRYPTION_KEY` when configured. A different directory or database creates access to a different installation.
+
+### Options and automation
+
+| Option | Purpose |
+| --- | --- |
+| `--app-dir PATH` | Directory containing the gateway's `config.json` and default `config.db`. Defaults to `APP_DIR`, or the current directory when unset. |
+| `--email EMAIL` | Supply the email instead of prompting. |
+| `--display-name NAME` | Supply the display name instead of prompting. |
+| `--password-stdin` | Read one password from standard input; requires both `--email` and `--display-name`. |
+| `--help` | Show command usage. |
+
+To automate creation, pipe the password through standard input. This Bash example reads it without echoing and passes it into the running container:
+
+```bash
+read -r -s -p 'New administrator password: ' BIFROST_NEW_PASSWORD; echo
+printf '%s\n' "$BIFROST_NEW_PASSWORD" | docker exec -i bifrost \
+  /app/main createsuperadmin --app-dir /app/data \
+  --email operator@example.com --display-name 'Gateway Operator' --password-stdin
+unset BIFROST_NEW_PASSWORD
+```
+
+For unattended scripts, obtain the stdin value from your secret manager. Keep passwords out of command arguments and logs. Use `docker exec -i` for stdin mode and `docker exec -it` for interactive prompts.
+
+### Additional superadmins and lost-password recovery
+
+Run the command again with a **different email address** to create an additional superadmin. If you lose access to the only admin account, create a distinct recovery superadmin from the Coolify/container terminal, sign in, and manage the original account under **Workspace → Governance → Users**.
+
+An existing email is rejected, including differences in letter case. The command never replaces an existing password, promotes an existing user or reactivates a disabled account. Existing users, sessions, virtual keys and OIDC settings are preserved. Local sign-in is enabled for the new administrator. Provisioning requires a persistent config store; if it is disabled, configure it before running the command.
+
+See the [authentication guide](docs/quickstart/gateway/setting-up-auth.mdx) for further deployment details.
 
 ---
 
