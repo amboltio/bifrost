@@ -27,16 +27,13 @@ export function collectionPrerequest() {
   ];
 }
 
-// Sends the gateway's setup token on every /api call. While dashboard auth is not active, OSS
-// refuses /api calls that lack it (the e2e python profile sets setup_token and creates no admin).
-// Inference routes ignore the header and so does /api once dashboard auth is enabled, but it is
-// still added only to /api calls, and only when {{setup_token}} is set, so a run against an
-// authenticated gateway can blank it with --env-var setup_token=.
-export function setupTokenPrerequest() {
+// Send the canonical administrator session only to management routes.
+// The runner obtains this session through ordinary login after CLI provisioning.
+export function sessionAuthPrerequest() {
   return [
-    "var __setupToken = pm.variables.get('setup_token');",
-    "if (__setupToken && pm.request.url.getPath().indexOf('/api/') === 0) {",
-    "  pm.request.headers.upsert({ key: 'X-Bifrost-Setup-Token', value: __setupToken });",
+    "var __adminAuthHeader = pm.variables.get('admin_auth_header');",
+    "if (__adminAuthHeader && pm.request.url.getPath().indexOf('/api/') === 0) {",
+    "  pm.request.headers.upsert({ key: 'Authorization', value: __adminAuthHeader });",
     "}",
   ];
 }
@@ -259,11 +256,11 @@ export function item(id, name, req, evts) {
 // Assembly + output
 // --------------------------------------------------------------------------- //
 
-// setupToken opts a collection into sending the setup token on its /api calls: true uses the e2e
+// adminAuthHeader opts a collection into sending the administrator session on its /api calls: true uses the e2e
 // profile's token (tests/integrations/python/config.json), a string uses that token. Collections
 // that leave it unset are generated exactly as before.
-export function buildCollection({ id, name, description, expandedScenarios, extraVariables, setupToken }) {
-  const tokenValue = setupToken === true ? "bifrost-e2e-setup-token" : setupToken;
+export function buildCollection({ id, name, description, expandedScenarios, extraVariables, adminAuthHeader }) {
+  const tokenValue = adminAuthHeader === true ? "" : adminAuthHeader;
   return {
     info: {
       _postman_id: id,
@@ -277,9 +274,9 @@ export function buildCollection({ id, name, description, expandedScenarios, extr
       { key: "__purge_target", value: "", type: "string" },
       { key: "__purge_queue", value: "", type: "string" },
       ...(extraVariables || []),
-      ...(tokenValue ? [{ key: "setup_token", value: tokenValue, type: "string" }] : []),
+      ...(tokenValue ? [{ key: "admin_auth_header", value: tokenValue, type: "string" }] : []),
     ],
-    event: events(tokenValue ? [...collectionPrerequest(), ...setupTokenPrerequest()] : collectionPrerequest(), null),
+    event: events(adminAuthHeader ? [...collectionPrerequest(), ...sessionAuthPrerequest()] : collectionPrerequest(), null),
     // The clear-providers setup folder always runs first so every run starts
     // from a clean provider slate.
     item: [clearProvidersFolder(), ...expandedScenarios],

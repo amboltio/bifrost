@@ -53,7 +53,7 @@ docker run -p 8080:8080 -v $(pwd)/data:/app/data maximhq/bifrost
 ```
 
 <Warning>
-These unversioned commands are for local evaluation. For a hosted or production deployment, pin an image version, enable authentication (the first admin account needs a [setup token](#protect-the-dashboard)) and TLS, and choose durable storage using the [deployment support matrix](/deployment-guides/overview).
+These unversioned commands are for local evaluation. For a hosted or production deployment, pin an image version, [create a superadmin from the terminal](/quickstart/gateway/setting-up-auth) and TLS, and choose durable storage using the [deployment support matrix](/deployment-guides/overview).
 </Warning>
 
 ### 2. Configuration Flags
@@ -133,31 +133,13 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 A fresh Bifrost instance has no password. Anyone who can reach the port can open the dashboard and the admin API. Add a password before you expose Bifrost beyond your own machine.
 
-Running Bifrost without a password is allowed. But the moment you create the first admin account, a **setup token is required**. You pick the value and set it **before you start Bifrost**. If no setup token is set, Bifrost rejects the request to create the admin account.
+A fresh gateway keeps dashboard management closed until an administrator is provisioned. Run the command in the gateway container's terminal, using its actual persistent app directory:
 
 ```bash
-# Generate a random token and keep it somewhere safe
-export BIFROST_SETUP_TOKEN=$(openssl rand -hex 32)
-
-# NPX
-npx -y @maximhq/bifrost
-
-# Docker
-docker run -p 8080:8080 -v $(pwd)/data:/app/data -e BIFROST_SETUP_TOKEN maximhq/bifrost
+/app/main createsuperadmin --app-dir /app/data
 ```
 
-Then, in the dashboard:
-
-1. Go to **Workspace** → **Config** → **Security**
-2. Turn on **Password protect the dashboard**
-3. Enter an admin username and password
-4. Paste your token into the **Setup token** field and save
-
-<Note>
-  The token is only checked when the first admin account is created. Bifrost never stores it or writes it to logs, and it stops mattering once the account exists. If you forgot to set it, stop Bifrost and start it again with `BIFROST_SETUP_TOKEN` set. You can also set `setup_token` in `config.json`. See [Setting up auth](/quickstart/gateway/setting-up-auth) for the full steps.
-</Note>
-
----
+Enter the email, display name and hidden password, then sign in normally. In Coolify, use the service's **Terminal**. The command must use the same config store and encryption key as the gateway. See [Setting up auth](/quickstart/gateway/setting-up-auth) for Docker, automation and recovery instructions.
 
 ## Configuration Modes
 

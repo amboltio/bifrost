@@ -164,13 +164,13 @@ export const coreConfigApi = {
    * The whole current config is sent back because PUT /api/config treats a missing
    * client_config as all-zero values. While auth is off the request is not
    * authenticated, so turning auth back on (or changing the credentials) must carry
-   * `currentPassword` (the stored admin password) or a setup token; the server answers
+   * `currentPassword` (the stored legacy admin password); the server answers
    * 403 otherwise.
    */
   async setDashboardAuthEnabled(
     request: APIRequestContext,
     enabled: boolean,
-    proof: { currentPassword?: string; setupToken?: string } = {}
+    proof: { currentPassword?: string } = {}
   ) {
     const current = await coreConfigApi.get(request)
     if (!current.auth_config) {
@@ -184,7 +184,6 @@ export const coreConfigApi = {
           admin_password: current.auth_config.admin_password,
           is_enabled: enabled,
           ...(proof.currentPassword ? { current_password: proof.currentPassword } : {}),
-          ...(proof.setupToken ? { setup_token: proof.setupToken } : {}),
         },
       },
     })

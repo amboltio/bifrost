@@ -18,6 +18,7 @@ test.describe('Skills marketplace URL settings', () => {
         const path = new URL(route.request().url()).pathname
         if (path === '/api/config') {
           if (route.request().method() === 'PUT') {
+            expect(route.request().postDataJSON()).not.toHaveProperty('auth_config')
             const payload = route.request().postDataJSON() as { client_config: { skills_external_client_url: { value: string } } }
             savedURL = payload.client_config.skills_external_client_url.value
             await route.fulfill({ json: { message: 'Configuration updated successfully' } })
@@ -25,7 +26,7 @@ test.describe('Skills marketplace URL settings', () => {
           }
           await route.fulfill({ json: {
             client_config: { ...DefaultCoreConfig, enforce_auth_on_inference: false, skills_external_client_url: { value: savedURL } },
-            auth_config: null, framework_config: {}, is_db_connected: true,
+            auth_config: { is_enabled: true, admin_username: { value: 'legacy' }, admin_password: { value: '' } }, framework_config: {}, is_db_connected: true,
             is_git_available: state.git, skills_marketplace_base_url: savedURL, metadata: {},
           } })
         } else if (path === '/api/version') {

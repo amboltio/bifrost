@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { managementHeaders as canonicalManagementHeaders } from './lib/management-session.mjs';
 // Exercises Bifrost's server-side stream cancellation path by opening a stream,
 // reading the first bytes, then aborting the downstream request.
 
@@ -26,6 +27,7 @@ const args = Object.fromEntries(
 );
 
 const baseUrl = args["base-url"] || process.env.BASE_URL || "http://localhost:8080";
+const adminAuthHeader = (await canonicalManagementHeaders(baseUrl)).Authorization;
 const providerFilter = (args.provider || "").toLowerCase();
 const out = args.out || "tmp/stream-cancel-report.json";
 const readTimeoutMs = Number(args["read-timeout-ms"] || 20000);
@@ -78,11 +80,9 @@ const EARLY_USAGE_PROVIDERS = new Set(["anthropic"]);
 const BILLED_CANCEL_COUNTERS = ["bifrost_error_requests_total", "bifrost_input_tokens_total", "bifrost_cost_total"];
 
 // /metrics sits behind the API auth chain: the OSS setup lock, or dashboard credentials once auth is on.
-const adminAuthHeader = process.env.BIFROST_E2E_AUTH_HEADER || "";
-const setupToken = (process.env.BIFROST_E2E_SETUP_TOKEN || process.env.BIFROST_SETUP_TOKEN || "bifrost-e2e-setup-token").trim();
 const metricsHeaders = {
   ...(adminAuthHeader ? { Authorization: adminAuthHeader } : {}),
-  ...(setupToken ? { "X-Bifrost-Setup-Token": setupToken } : {}),
+  ...(adminAuthHeader ? { "Authorization": adminAuthHeader } : {}),
 };
 
 // Sums each BILLED_CANCEL_COUNTERS family across every series labelled with provider.

@@ -17,7 +17,7 @@ make test-realtime BIFROST_BASE_URL=http://localhost:8187 TESTCASE=TestTurn_Tool
 make test-realtime BIFROST_BASE_URL=http://localhost:8187 PATTERN=Nova
 ```
 
-`config.json` enforces auth, configures `openai`, `bedrock`, `azure` and a realtime-less `anthropic` from those variables, and sets a setup token so the suite can mint virtual keys through `/api`. Every test skips when the gateway does not answer `/health`, except under `make test-realtime`, which fails the run.
+`config.json` enforces inference auth and configures `openai`, `bedrock`, `azure` and a realtime-less `anthropic` from those variables. The runner provisions a canonical test administrator and obtains a session to mint virtual keys through `/api`. Every test skips when the gateway does not answer `/health`, except under `make test-realtime`, which fails the run.
 
 ## How a test reads
 
@@ -79,6 +79,17 @@ New scenarios go in the file for their area; a helper goes next to the code it d
 | `REALTIME_NOVA_MODEL` | `amazon.nova-2-sonic-v1:0` | the Bedrock speech model |
 | `REALTIME_AZURE_MODEL` | `gpt-realtime` | the Azure realtime deployment; the `rt-azure-alias` alias in `config.json` points at `gpt-realtime` |
 | `REALTIME_AZURE_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | the Azure transcription deployment |
-| `BIFROST_SETUP_TOKEN` | `bifrost-realtime-setup-token` | the `setup_token` in `config.json`, sent on `/api` calls while dashboard auth is off |
+| `BIFROST_E2E_AUTH_HEADER` | Unset | Canonical administrator Bearer session for management calls; provision a test administrator with the CLI first |
 | `BIFROST_ADMIN_AUTH` | | the `Authorization` header for `/api` calls on a gateway with dashboard auth |
 | `REALTIME_REQUIRE_GATEWAY` | | set by `make test-realtime`: fail instead of skipping when the gateway does not answer `/health` |
+
+For a new local test gateway, provision its own store before starting it:
+
+```bash
+node tests/e2e/api/runners/management-session.mjs --provision /path/to/bifrost-http /path/to/test-app
+/path/to/bifrost-http --app-dir /path/to/test-app
+# In a second terminal, after health is ready:
+export BIFROST_ADMIN_AUTH="$(node tests/e2e/api/runners/management-session.mjs)"
+```
+
+The helper uses `BIFROST_E2E_ADMIN_EMAIL` and `BIFROST_E2E_ADMIN_PASSWORD` (local test defaults are documented in the helper). For an existing gateway, configure an existing test administrator or supply an already authenticated session; the runner never overwrites existing accounts.

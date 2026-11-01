@@ -106,16 +106,13 @@ func baseURL() string {
 	return "http://localhost:8080"
 }
 
-// setupToken returns the OSS setup token the governance test server is configured with
-// (tests/governance/config.json setup_token), overridable through the environment.
-func setupToken() string {
-	if v := os.Getenv("BIFROST_E2E_SETUP_TOKEN"); v != "" {
+// adminAuthHeader returns the OSS administrator session the governance test server is configured with
+// (tests/governance/config.json admin_auth_header), overridable through the environment.
+func adminAuthHeader() string {
+	if v := os.Getenv("BIFROST_E2E_AUTH_HEADER"); v != "" {
 		return v
 	}
-	if v := os.Getenv("BIFROST_SETUP_TOKEN"); v != "" {
-		return v
-	}
-	return "bifrost-e2e-setup-token"
+	return os.Getenv("BIFROST_ADMIN_AUTH")
 }
 
 func MakeRequest(t *testing.T, req APIRequest) *APIResponse {
@@ -137,8 +134,8 @@ func MakeRequest(t *testing.T, req APIRequest) *APIResponse {
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	// OSS setup lock: /api needs the setup token while dashboard auth is not active.
-	httpReq.Header.Set("X-Bifrost-Setup-Token", setupToken())
+	// OSS setup lock: /api needs the administrator session while dashboard auth is not active.
+	httpReq.Header.Set("Authorization", adminAuthHeader())
 
 	// Add virtual key header if provided
 	if req.VKHeader != nil {
@@ -194,8 +191,8 @@ func MakeRequestWithCustomHeaders(t *testing.T, req APIRequest, customHeaders ma
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	// OSS setup lock: /api needs the setup token while dashboard auth is not active.
-	httpReq.Header.Set("X-Bifrost-Setup-Token", setupToken())
+	// OSS setup lock: /api needs the administrator session while dashboard auth is not active.
+	httpReq.Header.Set("Authorization", adminAuthHeader())
 
 	// Add custom headers
 	for key, value := range customHeaders {

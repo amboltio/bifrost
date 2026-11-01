@@ -84,8 +84,6 @@ type ServerCallbacks interface {
 	ExpandPluginConfigForAPI(name string, config map[string]any) (map[string]any, error)
 	// Auth related callbacks
 	UpdateAuthConfig(ctx context.Context, authConfig *configstore.AuthConfig) error
-	ValidateSetupToken(token string) bool
-	ValidateConfiguredSetupToken(token string) bool
 	ReloadClientConfigFromConfigStore(ctx context.Context) error
 	// Pricing related callbacks
 	UpdateSyncConfig(ctx context.Context) error
@@ -282,14 +280,14 @@ type BifrostHTTPServer struct {
 	wsLiveHandler        *handlers.WSLiveHandler
 	webrtcLiveHandler    *handlers.WebRTCLiveHandler
 
-	AuthMiddleware       *handlers.AuthMiddleware
-	setupLockInstalled   bool // OSS setup-lock gate guards /api (see AuthMiddleware.SetupLockMiddleware); never set on enterprise
-	CORSMiddleware       *handlers.CorsMiddleware
-	TracingMiddleware    *handlers.TracingMiddleware
-	WSTicketStore        *handlers.WSTicketStore
-	TempTokens           *temptoken.Service
-	TempTokenSweepWorker *temptoken.SweepWorker
-	OAuth2SweepWorker    *oauth2SweepWorker
+	AuthMiddleware           *handlers.AuthMiddleware
+	dashboardAccessInstalled bool // OSS local-administrator gate guards /api; never set on enterprise
+	CORSMiddleware           *handlers.CorsMiddleware
+	TracingMiddleware        *handlers.TracingMiddleware
+	WSTicketStore            *handlers.WSTicketStore
+	TempTokens               *temptoken.Service
+	TempTokenSweepWorker     *temptoken.SweepWorker
+	OAuth2SweepWorker        *oauth2SweepWorker
 	// OAuth2IdentityResolver scopes a user-mode /mcp request to the user's own
 	// tools. Optional; wired at server init when user-mode identity resolution
 	// is available, otherwise left nil (user-mode requests fall back to the
@@ -1793,32 +1791,8 @@ func (s *BifrostHTTPServer) UpdateAuthConfig(ctx context.Context, authConfig *co
 		} else {
 			s.AuthMiddleware.UpdateAuthConfig(updatedAuthConfig)
 		}
-		// The first admin account now exists (or already did) — permanently
-		// invalidate the bootstrap setup token. No-op if already cleared.
-		s.AuthMiddleware.ClearBootstrapToken()
 	}
 	return nil
-}
-
-// ValidateSetupToken reports whether token is a valid one-time bootstrap setup token,
-// as required to create the very first admin account (see AuthMiddleware.bootstrapToken).
-// Once an admin account exists, this always returns true — the gate closes permanently.
-func (s *BifrostHTTPServer) ValidateSetupToken(token string) bool {
-	if s.AuthMiddleware == nil {
-		return true
-	}
-	return s.AuthMiddleware.CheckBootstrapToken(token)
-}
-
-// ValidateConfiguredSetupToken reports whether token matches the operator-configured setup
-// token (see AuthMiddleware.CheckConfiguredSetupToken). Unlike ValidateSetupToken it does not
-// open up once an admin account exists, and it is false when no token is configured or no
-// auth middleware is installed.
-func (s *BifrostHTTPServer) ValidateConfiguredSetupToken(token string) bool {
-	if s.AuthMiddleware == nil {
-		return false
-	}
-	return s.AuthMiddleware.CheckConfiguredSetupToken(token)
 }
 
 // UpdateDropExcessRequests updates excess requests config
@@ -3132,8 +3106,8 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 		roleResolver = candidate
 	}
 	rbacHandler := handlers.NewRBACHandler(roleResolver)
-	if s.setupLockInstalled && s.AuthMiddleware != nil {
-		sessionHandler.SetSetupLock(s.AuthMiddleware)
+	if s.dashboardAccessInstalled && s.AuthMiddleware != nil {
+		sessionHandler.SetDashboardAccess(s.AuthMiddleware)
 	}
 	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore, callbacks)
 	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config.ConfigStore)
@@ -3677,7 +3651,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if s.Config.MCPHeadersProvider != nil {
 			s.Config.MCPHeadersProvider.SetTempTokenService(s.TempTokens)
 		}
-		s.AuthMiddleware, err = handlers.InitAuthMiddleware(s.Config.ConfigStore, s.WSTicketStore, s.TempTokens, s.Config.SetupToken)
+		s.AuthMiddleware, err = handlers.InitAuthMiddleware(s.Config.ConfigStore, s.WSTicketStore, s.TempTokens)
 		if err != nil {
 			s.WSTicketStore.Stop()
 			s.WSTicketStore = nil
@@ -3692,11 +3666,9 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 			return fmt.Errorf("failed to initialize auth middleware: %v", err)
 		}
 		if ctx.Value(schemas.BifrostContextKeyIsEnterprise) == nil {
-			// OSS only: lock /api behind the setup token while dashboard auth is not
-			// active. It must run before APIMiddleware, whose auth-off branch lets
-			// every request through.
-			apiMiddlewares = append(apiMiddlewares, s.AuthMiddleware.SetupLockMiddleware(), s.AuthMiddleware.APIMiddleware())
-			s.setupLockInstalled = true
+			// OSS management requires a locally provisioned administrator and a user session.
+			apiMiddlewares = append(apiMiddlewares, s.AuthMiddleware.DashboardAccessMiddleware(), s.AuthMiddleware.APIMiddleware())
+			s.dashboardAccessInstalled = true
 			if roleResolver, ok := s.Config.ConfigStore.(configstore.UserManagementStore); ok {
 				apiMiddlewares = append(apiMiddlewares, handlers.NewIdentityAuthorizationMiddleware(roleResolver))
 			} else {

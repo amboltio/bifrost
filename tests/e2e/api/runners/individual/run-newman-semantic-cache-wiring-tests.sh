@@ -136,7 +136,6 @@ NEWMAN_PIDS=()
 # it, which is how cleanup finds this run's Weaviate classes. The PID keeps two runners started
 # in the same second from sharing it, and so from deleting each other's classes.
 RUN_SEED="scw$(date +%s)$$"
-SETUP_TOKEN="scw-setup-$(date +%s)-$RANDOM"
 
 cleanup() {
     # Stop the newman runs before their servers. Bash starts background jobs ignoring SIGINT when
@@ -196,13 +195,14 @@ start_bifrost() {
     local dir="$WORK_ROOT/$store"
     mkdir -p "$dir"
     write_config "$dir" "$store"
+    node "$SCRIPT_DIR/../management-session.mjs" --provision "$BIFROST_BINARY" "$dir"
     if port_in_use "$port"; then
         echo -e "${RED}Error: port $port is already in use; pass --port to use another${NC}"
         exit 1
     fi
     # Inference runs without auth on live provider keys, so the server must not inherit a wider
     # BIFROST_HOST (such as 0.0.0.0) from the caller's environment.
-    BIFROST_SETUP_TOKEN="$SETUP_TOKEN" "$BIFROST_BINARY" --app-dir "$dir" --host 127.0.0.1 --port "$port" --log-level info > "$dir/server.log" 2>&1 &
+    "$BIFROST_BINARY" --app-dir "$dir" --host 127.0.0.1 --port "$port" --log-level info > "$dir/server.log" 2>&1 &
     local pid=$!
     SERVER_PIDS+=("$pid")
     local elapsed=0
@@ -221,11 +221,13 @@ start_bifrost() {
 
 run_newman() {
     local store="$1" port="$2"
+    local session_auth_header
+    session_auth_header="$(BIFROST_E2E_AUTH_HEADER= BIFROST_ADMIN_AUTH= BIFROST_E2E_BASE_URL="http://localhost:$port" node "$SCRIPT_DIR/../management-session.mjs")" || return 1
     local report_dir="$REPORT_ROOT/semantic-cache-wiring-$store"
     mkdir -p "$report_dir"
     local cmd=(newman run "$COLLECTION"
         --env-var "base_url=http://localhost:$port"
-        --env-var "setup_token=$SETUP_TOKEN"
+        --env-var "admin_auth_header=$session_auth_header"
         --env-var "e2e_seed_prefix=$RUN_SEED-$store"
         --timeout-script 120000 --timeout-request 600000
         -r "$REPORTERS")

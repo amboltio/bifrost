@@ -153,11 +153,13 @@ if [ -z "$SINGLE_JSON_ENV" ]; then
 fi
 
 # Build Newman command
-# OSS locks /api behind the setup token while dashboard auth is not active, and
+# OSS locks /api behind the administrator session while dashboard auth is not active, and
 # this suite provisions its virtual keys through that API.
-SETUP_TOKEN="${BIFROST_E2E_SETUP_TOKEN:-${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}}"
-SETUP_COLLECTION="$REPORT_DIR/$(basename "$COLLECTION" .postman_collection.json)-setup-token.postman_collection.json"
-node "$SCRIPT_DIR/../add-setup-token-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
+SESSION_AUTH_HEADER="${BIFROST_E2E_AUTH_HEADER:-}"
+SETUP_COLLECTION="$REPORT_DIR/$(basename "$COLLECTION" .postman_collection.json)-session-auth.postman_collection.json"
+SESSION_AUTH_HEADER="$(node "$SCRIPT_DIR/../management-session.mjs")"
+export BIFROST_E2E_AUTH_HEADER="$SESSION_AUTH_HEADER"
+node "$SCRIPT_DIR/../add-session-auth-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
 
 cmd=(newman run "$SETUP_COLLECTION")
 [ -n "$GLOBALS_TMP" ] && [ -f "$GLOBALS_TMP" ] && cmd+=(-g "$GLOBALS_TMP")
@@ -166,7 +168,7 @@ cmd=(newman run "$SETUP_COLLECTION")
 # Base URL override
 base_url="${BIFROST_BASE_URL:-http://localhost:8080}"
 cmd+=(--env-var "base_url=$base_url")
-cmd+=(--env-var "setup_token=$SETUP_TOKEN")
+cmd+=(--env-var "admin_auth_header=$SESSION_AUTH_HEADER")
 
 # Management auth. The collection applies this to /api/ calls only, so the
 # inference calls keep authenticating as the virtual key under test. Leave it

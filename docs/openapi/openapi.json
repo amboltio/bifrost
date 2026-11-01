@@ -39660,7 +39660,7 @@
           "content": "**Required Permissions**\n\n| Permission | Granted via |\n| --- | --- |\n| `Settings:Update` | RBAC role or API key scope |\n\n[How permissions work](/api/procuring-api-keys#required-permissions)\n"
         },
         "summary": "Update configuration",
-        "description": "Updates the Bifrost configuration. Supports hot-reloading of certain settings\nlike drop_excess_requests. Some settings may require a restart to take effect.\nCreating the very first admin account requires auth_config.setup_token. When an\nadmin account already exists but dashboard authentication is disabled, a request\nthat re-enables it or changes admin_username / admin_password must carry either\nauth_config.current_password (the stored admin password) or a valid\nauth_config.setup_token; otherwise it is refused with 403. A genuinely\nauthenticated session needs neither. Changing\nclient_config.mcp_oauth_private_allowlist also requires an authenticated\nadmin session and is refused with 403 while dashboard authentication is off.\n",
+        "description": "Canonical management requires an authenticated individual session. Create superadmins from the gateway terminal with createsuperadmin against the deployed app directory.",
         "tags": [
           "Configuration"
         ],
@@ -39704,7 +39704,7 @@
             }
           },
           "403": {
-            "description": "auth_config was changed without the required proof: the first admin account needs a valid setup_token, and re-enabling authentication or changing the admin credentials while dashboard authentication is disabled needs current_password or a valid setup_token; or client_config.mcp_oauth_private_allowlist was changed without an authenticated admin session"
+            "description": "Canonical management requires an authenticated individual session. Create superadmins from the gateway terminal with createsuperadmin against the deployed app directory."
           },
           "500": {
             "description": "Internal server error",
@@ -42877,88 +42877,6 @@
           },
           "500": {
             "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BifrostError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/session/setup": {
-      "post": {
-        "operationId": "startSetupSession",
-        "x-mint": {
-          "content": "**Required Permissions**\n\n| Permission | Granted via |\n| --- | --- |\n| None | The setup token itself - OSS only, while dashboard auth is not active |\n\n[How permissions work](/api/procuring-api-keys#required-permissions)\n"
-        },
-        "summary": "Start a setup session",
-        "description": "OSS only. While dashboard auth is not active (no admin account, or auth disabled),\ntrades the operator's setup token, sent in the `X-Bifrost-Setup-Token` header, for an\nHttpOnly, `SameSite=Strict` cookie named `bifrost_setup_session`. The cookie carries no\npart of the token. It authenticates management API calls in place of the header for\n12 hours, until dashboard auth is enabled, or until `POST /api/session/logout` clears it.\nChanging the setup token invalidates every issued cookie.\n",
-        "tags": [
-          "Session"
-        ],
-        "parameters": [
-          {
-            "name": "X-Bifrost-Setup-Token",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "The setup token configured via `setup_token` in config.json or `BIFROST_SETUP_TOKEN`."
-          }
-        ],
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "Setup session started; the cookie is set with `Set-Cookie`.",
-            "headers": {
-              "Set-Cookie": {
-                "schema": {
-                  "type": "string"
-                },
-                "description": "`bifrost_setup_session=<signed value>; Path=/; HttpOnly; SameSite=Strict` (plus `Secure` over TLS)."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "expires_at": {
-                      "type": "string",
-                      "format": "date-time",
-                      "description": "When the setup session cookie expires."
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "The setup token header is missing.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BifrostError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The setup token is wrong, or no setup token is configured on the server.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BifrostError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The setup lock is not active (dashboard auth is enabled, or this is Bifrost Enterprise).",
             "content": {
               "application/json": {
                 "schema": {
@@ -112363,7 +112281,7 @@
       "ManagementBearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Management API authentication for `/api/*` endpoints. Use the `Authorization` header\nwith `Bearer <token>`, where `<token>` is one of:\n\n- a Bifrost management API key,\n- a dashboard session token issued by `POST /api/session/login`,\n- base64 of `<admin-username>:<admin-password>` (legacy equivalent of `BasicAuth`).\n\nVirtual keys (`sk-bf-*`) and the `x-api-key` header are not accepted on management APIs -\nthe sole exception is `GET /api/governance/virtual-keys/quota`, which is virtual-key-only.\n\nAuthentication alone is not sufficient in Bifrost Enterprise: each operation page shows a\n**Required Permissions** table (`Resource:Operation`, for example `Dashboard:View`) above\nits Authorizations section, and the caller's RBAC role or management API key scopes must\ninclude what it lists, otherwise the request is rejected with `403 Forbidden`.\n\nA local admin — authenticated with the admin password, or any caller on a deployment with\ndashboard auth disabled — bypasses these checks and can call every management endpoint.\n\n**OSS setup lock.** On Bifrost OSS, while dashboard auth is not active (no admin account,\nor auth disabled), every management endpoint except the public ones (`/health`,\n`/api/version`, `/api/session/is-auth-enabled`, `/api/session/login`, ...) requires the\noperator's setup token in the `X-Bifrost-Setup-Token` header, in place of `Authorization`.\nThe token is set with `setup_token` in `config.json` or the `BIFROST_SETUP_TOKEN`\nenvironment variable. A missing header returns `401`, a wrong token `403`. The header\nstops working once dashboard auth is enabled. The dashboard instead trades the token once\nfor an HttpOnly `bifrost_setup_session` cookie via `POST /api/session/setup`.\nSee [Required permissions](/api/procuring-api-keys#required-permissions) for how\npermissions are derived and which endpoints are exempt.\n"
+        "description": "Canonical management requires an authenticated individual session. Create superadmins from the gateway terminal with createsuperadmin against the deployed app directory."
       },
       "BasicAuth": {
         "type": "http",
@@ -130876,52 +130794,6 @@
                 "description": "Pricing sync interval in seconds"
               }
             }
-          },
-          "auth_config": {
-            "allOf": [
-              {
-                "type": "object",
-                "description": "Authentication configuration",
-                "properties": {
-                  "admin_username": {
-                    "type": "string"
-                  },
-                  "admin_password": {
-                    "type": "string",
-                    "description": "Password (redacted as <redacted> in responses)"
-                  },
-                  "is_enabled": {
-                    "type": "boolean"
-                  },
-                  "disable_auth_on_inference": {
-                    "type": "boolean",
-                    "deprecated": true,
-                    "description": "Deprecated and ignored. Use client_config.enforce_auth_on_inference instead."
-                  }
-                }
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "setup_token": {
-                    "type": "string",
-                    "description": "Available starting in Bifrost 2.0.0-prerelease3. Bootstrap token, required only when this request creates the very first admin account (i.e. no admin account exists yet). Must match the setup token configured by the operator via setup_token in config.json (or the BIFROST_SETUP_TOKEN environment variable); never persisted or returned by GET /api/config. If the operator hasn't configured a setup token, requests that would create the first admin account are rejected until they do. Once an admin account exists it is also accepted, as an alternative to current_password, when auth_config is changed while dashboard authentication is disabled (see current_password)."
-                  },
-                  "current_password": {
-                    "type": "string",
-                    "description": "The currently stored admin password. Required (unless a valid setup_token is supplied) when an admin account exists, dashboard authentication is disabled, and this request re-enables it or changes admin_username / admin_password. Such requests reach the API without any credential check, so one of the two proofs must be presented or the request is refused with 403. Ignored when the request is genuinely authenticated or when no admin account exists yet. Never persisted or returned by GET /api/config."
-                  }
-                }
-              }
-            ]
-          }
-        },
-        "example": {
-          "auth_config": {
-            "admin_username": "admin",
-            "admin_password": "env.BIFROST_ADMIN_PASSWORD",
-            "is_enabled": true,
-            "setup_token": "<your-setup-token>"
           }
         }
       },
@@ -130934,14 +130806,14 @@
         "type": "object",
         "description": "Login request",
         "required": [
-          "username",
+          "email",
           "password"
         ],
         "properties": {
-          "username": {
+          "password": {
             "type": "string"
           },
-          "password": {
+          "email": {
             "type": "string"
           }
         }
@@ -130983,13 +130855,9 @@
             "type": "boolean",
             "description": "Whether enforce_auth_on_inference is on. This is a separate control from is_auth_enabled. It requires a valid inference credential (virtual key, API key, or user token) on every inference route, including the /v1/* routes and the provider SDK integration routes. A locked dashboard (is_auth_enabled: true) does not by itself protect inference. Check this field too."
           },
-          "setup_required": {
+          "admin_provisioning_required": {
             "type": "boolean",
-            "description": "OSS only. True while dashboard auth is not active (no admin account, or auth disabled). In that state every non-public /api call needs the operator's setup token in the X-Bifrost-Setup-Token header. Always false on Bifrost Enterprise."
-          },
-          "setup_token_configured": {
-            "type": "boolean",
-            "description": "OSS only. Whether the operator configured a setup token (setup_token in config.json or the BIFROST_SETUP_TOKEN environment variable). When setup_required is true and this is false, every /api call is rejected until a token is configured and Bifrost is restarted."
+            "description": "Whether an operator must create a superadmin from the gateway terminal."
           }
         }
       },

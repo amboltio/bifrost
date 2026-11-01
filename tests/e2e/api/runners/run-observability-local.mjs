@@ -1,11 +1,11 @@
 #!/usr/bin/env node
+import { managementHeaders as canonicalManagementHeaders } from './lib/management-session.mjs';
 
 import http from "node:http";
 
 const baseURL = (process.env.BIFROST_E2E_BASE_URL || process.env.BIFROST_BASE_URL || "http://localhost:8080").replace(/\/+$/, "");
-const adminAuthHeader = process.env.BIFROST_E2E_AUTH_HEADER || "";
-// OSS setup lock: while dashboard auth is not active, /api needs the setup token.
-const setupToken = (process.env.BIFROST_E2E_SETUP_TOKEN || process.env.BIFROST_SETUP_TOKEN || "bifrost-e2e-setup-token").trim();
+const adminAuthHeader = (await canonicalManagementHeaders(baseURL)).Authorization;
+// OSS setup lock: while dashboard auth is not active, /api needs the administrator session.
 const providerName = `otel-e2e-${process.pid}-${Date.now()}`;
 const modelName = "hello-world";
 const requestedModel = `${providerName}/${modelName}`;
@@ -245,8 +245,8 @@ function createOpenAIMock() {
 
 async function request(method, path, body, headers = {}) {
 	const requestHeaders = adminAuthHeader ? { Authorization: adminAuthHeader, ...headers } : { ...headers };
-	if (setupToken) {
-		requestHeaders["X-Bifrost-Setup-Token"] = setupToken;
+	if (adminAuthHeader) {
+		requestHeaders["Authorization"] = adminAuthHeader;
 	}
 	if (body !== undefined && requestHeaders["content-type"] === undefined && requestHeaders["Content-Type"] === undefined) {
 		requestHeaders["content-type"] = "application/json";

@@ -203,7 +203,7 @@ if ! enable_global_proxy http; then echo refused; else echo accepted; fi
 await test("the test-proxy-e2e job passes every env credential the proxy pillars read", () => {
   const manifest = JSON.parse(readFileSync(path.join(REPO_ROOT, "tests/e2e/api/collections/proxy-smoke-manifest.json"), "utf8"));
   const config = JSON.parse(readFileSync(path.join(REPO_ROOT, "tests/integrations/python/config.json"), "utf8"));
-  const workflow = readFileSync(path.join(REPO_ROOT, ".github/workflows/release-pipeline.yml"), "utf8");
+  const workflow = readFileSync(path.join(REPO_ROOT, ".github/_workflows/release-pipeline.yml"), "utf8");
   const job = workflow.match(/^  test-proxy-e2e:\n[\s\S]*?(?=^  [A-Za-z0-9_-]+:\n)/m);
   assert.ok(job, "test-proxy-e2e job not found in release-pipeline.yml");
   const passedEnv = new Set([...job[0].matchAll(/^\s+([A-Z0-9_]+):\s*\$\{\{/gm)].map((m) => m[1]));
@@ -227,9 +227,8 @@ await test("the test-proxy-e2e job passes every env credential the proxy pillars
   assert.deepStrictEqual(missing, [], `test-proxy-e2e does not pass: ${missing.join(", ")}`);
 });
 
-// The fresh gateway boots the python profile, which sets setup_token and has no admin
-// account, so SetupLockMiddleware answers every /api call without the token with 401.
-await test("api_curl sends the setup token on management calls", () => {
+// Each cell logs into its CLI-provisioned administrator before management calls.
+await test("api_curl sends the administrator session on management calls", () => {
   const fn = shellFunction("api_curl");
   assert.ok(fn, "api_curl() not found");
   const script = `set -euo pipefail
@@ -237,8 +236,11 @@ curl() { printf '%s\\n' "$@"; }
 ${fn}
 api_curl http://127.0.0.1:1/api/proxy-config
 `;
-  const out = execFileSync("bash", ["-c", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, BIFROST_SETUP_TOKEN: "" } });
-  assert.match(out, /^X-Bifrost-Setup-Token: bifrost-e2e-setup-token$/m, `api_curl sent no setup token: ${out}`);
+  const out = execFileSync("bash", ["-c", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PROXY_E2E_ADMIN_AUTH: "", BIFROST_E2E_AUTH_HEADER: "Bearer cell-session" } });
+  assert.match(out, /^Authorization: Bearer cell-session$/m, `api_curl sent no administrator session: ${out}`);
+  const overridden = execFileSync("bash", ["-c", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PROXY_E2E_ADMIN_AUTH: "Bearer explicit-session", BIFROST_E2E_AUTH_HEADER: "Bearer cell-session" } });
+  assert.match(overridden, /^Authorization: Bearer explicit-session$/m);
+  assert.equal((overridden.match(/^Authorization:/gm) || []).length, 1, "only one Authorization header is sent");
 });
 
 // Squid writes a CONNECT record when the tunnel closes, and the gateway keeps idle
@@ -289,7 +291,7 @@ echo "calls=$(tr '\\n' ' ' < "$calls")"
 await test("the test-proxy-e2e job passes the egress allowlist check", () => {
   let stderr = "";
   try {
-    execFileSync("bash", [path.join(REPO_ROOT, ".github/workflows/scripts/check-egress-allowlist.sh"), path.join(REPO_ROOT, ".github/workflows/release-pipeline.yml")], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("bash", [path.join(REPO_ROOT, ".github/_workflows/scripts/check-egress-allowlist.sh"), path.join(REPO_ROOT, ".github/_workflows/release-pipeline.yml")], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (err) {
     stderr = String(err.stderr);
   }
@@ -505,7 +507,7 @@ await test("every key a proxy pillar uses allows models", () => {
 
 // --skip-core-test drops every job gated on it, and the release log must say which.
 await test("the --skip-core-test warning names every job the flag skips", () => {
-  const workflow = readFileSync(path.join(REPO_ROOT, ".github/workflows/release-pipeline.yml"), "utf8");
+  const workflow = readFileSync(path.join(REPO_ROOT, ".github/_workflows/release-pipeline.yml"), "utf8");
   const jobs = [...workflow.matchAll(/^  ([A-Za-z0-9_-]+):\n[\s\S]*?(?=^  [A-Za-z0-9_-]+:\n|(?![\s\S]))/gm)]
     .filter((m) => /^\s+(?:if:.*|)needs\.check-skip\.outputs\.skip-core-test != 'true'/m.test(m[0]) || /^\s+if:.*skip-core-test != 'true'/m.test(m[0]))
     .map((m) => m[1]);
@@ -521,7 +523,7 @@ await test("the --skip-core-test warning names every job the flag skips", () => 
 // the requirement is read from the tracked go.mod.
 await test("the test-proxy-e2e job sets up the Go version transports/go.mod requires", () => {
   const goMod = readFileSync(path.join(REPO_ROOT, "transports/go.mod"), "utf8").match(/^go (\S+)$/m)[1];
-  const workflow = readFileSync(path.join(REPO_ROOT, ".github/workflows/release-pipeline.yml"), "utf8");
+  const workflow = readFileSync(path.join(REPO_ROOT, ".github/_workflows/release-pipeline.yml"), "utf8");
   const job = workflow.match(/^  test-proxy-e2e:\n[\s\S]*?(?=^  [A-Za-z0-9_-]+:\n)/m);
   assert.ok(job, "test-proxy-e2e job not found in release-pipeline.yml");
   const versions = [...job[0].matchAll(/go-version:\s*"([^"]+)"/g)].map((m) => m[1]);
@@ -532,7 +534,7 @@ await test("the test-proxy-e2e job sets up the Go version transports/go.mod requ
 // The job runs the harness with provider secrets and never uses git after checkout, so the
 // checkout must not leave the GITHUB_TOKEN where those steps can read it.
 await test("the test-proxy-e2e checkout does not persist git credentials", () => {
-  const workflow = readFileSync(path.join(REPO_ROOT, ".github/workflows/release-pipeline.yml"), "utf8");
+  const workflow = readFileSync(path.join(REPO_ROOT, ".github/_workflows/release-pipeline.yml"), "utf8");
   const job = workflow.match(/^  test-proxy-e2e:\n[\s\S]*?(?=^  [A-Za-z0-9_-]+:\n)/m);
   assert.ok(job, "test-proxy-e2e job not found in release-pipeline.yml");
   const checkouts = job[0].split(/\n(?=\s+- (?:name|uses):)/).filter((step) => /uses:\s*actions\/checkout@/.test(step));

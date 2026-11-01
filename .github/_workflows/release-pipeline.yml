@@ -2230,7 +2230,6 @@ jobs:
           SKIP_GATEWAY_BUILD: "1"
           # Warp runs in parallel as test-warp.
           SKIP_WARP: "1"
-          BIFROST_SETUP_TOKEN: bifrost-e2e-setup-token
           # Synthetic, non-secret canary for every provider's API redaction tests.
           BIFROST_SECRET_REDACTION_CANARY: synthetic-secretvar-harness-canary-0123456789
           # Key server URLs (ollama/sgl/vllm) must resolve to http(s), so they use a URL canary.
@@ -2369,7 +2368,6 @@ jobs:
 
       - name: Run Warp test
         env:
-          BIFROST_SETUP_TOKEN: bifrost-e2e-setup-token
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: ./.github/workflows/scripts/test-warp.sh
 

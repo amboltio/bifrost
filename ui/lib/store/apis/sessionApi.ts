@@ -29,10 +29,8 @@ export interface IsAuthEnabledResponse {
 	has_valid_token: boolean;
 	auth_type?: "sso" | "password" | "none";
 	inference_auth_enforced?: boolean;
-	// OSS setup lock: true while dashboard auth is not active, so /api calls need the setup token.
-	setup_required?: boolean;
-	// Whether the operator configured a setup token (setup_token / BIFROST_SETUP_TOKEN).
-	setup_token_configured?: boolean;
+	/** The operator must create a canonical administrator with the local CLI. */
+	admin_provisioning_required?: boolean;
 	authentication_methods?: string[];
 	auth_methods?: string[];
 	providers?: OIDCProviderSummary[];

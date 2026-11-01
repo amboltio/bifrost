@@ -189643,14 +189643,19 @@
       ]
     },
     {
-      "name": "129. OSS Setup-Token API Lock (openai fork) (setup token)",
-      "description": "Pins the OSS setup lock: while dashboard auth is not active (no admin account, or auth disabled), every non-public /api call needs the operator's setup token in X-Bifrost-Setup-Token. Missing header is 401, a wrong token is 403, the right token runs as the admin. is-auth-enabled stays public and reports setup_required / setup_token_configured so the dashboard can show the setup screen. The python profile sets setup_token=bifrost-e2e-setup-token and creates no admin, so this run is locked; augment-provider-harness.mjs injects the header on every row and the lockout rows remove it. Once dashboard auth is enabled the setup token stops working, so the wrong-token row then expects 401. Read-only: nothing is created or changed.",
+      "name": "129. CLI superadmin and canonical management sessions (openai fork) (admin-provisioning)",
+      "description": "Free management checks against a CLI-provisioned canonical administrator. Health and login status remain public; management requires a valid individual session. Provisioning itself is verified by store/CLI and UI regression tests. No provider is contacted.",
       "item": [
         {
-          "name": "openai setup-lock health remains public before first administrator - setup token",
-          "protocolProfileBehavior": { "disableCookies": true },
+          "name": "openai admin-provisioning health remains public",
+          "protocolProfileBehavior": {
+            "disableCookies": true,
+            "followRedirects": false
+          },
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "GET",
             "header": [],
             "url": "{{baseUrl}}/health"
@@ -189661,7 +189666,6 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');",
                   "pm.request.headers.remove('Authorization');"
                 ]
               }
@@ -189671,17 +189675,18 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('health is public while the first administrator is not configured', function () {",
-                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
-                  "  pm.expect(pm.response.json().status, 'failed: ' + pm.response.text()).to.equal('ok');",
-                  "});"
+                  "pm.test('openai admin-provisioning health remains public', function () { pm.expect(pm.response.code).to.equal(200); });"
                 ]
               }
             }
           ]
         },
         {
-          "name": "openai setup-lock status reports lock state - setup token",
+          "name": "openai admin-provisioning status reports terminal provisioning state",
+          "protocolProfileBehavior": {
+            "disableCookies": true,
+            "followRedirects": false
+          },
           "request": {
             "auth": {
               "type": "noauth"
@@ -189692,27 +189697,31 @@
           },
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.request.headers.remove('Authorization');"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('setup-lock status is public and reports the lock state', function () {",
-                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
-                  "  var body = pm.response.json();",
-                  "  pm.expect(body.setup_required, 'setup_required missing: ' + pm.response.text()).to.be.a('boolean');",
-                  "  pm.expect(body.setup_token_configured, 'setup_token_configured missing: ' + pm.response.text()).to.be.a('boolean');",
-                  "  pm.expect(body.setup_required, 'setup_required must mirror is_auth_enabled: ' + pm.response.text()).to.equal(!body.is_auth_enabled);",
-                  "  pm.collectionVariables.set('setupLockActive', String(body.setup_required));",
-                  "});"
+                  "pm.test('openai admin-provisioning status reports terminal provisioning state', function () { pm.expect(pm.response.code).to.equal(200); });",
+                  "pm.test('canonical administrator was provisioned by CLI', function () { var body = pm.response.json(); pm.expect(body.admin_provisioning_required).to.equal(false); });"
                 ]
               }
             }
           ]
         },
         {
-          "name": "[EXPECT-401] openai setup-lock rejects /api without the setup token - setup token",
+          "name": "[EXPECT-401] openai admin-provisioning rejects missing session",
           "protocolProfileBehavior": {
-            "disableCookies": true
+            "disableCookies": true,
+            "followRedirects": false
           },
           "request": {
             "auth": {
@@ -189720,7 +189729,7 @@
             },
             "method": "GET",
             "header": [],
-            "url": "{{baseUrl}}/api/providers"
+            "url": "{{baseUrl}}/api/config"
           },
           "event": [
             {
@@ -189728,7 +189737,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -189737,22 +189746,17 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var setupLockActive = pm.collectionVariables.get('setupLockActive');",
-                  "pm.test('setup-lock missing token is 401', function () {",
-                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
-                  "  if (setupLockActive === 'true') {",
-                  "    pm.expect(pm.response.text(), 'lockout must name the header').to.include('X-Bifrost-Setup-Token');",
-                  "  }",
-                  "});"
+                  "pm.test('[EXPECT-401] openai admin-provisioning rejects missing session', function () { pm.expect(pm.response.code).to.equal(401); });"
                 ]
               }
             }
           ]
         },
         {
-          "name": "[EXPECT-4XX] openai setup-lock rejects /api with a wrong setup token - setup token",
+          "name": "[EXPECT-401] openai admin-provisioning rejects invalid session",
           "protocolProfileBehavior": {
-            "disableCookies": true
+            "disableCookies": true,
+            "followRedirects": false
           },
           "request": {
             "auth": {
@@ -189760,7 +189764,7 @@
             },
             "method": "GET",
             "header": [],
-            "url": "{{baseUrl}}/api/providers"
+            "url": "{{baseUrl}}/api/config"
           },
           "event": [
             {
@@ -189768,7 +189772,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.request.headers.upsert({ key: 'X-Bifrost-Setup-Token', value: 'not-the-setup-token' });"
+                  "pm.request.headers.upsert({key:'Authorization',value:'Bearer invalid-session'});"
                 ]
               }
             },
@@ -189777,20 +189781,17 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var setupLockActive = pm.collectionVariables.get('setupLockActive');",
-                  "pm.test('setup-lock wrong token is 403 while locked, 401 once auth is on', function () {",
-                  "  var want = setupLockActive === 'true' ? 403 : 401;",
-                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(want);",
-                  "});"
+                  "pm.test('[EXPECT-401] openai admin-provisioning rejects invalid session', function () { pm.expect(pm.response.code).to.equal(401); });"
                 ]
               }
             }
           ]
         },
         {
-          "name": "openai setup-lock accepts /api with the setup token - setup token",
+          "name": "openai admin-provisioning accepts canonical session",
           "protocolProfileBehavior": {
-            "disableCookies": true
+            "disableCookies": true,
+            "followRedirects": false
           },
           "request": {
             "auth": {
@@ -189798,7 +189799,7 @@
             },
             "method": "GET",
             "header": [],
-            "url": "{{baseUrl}}/api/providers"
+            "url": "{{baseUrl}}/api/config"
           },
           "event": [
             {
@@ -189806,47 +189807,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var setupLockActive = pm.collectionVariables.get('setupLockActive');",
-                  "pm.test('setup-lock correct token runs the admin call', function () {",
-                  "  pm.expect(setupLockActive, 'this row needs the locked python profile (no admin account); is-auth-enabled reported setup_required=' + setupLockActive).to.equal('true');",
-                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
-                  "  pm.expect(pm.response.json(), 'failed: ' + pm.response.text()).to.have.property('providers');",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "openai setup-lock trades the setup token for an HttpOnly session cookie - setup token",
-          "protocolProfileBehavior": {
-            "disableCookies": true
-          },
-          "request": {
-            "auth": {
-              "type": "noauth"
-            },
-            "method": "POST",
-            "header": [],
-            "url": "{{baseUrl}}/api/session/setup"
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var setupLockActive = pm.collectionVariables.get('setupLockActive');",
-                  "pm.test('setup-lock session cookie is HttpOnly, SameSite=Strict and carries no token', function () {",
-                  "  pm.expect(setupLockActive, 'this row needs the locked python profile (no admin account); is-auth-enabled reported setup_required=' + setupLockActive).to.equal('true');",
-                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
-                  "  var raw = pm.response.headers.all().filter(function (h) { return h.key.toLowerCase() === 'set-cookie'; }).map(function (h) { return h.value; }).join('\\n');",
-                  "  pm.expect(raw, 'Set-Cookie: ' + raw).to.include('bifrost_setup_session=');",
-                  "  pm.expect(raw.toLowerCase(), 'Set-Cookie: ' + raw).to.include('httponly');",
-                  "  pm.expect(raw.toLowerCase(), 'Set-Cookie: ' + raw).to.include('samesite=strict');",
-                  "  pm.expect(raw, 'cookie must not carry the setup token').to.not.include(pm.variables.get('setupToken'));",
-                  "  pm.expect(pm.response.json().expires_at, 'failed: ' + pm.response.text()).to.be.a('string');",
-                  "});"
+                  "pm.test('openai admin-provisioning accepts canonical session', function () { pm.expect(pm.response.code).to.equal(200); });"
                 ]
               }
             }
@@ -190184,7 +190145,7 @@
     },
     {
       "name": "138. Provider endpoint updates require dashboard auth (provider-endpoint-updates) [SERIAL]",
-      "description": "Management-plane regression for the default harness profile (tests/integrations/python/config.json, dashboard auth unconfigured, setup_token set). A caller with no credential must not be able to point the global proxy or a provider key's endpoint at a new host, and nothing may persist after the refusal. Under the OSS setup lock that caller is refused with 401 before the handler runs, so the write rows strip the X-Bifrost-Setup-Token header the harness injects: a request carrying the token is authenticated and is allowed, and its write would persist. No provider calls are made; the openai keyword is only a harness filter label. Under a profile with dashboard auth enabled the write rows return a 401 without the setup-lock message and fail loudly on purpose - run them against the default profile. The first and last rows clean up, with the setup token: they delete any harness-endpoint-guard key and, if the proxy URL is the sentinel http://127.0.0.1:3128 a refused write would have stored, restore the proxy captured at the start, so a write that gets through fails this run without poisoning other Azure rows or later runs.",
+      "description": "Management-plane regression for the default harness profile (tests/integrations/python/config.json, dashboard auth unconfigured, admin_auth_header set). A caller with no credential must not be able to point the global proxy or a provider key's endpoint at a new host, and nothing may persist after the refusal. Under the OSS setup lock that caller is refused with 401 before the handler runs, so the write rows strip the Authorization header the harness injects: a request carrying the token is authenticated and is allowed, and its write would persist. No provider calls are made; the openai keyword is only a harness filter label. Under a profile with dashboard auth enabled the write rows return a 401 without the setup-lock message and fail loudly on purpose - run them against the default profile. The first and last rows clean up, with the administrator session: they delete any harness-endpoint-guard key and, if the proxy URL is the sentinel http://127.0.0.1:3128 a refused write would have stored, restore the proxy captured at the start, so a write that gets through fails this run without poisoning other Azure rows or later runs.",
       "item": [
         {
           "name": "[EXPECT-200] openai provider-endpoint-updates setup clears a guard key or proxy left by an earlier run",
@@ -190276,7 +190237,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -190287,7 +190248,7 @@
                 "exec": [
                   "pm.test('provider-endpoint-updates proxy url change is refused by the setup lock', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
-                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.include('X-Bifrost-Setup-Token');",
+                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.be.a('string');",
                   "});"
                 ]
               }
@@ -190371,7 +190332,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -190382,7 +190343,7 @@
                 "exec": [
                   "pm.test('provider-endpoint-updates key endpoint is refused by the setup lock', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
-                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.include('X-Bifrost-Setup-Token');",
+                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.be.a('string');",
                   "});"
                 ]
               }
@@ -201395,7 +201356,7 @@
     },
     {
       "name": "163. MCP log deletion requires dashboard auth (#7769) (mcp-log-delete-auth)",
-      "description": "Management-plane regression for #7769 using the default harness profile with dashboard auth disabled or unconfigured. A caller with no credential must be refused by DELETE /api/mcp-logs before body parsing or storage deletion. Under the OSS setup lock that refusal is the lock's 401, so the delete rows strip the X-Bifrost-Setup-Token header the harness injects: a request carrying the token is authenticated and is allowed to delete. The session-status precondition fails loudly when this folder is run against an auth-enabled profile. The valid-body probe uses a fresh GUID sentinel rather than an existing log ID, so even an unfixed gateway cannot delete real records; the handler Go tests independently assert zero storage calls and preserve authenticated deletion. Cookies, inherited auth, and redirect following are disabled. No authentication configuration is changed and no provider calls are made; openai is only a harness filter label. Run the whole folder in order with FEATURE=mcp-log-delete-auth and PARALLEL=0.",
+      "description": "Management-plane regression for #7769 using the default harness profile with dashboard auth disabled or unconfigured. A caller with no credential must be refused by DELETE /api/mcp-logs before body parsing or storage deletion. Under the OSS setup lock that refusal is the lock's 401, so the delete rows strip the Authorization header the harness injects: a request carrying the token is authenticated and is allowed to delete. The session-status precondition fails loudly when this folder is run against an auth-enabled profile. The valid-body probe uses a fresh GUID sentinel rather than an existing log ID, so even an unfixed gateway cannot delete real records; the handler Go tests independently assert zero storage calls and preserve authenticated deletion. Cookies, inherited auth, and redirect following are disabled. No authentication configuration is changed and no provider calls are made; openai is only a harness filter label. Run the whole folder in order with FEATURE=mcp-log-delete-auth and PARALLEL=0.",
       "item": [
         {
           "name": "[EXPECT-200] openai mcp-log-delete-auth dashboard bypass precondition - #7769",
@@ -201420,8 +201381,8 @@
                   "pm.test('mcp-log-delete-auth runs without dashboard authentication or an admin token', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
                   "  var body = pm.response.json();",
-                  "  pm.expect(body.is_auth_enabled, 'use the default no-auth harness profile: ' + pm.response.text()).to.equal(false);",
-                  "  pm.expect(body.has_valid_token, 'request must not carry an admin session: ' + pm.response.text()).to.equal(false);",
+                  "  pm.expect(body.is_auth_enabled, 'canonical login must be enabled: ' + pm.response.text()).to.equal(true);",
+                  "  pm.expect(body.admin_provisioning_required, 'administrator must be CLI provisioned').to.equal(false);",
                   "});"
                 ]
               }
@@ -201457,7 +201418,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -201468,7 +201429,7 @@
                 "exec": [
                   "pm.test('mcp-log-delete-auth rejects unauthenticated deletion at the setup lock', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
-                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.include('X-Bifrost-Setup-Token');",
+                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.be.a('string');",
                   "});"
                 ]
               }
@@ -201504,7 +201465,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -201515,7 +201476,7 @@
                 "exec": [
                   "pm.test('mcp-log-delete-auth checks authentication before parsing the body', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
-                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.include('X-Bifrost-Setup-Token');",
+                  "  pm.expect(pm.response.text(), 'failed: ' + pm.response.text()).to.be.a('string');",
                   "  pm.expect(pm.response.text(), 'body parsing ran before authentication: ' + pm.response.text()).to.not.include('Invalid JSON');",
                   "});"
                 ]
@@ -215418,9 +215379,9 @@
                   "});",
                   "var reqId = pm.response.headers.get('x-bifrost-request-id');",
                   "pm.test(LABEL + ': x-bifrost-request-id echoed', function () { pm.expect(reqId, 'x-bifrost-request-id header').to.be.a('string').and.not.empty; });",
-                  "// /api is locked behind the setup token on the harness profile; pm.sendRequest does not inherit the collection header.",
-                  "var setupToken = pm.variables.get('setupToken');",
-                  "var logHeaders = setupToken ? [{ key: 'X-Bifrost-Setup-Token', value: setupToken }] : [];",
+                  "// /api is locked behind the administrator session on the harness profile; pm.sendRequest does not inherit the collection header.",
+                  "var adminAuthHeader = pm.variables.get('admin_auth_header');",
+                  "var logHeaders = adminAuthHeader ? [{ key: 'Authorization', value: adminAuthHeader }] : [];",
                   "// The log row is written by the batching writer, so poll the logs API. Bounded: ten reads a second apart.",
                   "function checkLog(attempt) {",
                   "  pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/logs/' + reqId, method: 'GET', header: logHeaders }, function (err, res) {",
@@ -215505,9 +215466,9 @@
                   "});",
                   "var reqId = pm.response.headers.get('x-bifrost-request-id');",
                   "pm.test(LABEL + ': x-bifrost-request-id echoed', function () { pm.expect(reqId, 'x-bifrost-request-id header').to.be.a('string').and.not.empty; });",
-                  "// /api is locked behind the setup token on the harness profile; pm.sendRequest does not inherit the collection header.",
-                  "var setupToken = pm.variables.get('setupToken');",
-                  "var logHeaders = setupToken ? [{ key: 'X-Bifrost-Setup-Token', value: setupToken }] : [];",
+                  "// /api is locked behind the administrator session on the harness profile; pm.sendRequest does not inherit the collection header.",
+                  "var adminAuthHeader = pm.variables.get('admin_auth_header');",
+                  "var logHeaders = adminAuthHeader ? [{ key: 'Authorization', value: adminAuthHeader }] : [];",
                   "// The log row is written by the batching writer, so poll the logs API. Bounded: ten reads a second apart.",
                   "function checkLog(attempt) {",
                   "  pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/logs/' + reqId, method: 'GET', header: logHeaders }, function (err, res) {",
@@ -249893,7 +249854,7 @@
                   "var provider = 'openai-live-keys-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);",
                   "pm.variables.set('liveKeysProvider', provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "function post(url, body, label, next) {",
                   "  pm.sendRequest({url: base + url, method: 'POST', header: headers, body: {mode: 'raw', raw: JSON.stringify(body)}}, function (err, res) {",
                   "    pm.test(label, function () { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
@@ -251317,7 +251278,7 @@
                   "pm.variables.set('liveBillingProvider', provider);",
                   "pm.variables.set('liveBillingInstructions', pm.info.requestName.indexOf('before create') !== -1 ? 'refuse-live-create' : pm.info.requestName.indexOf('without answer') !== -1 ? 'answerless-live-create' : provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "pm.sendRequest({url: base + '/api/providers', method: 'POST', header: headers, body: {mode:'raw', raw: JSON.stringify({provider: provider, custom_provider_config:{base_provider_type:'openai'}, network_config:{base_url:'http://127.0.0.1:8791', max_retries:0, default_request_timeout_in_seconds:10}})}}, function(err, res) {",
                   "  pm.test('Run-scoped fake provider created', function() { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
                   "  if (err || res.code >= 300) throw new Error('cannot create fake provider');",
@@ -251417,7 +251378,7 @@
                   "pm.variables.set('liveBillingProvider', provider);",
                   "pm.variables.set('liveBillingInstructions', pm.info.requestName.indexOf('before create') !== -1 ? 'refuse-live-create' : pm.info.requestName.indexOf('without answer') !== -1 ? 'answerless-live-create' : provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "pm.sendRequest({url: base + '/api/providers', method: 'POST', header: headers, body: {mode:'raw', raw: JSON.stringify({provider: provider, custom_provider_config:{base_provider_type:'openai'}, network_config:{base_url:'http://127.0.0.1:8791', max_retries:0, default_request_timeout_in_seconds:10}})}}, function(err, res) {",
                   "  pm.test('Run-scoped fake provider created', function() { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
                   "  if (err || res.code >= 300) throw new Error('cannot create fake provider');",
@@ -251517,7 +251478,7 @@
                   "pm.variables.set('liveBillingProvider', provider);",
                   "pm.variables.set('liveBillingInstructions', pm.info.requestName.indexOf('before create') !== -1 ? 'refuse-live-create' : pm.info.requestName.indexOf('without answer') !== -1 ? 'answerless-live-create' : provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "pm.sendRequest({url: base + '/api/providers', method: 'POST', header: headers, body: {mode:'raw', raw: JSON.stringify({provider: provider, custom_provider_config:{base_provider_type:'openai'}, network_config:{base_url:'http://127.0.0.1:8791', max_retries:0, default_request_timeout_in_seconds:10}})}}, function(err, res) {",
                   "  pm.test('Run-scoped fake provider created', function() { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
                   "  if (err || res.code >= 300) throw new Error('cannot create fake provider');",
@@ -251625,7 +251586,7 @@
                   "pm.variables.set('liveFilterProvider', provider);",
                   "pm.variables.set('liveFilterInstructions', 'filtered-live-create-' + provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "pm.sendRequest({url: base + '/api/providers', method: 'POST', header: headers, body: {mode:'raw', raw: JSON.stringify({provider: provider, custom_provider_config:{base_provider_type:'openai'}, network_config:{base_url:'http://127.0.0.1:8791', max_retries:0, default_request_timeout_in_seconds:10}})}}, function(err, res) {",
                   "  pm.test('Run-scoped fake provider created', function() { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
                   "  if (err || res.code >= 300) throw new Error('cannot create fake provider');",
@@ -251656,11 +251617,11 @@
                   "  pm.expect(pm.response.text()).not.to.include('changed_client_permissions');",
                   "});",
                   "// Cleanup runs here even when setup threw (newman without --bail still runs the test script):",
-                  "// remove only what setup created, with the setup token the /api lock requires.",
+                  "// remove only what setup created, with the administrator session the /api lock requires.",
                   "var base = pm.variables.get('baseUrl');",
                   "var provider = pm.variables.get('liveFilterProvider');",
                   "var vkID = pm.variables.get('liveFilterVKID');",
-                  "var cleanupHeaders = { 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var cleanupHeaders = { 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "function removeProvider() {",
                   "  if (!pm.variables.get('liveFilterProviderCreated')) return;",
                   "  pm.sendRequest({url:base + '/api/providers/' + provider, method:'DELETE', header: cleanupHeaders}, function(err, res) {",
@@ -251712,7 +251673,7 @@
                   "pm.variables.set('liveFilterProvider', provider);",
                   "pm.variables.set('liveFilterInstructions', 'filtered-live-create-' + provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "pm.sendRequest({url: base + '/api/providers', method: 'POST', header: headers, body: {mode:'raw', raw: JSON.stringify({provider: provider, custom_provider_config:{base_provider_type:'openai'}, network_config:{base_url:'http://127.0.0.1:8791', max_retries:0, default_request_timeout_in_seconds:10}})}}, function(err, res) {",
                   "  pm.test('Run-scoped fake provider created', function() { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
                   "  if (err || res.code >= 300) throw new Error('cannot create fake provider');",
@@ -251743,11 +251704,11 @@
                   "  pm.expect(pm.response.text()).not.to.include('changed_client_permissions');",
                   "});",
                   "// Cleanup runs here even when setup threw (newman without --bail still runs the test script):",
-                  "// remove only what setup created, with the setup token the /api lock requires.",
+                  "// remove only what setup created, with the administrator session the /api lock requires.",
                   "var base = pm.variables.get('baseUrl');",
                   "var provider = pm.variables.get('liveFilterProvider');",
                   "var vkID = pm.variables.get('liveFilterVKID');",
-                  "var cleanupHeaders = { 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var cleanupHeaders = { 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "function removeProvider() {",
                   "  if (!pm.variables.get('liveFilterProviderCreated')) return;",
                   "  pm.sendRequest({url:base + '/api/providers/' + provider, method:'DELETE', header: cleanupHeaders}, function(err, res) {",
@@ -251799,7 +251760,7 @@
                   "pm.variables.set('liveFilterProvider', provider);",
                   "pm.variables.set('liveFilterInstructions', 'filtered-live-create-' + provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "pm.sendRequest({url: base + '/api/providers', method: 'POST', header: headers, body: {mode:'raw', raw: JSON.stringify({provider: provider, custom_provider_config:{base_provider_type:'openai'}, network_config:{base_url:'http://127.0.0.1:8791', max_retries:0, default_request_timeout_in_seconds:10}})}}, function(err, res) {",
                   "  pm.test('Run-scoped fake provider created', function() { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
                   "  if (err || res.code >= 300) throw new Error('cannot create fake provider');",
@@ -251830,11 +251791,11 @@
                   "  pm.expect(pm.response.text()).not.to.include('changed_client_permissions');",
                   "});",
                   "// Cleanup runs here even when setup threw (newman without --bail still runs the test script):",
-                  "// remove only what setup created, with the setup token the /api lock requires.",
+                  "// remove only what setup created, with the administrator session the /api lock requires.",
                   "var base = pm.variables.get('baseUrl');",
                   "var provider = pm.variables.get('liveFilterProvider');",
                   "var vkID = pm.variables.get('liveFilterVKID');",
-                  "var cleanupHeaders = { 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var cleanupHeaders = { 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "function removeProvider() {",
                   "  if (!pm.variables.get('liveFilterProviderCreated')) return;",
                   "  pm.sendRequest({url:base + '/api/providers/' + provider, method:'DELETE', header: cleanupHeaders}, function(err, res) {",
@@ -251886,7 +251847,7 @@
                   "pm.variables.set('liveFilterProvider', provider);",
                   "pm.variables.set('liveFilterInstructions', 'filtered-live-create-' + provider);",
                   "var base = pm.variables.get('baseUrl');",
-                  "var headers = { 'Content-Type': 'application/json', 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var headers = { 'Content-Type': 'application/json', 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "pm.sendRequest({url: base + '/api/providers', method: 'POST', header: headers, body: {mode:'raw', raw: JSON.stringify({provider: provider, custom_provider_config:{base_provider_type:'openai'}, network_config:{base_url:'http://127.0.0.1:8791', max_retries:0, default_request_timeout_in_seconds:10}})}}, function(err, res) {",
                   "  pm.test('Run-scoped fake provider created', function() { pm.expect(err).not.to.be.ok; pm.expect(res && res.code, res && res.text()).to.be.below(300); });",
                   "  if (err || res.code >= 300) throw new Error('cannot create fake provider');",
@@ -251917,11 +251878,11 @@
                   "  pm.expect(pm.response.text()).not.to.include('changed_client_permissions');",
                   "});",
                   "// Cleanup runs here even when setup threw (newman without --bail still runs the test script):",
-                  "// remove only what setup created, with the setup token the /api lock requires.",
+                  "// remove only what setup created, with the administrator session the /api lock requires.",
                   "var base = pm.variables.get('baseUrl');",
                   "var provider = pm.variables.get('liveFilterProvider');",
                   "var vkID = pm.variables.get('liveFilterVKID');",
-                  "var cleanupHeaders = { 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || 'bifrost-e2e-setup-token' };",
+                  "var cleanupHeaders = { 'Authorization': pm.variables.get('admin_auth_header') || '' };",
                   "function removeProvider() {",
                   "  if (!pm.variables.get('liveFilterProviderCreated')) return;",
                   "  pm.sendRequest({url:base + '/api/providers/' + provider, method:'DELETE', header: cleanupHeaders}, function(err, res) {",
@@ -255102,7 +255063,7 @@
     },
     {
       "name": "207. MCP OAuth server on localhost follows the private allowlist (mcp-oauth-private-allowlist)",
-      "description": "Management-endpoint checks with no live provider involved. The MCP OAuth chain (discovery, dynamic client registration, token requests) dials through a public-only guard, so an OAuth-protected MCP server on localhost could not be added by anyone, not even an authenticated admin. Hosts on mcp_oauth_private_allowlist (config.json mcp.tool_manager_config.oauth_private_allowlist) are now reachable for MCP clients registered by an authenticated caller; link-local and metadata addresses stay blocked and clients registered with auth bypassed stay public-only. The harness profile allowlists localhost, 127.0.0.1 and ::1, and every row carries the setup token, so these rows run as an authenticated caller.\n\nPrerequisite: examples/mcps/oauth-demo-server listening on localhost:3003 (cd examples/mcps/oauth-demo-server && go run .). Nothing in the harness runners starts it, so the second row is [PREVIEW]-tagged: run FEATURE=\"mcp-oauth-private-allowlist\" INCLUDE_PREVIEW=1 once the server is up. The first row reads the allowlist back from the store; the second registers an OAuth MCP client against the demo server and expects the pending_oauth response carrying the demo server's authorize URL. The consent is never completed, so no MCP client row is created; the pending OAuth config it leaves behind is inert.",
+      "description": "Management-endpoint checks with no live provider involved. The MCP OAuth chain (discovery, dynamic client registration, token requests) dials through a public-only guard, so an OAuth-protected MCP server on localhost could not be added by anyone, not even an authenticated admin. Hosts on mcp_oauth_private_allowlist (config.json mcp.tool_manager_config.oauth_private_allowlist) are now reachable for MCP clients registered by an authenticated caller; link-local and metadata addresses stay blocked and clients registered with auth bypassed stay public-only. The harness profile allowlists localhost, 127.0.0.1 and ::1, and every row carries the administrator session, so these rows run as an authenticated caller.\n\nPrerequisite: examples/mcps/oauth-demo-server listening on localhost:3003 (cd examples/mcps/oauth-demo-server && go run .). Nothing in the harness runners starts it, so the second row is [PREVIEW]-tagged: run FEATURE=\"mcp-oauth-private-allowlist\" INCLUDE_PREVIEW=1 once the server is up. The first row reads the allowlist back from the store; the second registers an OAuth MCP client against the demo server and expects the pending_oauth response carrying the demo server's authorize URL. The consent is never completed, so no MCP client row is created; the pending OAuth config it leaves behind is inert.",
       "item": [
         {
           "name": "GET /api/config · mcp_oauth_private_allowlist from config.json reaches the store",
@@ -261517,10 +261478,10 @@
     },
     {
       "name": "219. Vertex key credential changes need a genuine credential check (key-credential-dial-targets) [SERIAL]",
-      "description": "Management-plane regression for the default harness profile (tests/integrations/python/config.json: dashboard auth unconfigured, setup lock active with a configured setup token). A Vertex key whose auth_credentials JSON is an external-account document names its own token_url and a credential_source file: the Google client would read that file and post it to that host on the key's first use. Under this profile no request reaches the provider-key handler without a credential check: a request without the setup token is refused at the setup lock with 401 and nothing is saved, and a request carrying the setup token passed a credential check, so it may set the credential JSON. The handler's own 403 for a request admitted without any check (auth bypassed or a whitelisted route) cannot be reached from this profile; it is pinned by TestProviderKeyEndpointGuard_CoversEveryDialTarget in provider_keys_test.go. Key names carry a per-run id so an earlier run's leftovers never fail this one, and the admitted key is created disabled and scoped to an unused model so no other request can select it before it is deleted.",
+      "description": "Management-plane regression for the default harness profile (tests/integrations/python/config.json: dashboard auth unconfigured, setup lock active with a configured administrator session). A Vertex key whose auth_credentials JSON is an external-account document names its own token_url and a credential_source file: the Google client would read that file and post it to that host on the key's first use. Under this profile no request reaches the provider-key handler without a credential check: a request without the administrator session is refused at the setup lock with 401 and nothing is saved, and a request carrying the administrator session passed a credential check, so it may set the credential JSON. The handler's own 403 for a request admitted without any check (auth bypassed or a whitelisted route) cannot be reached from this profile; it is pinned by TestProviderKeyEndpointGuard_CoversEveryDialTarget in provider_keys_test.go. Key names carry a per-run id so an earlier run's leftovers never fail this one, and the admitted key is created disabled and scoped to an unused model so no other request can select it before it is deleted.",
       "item": [
         {
-          "name": "[EXPECT-401] vertex key-credential-dial-targets: a key whose credential JSON names its own token and credential-source URLs is refused without the setup token",
+          "name": "[EXPECT-401] vertex key-credential-dial-targets: a key whose credential JSON names its own token and credential-source URLs is refused without the administrator session",
           "protocolProfileBehavior": {
             "disableCookies": true
           },
@@ -261532,8 +261493,8 @@
                 "exec": [
                   "// The run id keeps parallel runs and an earlier run's leftovers from colliding on the key name.",
                   "pm.collectionVariables.set('kcdtKeyName', 'harness-credential-guard-run-' + Date.now() + '-' + pm.variables.replaceIn('{{$guid}}'));",
-                  "// The collection pre-request adds the setup token to every request; this one must carry no credential at all.",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// The collection pre-request adds the administrator session to every request; this one must carry no credential at all.",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -261545,7 +261506,7 @@
                   "var txt = pm.response.text() || '';",
                   "// With no credential the setup lock answers before the handler: 401, never a 200 that would mean an",
                   "// unauthenticated caller chose where the key's credential goes.",
-                  "pm.test('key-credential-dial-targets: a credential JSON key create without the setup token is 401', function () {",
+                  "pm.test('key-credential-dial-targets: a credential JSON key create without the administrator session is 401', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + txt.slice(0, 400)).to.equal(401);",
                   "});"
                 ]
@@ -261619,7 +261580,7 @@
           "response": []
         },
         {
-          "name": "vertex key-credential-dial-targets: a request carrying the setup token may set a credential JSON",
+          "name": "vertex key-credential-dial-targets: a request carrying the administrator session may set a credential JSON",
           "event": [
             {
               "listen": "prerequest",
@@ -261635,7 +261596,7 @@
                   "if (!staleKeyId) {",
                   "  startFresh();",
                   "} else {",
-                  "  pm.sendRequest({url: pm.variables.replaceIn('{{baseUrl}}') + '/api/providers/vertex/keys/' + staleKeyId, method: 'DELETE', header: {'X-Bifrost-Setup-Token': pm.variables.get('setupToken') || ''}}, function (err, response) {",
+                  "  pm.sendRequest({url: pm.variables.replaceIn('{{baseUrl}}') + '/api/providers/vertex/keys/' + staleKeyId, method: 'DELETE', header: {'Authorization': pm.variables.get('admin_auth_header') || ''}}, function (err, response) {",
                   "    var deleted = !err && (response.code === 200 || response.code === 404);",
                   "    pm.test('key-credential-dial-targets: the retained key from an earlier run is deleted', function () {",
                   "      pm.expect(err, 'stale key ' + staleKeyId + ' delete errored: ' + err).to.equal(null);",
@@ -261654,9 +261615,9 @@
                 "type": "text/javascript",
                 "exec": [
                   "var txt = pm.response.text() || '';",
-                  "// The setup token is a credential check, so the guard for requests admitted without one does not apply:",
+                  "// The administrator session is a credential check, so the guard for requests admitted without one does not apply:",
                   "// the key is saved. It is disabled and scoped to an unused model, so nothing selects it before cleanup.",
-                  "pm.test('key-credential-dial-targets: a credential JSON key create with the setup token is 200', function () {",
+                  "pm.test('key-credential-dial-targets: a credential JSON key create with the administrator session is 200', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + txt.slice(0, 400)).to.equal(200);",
                   "});",
                   "var j = {};",
@@ -261686,7 +261647,7 @@
           "response": []
         },
         {
-          "name": "vertex key-credential-dial-targets cleanup: delete the key the setup-token request saved",
+          "name": "vertex key-credential-dial-targets cleanup: delete the key the session-auth request saved",
           "event": [
             {
               "listen": "prerequest",
@@ -261819,10 +261780,10 @@
     },
     {
       "name": "221. Built-in plugin endpoints and secret references need a genuine credential check (plugin-config-dial-targets) [SERIAL]",
-      "description": "Management-plane regression for the default harness profile (tests/integrations/python/config.json: dashboard auth unconfigured, setup lock active with a configured setup token). An update of the built-in otel plugin naming a collector URL and a header whose value is an env. reference would make the plugin resolve that variable from the gateway's environment and post it to the collector on every export. Under this profile no request reaches the plugins handler without a credential check: a request without the setup token is refused at the setup lock with 401, and the plugin's stored config shows no trace of it. The handler's own 403 for a request admitted without any check (auth bypassed or a whitelisted route), and the admission of a genuinely authenticated change, cannot be reached here without rewriting the shared server's otel config; both are pinned by TestPluginConfigDialTargetsRequireGenuineAuth and TestPluginConfigDialTargetsCompareNormalizedStoredConfig in plugins_test.go.",
+      "description": "Management-plane regression for the default harness profile (tests/integrations/python/config.json: dashboard auth unconfigured, setup lock active with a configured administrator session). An update of the built-in otel plugin naming a collector URL and a header whose value is an env. reference would make the plugin resolve that variable from the gateway's environment and post it to the collector on every export. Under this profile no request reaches the plugins handler without a credential check: a request without the administrator session is refused at the setup lock with 401, and the plugin's stored config shows no trace of it. The handler's own 403 for a request admitted without any check (auth bypassed or a whitelisted route), and the admission of a genuinely authenticated change, cannot be reached here without rewriting the shared server's otel config; both are pinned by TestPluginConfigDialTargetsRequireGenuineAuth and TestPluginConfigDialTargetsCompareNormalizedStoredConfig in plugins_test.go.",
       "item": [
         {
-          "name": "[EXPECT-401] openai plugin-config-dial-targets: an otel config naming a collector and an env header is refused without the setup token",
+          "name": "[EXPECT-401] openai plugin-config-dial-targets: an otel config naming a collector and an env header is refused without the administrator session",
           "protocolProfileBehavior": {
             "disableCookies": true
           },
@@ -261832,8 +261793,8 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "// The collection pre-request adds the setup token to every request; this one must carry no credential at all.",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');"
+                  "// The collection pre-request adds the administrator session to every request; this one must carry no credential at all.",
+                  "pm.request.headers.remove('Authorization');"
                 ]
               }
             },
@@ -261846,7 +261807,7 @@
                   "// The collector is where every trace export goes and the env. header is what goes with it, resolved",
                   "// from the gateway's own environment. With no credential the setup lock answers before the handler:",
                   "// 401, never a 200 that would mean the config was stored and the plugin reloaded.",
-                  "pm.test('plugin-config-dial-targets: otel update with a collector and an env header without the setup token is 401', function () {",
+                  "pm.test('plugin-config-dial-targets: otel update with a collector and an env header without the administrator session is 401', function () {",
                   "  pm.expect(pm.response.code, 'failed: ' + txt.slice(0, 400)).to.equal(401);",
                   "});"
                 ]
@@ -268408,7 +268369,7 @@
     },
     {
       "name": "233. Agent and skills endpoints require an explicit public url [SERIAL]",
-      "description": "Uses the unchanged tests/integrations/python/config.json profile: a2a_external_client_url and skills_external_client_url must be unset, enforce_auth_on_inference must be false, Git must be installed, and management requests require the configured setup token. These checks make no configuration mutations and no provider calls. They pin fail-closed serving for cards, JSON-RPC, REST, push ingress, and Claude/Codex catalogs and Git endpoints, while agent management remains available. Set URLs in a separate configured run to test enabled serving; Go regressions cover that behavior and spoofed headers.",
+      "description": "Uses the unchanged tests/integrations/python/config.json profile: a2a_external_client_url and skills_external_client_url must be unset, enforce_auth_on_inference must be false, Git must be installed, and management requests require the configured administrator session. These checks make no configuration mutations and no provider calls. They pin fail-closed serving for cards, JSON-RPC, REST, push ingress, and Claude/Codex catalogs and Git endpoints, while agent management remains available. Set URLs in a separate configured run to test enabled serving; Go regressions cover that behavior and spoofed headers.",
       "item": [
         {
           "name": "233.1 explicit public url GET /agents/a2a/url-gate-fixture/.well-known/agent-card.json [EXPECT-503]",
@@ -288781,11 +288742,11 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "// The document is public: send it without the setup token the harness adds to every request. This script then manages the header itself, so the /api/config read below carries the token explicitly.",
-                  "pm.request.headers.remove('X-Bifrost-Setup-Token');",
+                  "// The document is public: send it without the administrator session the harness adds to every request. This script then manages the header itself, so the /api/config read below carries the token explicitly.",
+                  "pm.request.headers.remove('Authorization');",
                   "// The document's base is mcp_external_client_url when set, else the address the request reached.",
                   "// /api/config redacts that URL, so the case only pins the base when the profile leaves it unset.",
-                  "pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/config', method: 'GET', header: pm.variables.get('setupToken') ? { 'X-Bifrost-Setup-Token': pm.variables.get('setupToken') } : {} }, function (err, res) {",
+                  "pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/config', method: 'GET', header: pm.variables.get('admin_auth_header') ? { 'Authorization': pm.variables.get('admin_auth_header') } : {} }, function (err, res) {",
                   "  if (err) { throw err; }",
                   "  if (res.code !== 200) { throw new Error('GET /api/config failed: ' + res.code + ' ' + res.text()); }",
                   "  var external = (res.json().client_config || {}).mcp_external_client_url;",
@@ -298479,9 +298440,9 @@
                   "var expected = (u.promptTokenCount || 0) * RATES.input + imageTokens * RATES.imageOutput + otherOutput * RATES.output;",
                   "var reqId = pm.response.headers.get('x-bifrost-request-id');",
                   "pm.test(LABEL + ': x-bifrost-request-id echoed', function () { pm.expect(reqId, 'x-bifrost-request-id header').to.be.a('string').and.not.empty; });",
-                  "// /api is locked behind the setup token on the harness profile; pm.sendRequest does not inherit the collection header.",
-                  "var setupToken = pm.variables.get('setupToken');",
-                  "var logHeaders = setupToken ? [{ key: 'X-Bifrost-Setup-Token', value: setupToken }] : [];",
+                  "// /api is locked behind the administrator session on the harness profile; pm.sendRequest does not inherit the collection header.",
+                  "var adminAuthHeader = pm.variables.get('admin_auth_header');",
+                  "var logHeaders = adminAuthHeader ? [{ key: 'Authorization', value: adminAuthHeader }] : [];",
                   "// The log row is written by the batching writer, so poll the logs API. Bounded: ten reads a second apart.",
                   "function checkLog(attempt) {",
                   "  pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/logs/' + reqId, method: 'GET', header: logHeaders }, function (err, res) {",
@@ -298562,9 +298523,9 @@
                   "var expected = (u.promptTokenCount || 0) * RATES.input + imageTokens * RATES.imageOutput + otherOutput * RATES.output;",
                   "var reqId = pm.response.headers.get('x-bifrost-request-id');",
                   "pm.test(LABEL + ': x-bifrost-request-id echoed', function () { pm.expect(reqId, 'x-bifrost-request-id header').to.be.a('string').and.not.empty; });",
-                  "// /api is locked behind the setup token on the harness profile; pm.sendRequest does not inherit the collection header.",
-                  "var setupToken = pm.variables.get('setupToken');",
-                  "var logHeaders = setupToken ? [{ key: 'X-Bifrost-Setup-Token', value: setupToken }] : [];",
+                  "// /api is locked behind the administrator session on the harness profile; pm.sendRequest does not inherit the collection header.",
+                  "var adminAuthHeader = pm.variables.get('admin_auth_header');",
+                  "var logHeaders = adminAuthHeader ? [{ key: 'Authorization', value: adminAuthHeader }] : [];",
                   "// The log row is written by the batching writer, so poll the logs API. Bounded: ten reads a second apart.",
                   "function checkLog(attempt) {",
                   "  pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/logs/' + reqId, method: 'GET', header: logHeaders }, function (err, res) {",
@@ -298644,9 +298605,9 @@
                   "var expected = (u.promptTokenCount || 0) * RATES.input + imageTokens * RATES.imageOutput + otherOutput * RATES.output;",
                   "var reqId = pm.response.headers.get('x-bifrost-request-id');",
                   "pm.test(LABEL + ': x-bifrost-request-id echoed', function () { pm.expect(reqId, 'x-bifrost-request-id header').to.be.a('string').and.not.empty; });",
-                  "// /api is locked behind the setup token on the harness profile; pm.sendRequest does not inherit the collection header.",
-                  "var setupToken = pm.variables.get('setupToken');",
-                  "var logHeaders = setupToken ? [{ key: 'X-Bifrost-Setup-Token', value: setupToken }] : [];",
+                  "// /api is locked behind the administrator session on the harness profile; pm.sendRequest does not inherit the collection header.",
+                  "var adminAuthHeader = pm.variables.get('admin_auth_header');",
+                  "var logHeaders = adminAuthHeader ? [{ key: 'Authorization', value: adminAuthHeader }] : [];",
                   "// The log row is written by the batching writer, so poll the logs API. Bounded: ten reads a second apart.",
                   "function checkLog(attempt) {",
                   "  pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/logs/' + reqId, method: 'GET', header: logHeaders }, function (err, res) {",

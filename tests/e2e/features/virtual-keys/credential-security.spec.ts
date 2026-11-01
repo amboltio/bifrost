@@ -1,25 +1,11 @@
 import { expect, test } from '../../core/fixtures/base.fixture'
+import { loginAdmin } from '../../core/actions/auth'
 
 // Runs entirely against local management APIs; no LLM provider calls.
-const adminEmail = process.env.BIFROST_ADMIN_USERNAME || 'feature-admin@example.test'
-const adminPassword = process.env.BIFROST_ADMIN_PASSWORD || 'Local-feature-admin-password-1!'
 test.use({ skipAutoLogin: true })
 
-test.beforeAll(async ({ request }) => {
-  const status = await request.get('/api/session/is-auth-enabled')
-  expect(status.ok(), await status.text()).toBe(true)
-  if ((await status.json()).setup_required) {
-    const setup = await request.post('/api/session/setup-admin', {
-      headers: { 'X-Bifrost-Setup-Token': process.env.BIFROST_E2E_SETUP_TOKEN || 'local-feature-tests-only' },
-      data: { email: adminEmail, display_name: 'Feature administrator', password: adminPassword },
-    })
-    expect(setup.status(), await setup.text()).toBe(201)
-  }
-})
-
 test.beforeEach(async ({ page }) => {
-  const login = await page.request.post('/api/session/login', { data: { email: adminEmail, password: adminPassword } })
-  expect(login.status(), await login.text()).toBe(200)
+  await loginAdmin(page.request)
 })
 
 test('stored keys are prefix-only and rotation issues a hidden one-time replacement', async ({ page }) => {

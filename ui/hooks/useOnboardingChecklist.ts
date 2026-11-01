@@ -1,5 +1,5 @@
 import { IS_ENTERPRISE } from "@/lib/constants/config";
-import { useGetCoreConfigQuery } from "@/lib/store";
+import { useGetCoreConfigQuery, useIsAuthEnabledQuery } from "@/lib/store";
 import { useGetModelConfigsQuery, useGetVirtualKeysQuery } from "@/lib/store/apis/governanceApi";
 import { useGetAllKeysQuery } from "@/lib/store/apis/providersApi";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
@@ -29,11 +29,6 @@ export interface OnboardingStep {
 }
 
 export const parseSkippedIds = (raw: unknown) => (Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : []);
-
-const authValueSet = (secretVar: { value?: string; ref?: string; type?: string } | undefined) => {
-	if (!secretVar) return false;
-	return !!secretVar.value || !!secretVar.ref;
-};
 
 // Shared onboarding checklist state — both the floating OnboardingWidget and
 // the sidebar's "resume setup" promo card read this, so they can't silently
@@ -91,7 +86,7 @@ export function useOnboardingChecklist({ skip = false }: { skip?: boolean } = {}
 		return parseSkippedIds(bifrostConfig?.metadata?.[METADATA_SKIPPED_KEY]);
 	}, [bifrostConfig?.metadata]);
 
-	const authConfig = bifrostConfig?.auth_config;
+	const { data: authState } = useIsAuthEnabledQuery(undefined, { skip: shouldSkipChecklistQueries });
 	const clientConfig = bifrostConfig?.client_config;
 	// Enterprise SSO satisfies dashboard auth on its own. An identity-provider
 	// record holds the OIDC credentials (clientId/clientSecret/tenantId), and the
@@ -115,12 +110,10 @@ export function useOnboardingChecklist({ skip = false }: { skip?: boolean } = {}
 			},
 			{
 				id: "dashboard-auth",
-				title: "Set up dashboard auth",
-				route: "/workspace/config/security",
+				title: "Review dashboard access",
+				route: "/workspace/governance/users",
 				section: "Security",
-				complete:
-					ssoGatesDashboard ||
-					(!!authConfig?.is_enabled && authValueSet(authConfig?.admin_username) && authValueSet(authConfig?.admin_password)),
+				complete: ssoGatesDashboard || (!!authState?.is_auth_enabled && !authState.admin_provisioning_required),
 			},
 			{
 				id: "enforce-inference-auth",
@@ -163,7 +156,7 @@ export function useOnboardingChecklist({ skip = false }: { skip?: boolean } = {}
 				]
 			: [];
 		return [...common, ...enterprise].filter((step) => !hiddenStepIds.has(step.id));
-	}, [allKeys, clientConfig, authConfig, ssoGatesDashboard, scimProviders, modelConfigsResponse, vksResponse, hiddenStepIds]);
+	}, [allKeys, clientConfig, authState, ssoGatesDashboard, scimProviders, modelConfigsResponse, vksResponse, hiddenStepIds]);
 
 	return { bifrostConfig, steps, skippedIds, checklistReady, isDismissedForAll };
 }

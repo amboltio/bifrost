@@ -1,6 +1,5 @@
 {
   "$schema": "../../transports/config.schema.json",
-  "setup_token": "bifrost-live-setup-token",
   "providers": {
     "openai": {
       "keys": [

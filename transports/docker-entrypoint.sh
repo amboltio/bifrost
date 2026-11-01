@@ -2,6 +2,7 @@
 set -e
 
 APP_DIR=${APP_DIR:-/app/data}
+export APP_DIR
 
 app_dir_writable() {
     PROBE_DIR="$APP_DIR/.bifrost-write-test.$$"
@@ -66,6 +67,11 @@ ensure_app_dir() {
     mkdir -p "$APP_DIR/logs" 2>/dev/null || true
     chmod g+rwX "$APP_DIR/logs" 2>/dev/null || true
 }
+
+# Forward operator commands unchanged; the CLI reads APP_DIR itself.
+if [ "${1:-}" = "createsuperadmin" ]; then
+    exec /app/main "$@"
+fi
 
 # Prepare the app directory before starting the application
 ensure_app_dir

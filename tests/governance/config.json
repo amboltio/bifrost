@@ -1,6 +1,5 @@
 {
   "$schema": "https://www.getbifrost.ai/schema",
-  "setup_token": "bifrost-e2e-setup-token",
   "providers": {
     "openai": {
       "keys": [

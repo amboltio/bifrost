@@ -6,12 +6,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/crypto/bcrypt"
 )
+
+func TestBrowserAdministratorProvisioningRoutesAreRemoved(t *testing.T) {
+	SetLogger(&mockLogger{})
+	routes := router.New()
+	NewSessionHandler(newRealOAuth2Store(t), nil).RegisterRoutes(routes)
+	for _, path := range []string{"/api/session/setup", "/api/session/setup-admin"} {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Init(&fasthttp.Request{}, nil, nil)
+		ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+		ctx.Request.SetRequestURI(path)
+		routes.Handler(ctx)
+		if ctx.Response.StatusCode() != fasthttp.StatusNotFound {
+			t.Fatalf("%s remains registered: status=%d body=%s", path, ctx.Response.StatusCode(), ctx.Response.Body())
+		}
+	}
+}
 
 func TestSessionHandlerSelfServiceRoutesKeepTokensPrivateAndOwnershipScoped(t *testing.T) {
 	now := time.Now().UTC()

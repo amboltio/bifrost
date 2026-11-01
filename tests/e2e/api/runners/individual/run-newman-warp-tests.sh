@@ -59,9 +59,9 @@ WARP_DB="${WARP_DB:-bifrost_warp_e2e}"
 # never forwards a caller's key unless allow_direct_keys is on and the request
 # sends x-bf-direct-key, which this server does not.
 WARP_UPSTREAM_BIFROST="${WARP_UPSTREAM_BIFROST%/}"
-# OSS locks /api behind the setup token while dashboard auth is not active, and
+# OSS locks /api behind the administrator session while dashboard auth is not active, and
 # every Warp route lives under /api/warp. The server and newman share one value.
-SETUP_TOKEN="${BIFROST_E2E_SETUP_TOKEN:-${BIFROST_SETUP_TOKEN:-bifrost-e2e-setup-token}}"
+SESSION_AUTH_HEADER="${BIFROST_E2E_AUTH_HEADER:-}"
 REPORTERS="cli"
 VERBOSE=""
 BAIL=""
@@ -215,8 +215,9 @@ EOF
 
 start_bifrost() {
     write_config "$WORK_DIR"
+    node "$SCRIPT_DIR/../management-session.mjs" --provision "$BIFROST_BINARY" "$WORK_DIR"
     local log="$WORK_DIR/server.log"
-    BIFROST_SETUP_TOKEN="$SETUP_TOKEN" "$BIFROST_BINARY" --app-dir "$WORK_DIR" --port "$PORT" --log-level info > "$log" 2>&1 &
+    "$BIFROST_BINARY" --app-dir "$WORK_DIR" --port "$PORT" --log-level info > "$log" 2>&1 &
     SERVER_PID=$!
     local elapsed=0
     while [ $elapsed -lt 90 ]; do
@@ -241,12 +242,14 @@ echo -e "${YELLOW}Seeding logs...${NC}"
     echo -e "${RED}Error: seeding failed${NC}"; cat "$WORK_DIR/seed.log"; exit 1; }
 grep -E "^(inserted|refreshed|incident window)" "$WORK_DIR/seed.log" || true
 
-SETUP_COLLECTION="$WORK_DIR/$(basename "$COLLECTION" .postman_collection.json)-setup-token.postman_collection.json"
-node "$SCRIPT_DIR/../add-setup-token-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
+SETUP_COLLECTION="$WORK_DIR/$(basename "$COLLECTION" .postman_collection.json)-session-auth.postman_collection.json"
+SESSION_AUTH_HEADER="$(BIFROST_E2E_AUTH_HEADER= BIFROST_ADMIN_AUTH= BIFROST_E2E_BASE_URL="http://localhost:$PORT" node "$SCRIPT_DIR/../management-session.mjs")"
+export BIFROST_E2E_AUTH_HEADER="$SESSION_AUTH_HEADER"
+node "$SCRIPT_DIR/../add-session-auth-header.mjs" "$COLLECTION" "$SETUP_COLLECTION"
 
 cmd=(newman run "$SETUP_COLLECTION"
     --env-var "base_url=http://localhost:$PORT"
-    --env-var "setup_token=$SETUP_TOKEN"
+    --env-var "admin_auth_header=$SESSION_AUTH_HEADER"
     --env-var "warp_model=$WARP_MODEL"
     --env-var "warp_embedding_model=$WARP_EMBEDDING_MODEL"
     --env-var "warp_namespace=$WARP_NAMESPACE"

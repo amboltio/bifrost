@@ -28,6 +28,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/identity"
 	"github.com/maximhq/bifrost/framework/temptoken"
 	"github.com/maximhq/bifrost/framework/tracing"
 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
@@ -219,7 +220,7 @@ func TestCorsMiddleware_LocalhostOrigins(t *testing.T) {
 			if string(ctx.Response.Header.Peek("Access-Control-Allow-Methods")) != "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD" {
 				t.Errorf("Access-Control-Allow-Methods header not set correctly")
 			}
-			if string(ctx.Response.Header.Peek("Access-Control-Allow-Headers")) != "Content-Type, Authorization, X-Requested-With, X-Stainless-Timeout, X-Api-Key, X-OpenAI-Agents-SDK, X-Operation-ID, X-Bifrost-View-As, X-Bifrost-Setup-Token, MCP-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID" {
+			if string(ctx.Response.Header.Peek("Access-Control-Allow-Headers")) != "Content-Type, Authorization, X-Requested-With, X-Stainless-Timeout, X-Api-Key, X-OpenAI-Agents-SDK, X-Operation-ID, X-Bifrost-View-As, MCP-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID" {
 				t.Errorf("Access-Control-Allow-Headers header not set correctly")
 			}
 			if string(ctx.Response.Header.Peek("Access-Control-Allow-Credentials")) != "true" {
@@ -334,32 +335,6 @@ func TestCorsMiddleware_NonAllowedOrigins(t *testing.T) {
 }
 
 // TestCorsMiddleware_PreflightAllowedOrigin tests OPTIONS preflight requests for allowed origins
-// TestCorsMiddleware_PreflightAllowsSetupTokenHeader pins that the dashboard's
-// X-Bifrost-Setup-Token header passes a cross-origin preflight with no allowed_headers
-// configured. allowed_origins "*" only governs the origin check; without the header in the
-// default list, every locked-dashboard call from a separate UI origin fails CORS.
-func TestCorsMiddleware_PreflightAllowsSetupTokenHeader(t *testing.T) {
-	SetLogger(&mockLogger{})
-	for _, origins := range [][]string{{"*"}, {"https://dash.example.com"}} {
-		t.Run(strings.Join(origins, ","), func(t *testing.T) {
-			config := &lib.Config{ClientConfig: &configstore.ClientConfig{AllowedOrigins: origins}}
-			for _, origin := range []string{"http://localhost:3000", "https://dash.example.com"} {
-				ctx := &fasthttp.RequestCtx{}
-				ctx.Request.Header.SetMethod("OPTIONS")
-				ctx.Request.Header.Set("Origin", origin)
-				ctx.Request.Header.Set("Access-Control-Request-Headers", "content-type, x-bifrost-setup-token")
-				NewCorsMiddleware(config).Middleware()(func(ctx *fasthttp.RequestCtx) {})(ctx)
-				if ctx.Response.StatusCode() != fasthttp.StatusOK {
-					t.Fatalf("%s: preflight status = %d", origin, ctx.Response.StatusCode())
-				}
-				allowHeaders := strings.ToLower(string(ctx.Response.Header.Peek("Access-Control-Allow-Headers")))
-				if !strings.Contains(allowHeaders, "x-bifrost-setup-token") {
-					t.Errorf("%s: Access-Control-Allow-Headers %q must include X-Bifrost-Setup-Token", origin, allowHeaders)
-				}
-			}
-		})
-	}
-}
 
 // Browser MCP clients send the Streamable HTTP headers on every request after initialize, and on
 // every 2026-07-28 request; a preflight that leaves any out blocks the request in the browser.
@@ -1880,288 +1855,185 @@ func TestAuthMiddleware_UpdateAuthConfig_NilToEnabled(t *testing.T) {
 	}
 }
 
-// TestAuthMiddleware_BootstrapToken_NoAdminNoToken tests that CheckBootstrapToken fails
-// closed when no admin account exists yet and no setup token was configured at boot (e.g.
-// the operator hasn't set setup_token / BIFROST_SETUP_TOKEN) — the very first admin account
-// cannot be created until the operator configures one.
-func TestAuthMiddleware_BootstrapToken_NoAdminNoToken(t *testing.T) {
-	am := &AuthMiddleware{}
-
-	if am.CheckBootstrapToken("") {
-		t.Error("CheckBootstrapToken should reject when no admin exists and no setup token is configured")
-	}
-	if am.CheckBootstrapToken("anything") {
-		t.Error("CheckBootstrapToken should reject when no admin exists and no setup token is configured")
-	}
-}
-
-// TestAuthMiddleware_BootstrapToken_AdminExists tests that CheckBootstrapToken allows any
-// value through once an admin account already exists, regardless of bootstrapToken state.
-func TestAuthMiddleware_BootstrapToken_AdminExists(t *testing.T) {
-	am := &AuthMiddleware{}
-	am.UpdateAuthConfig(&configstore.AuthConfig{
-		AdminUserName: schemas.NewSecretVar("admin"),
-		AdminPassword: schemas.NewSecretVar("password"),
-		IsEnabled:     true,
-	})
-
-	if !am.CheckBootstrapToken("") {
-		t.Error("CheckBootstrapToken should allow through once an admin account exists")
-	}
-	if !am.CheckBootstrapToken("anything") {
-		t.Error("CheckBootstrapToken should allow through once an admin account exists")
-	}
-}
-
-// TestAuthMiddleware_BootstrapToken_ValidatesAndClears tests that once a bootstrap token is
-// set (simulating InitAuthMiddleware booting with a configured setup token and no admin
-// account yet), only the exact token validates, and creating the admin account — which sets
-// authConfig, mirroring BifrostHTTPServer.UpdateAuthConfig — permanently reopens the gate.
-func TestAuthMiddleware_BootstrapToken_ValidatesAndClears(t *testing.T) {
-	am := &AuthMiddleware{}
-	token := "test-bootstrap-token"
-	am.bootstrapToken.Store(&token)
-
-	if am.CheckBootstrapToken("") {
-		t.Error("CheckBootstrapToken should reject an empty token once a bootstrap token is set")
-	}
-	if am.CheckBootstrapToken("wrong-token") {
-		t.Error("CheckBootstrapToken should reject a mismatched token")
-	}
-	if !am.CheckBootstrapToken(token) {
-		t.Error("CheckBootstrapToken should accept the exact bootstrap token")
-	}
-
-	am.UpdateAuthConfig(&configstore.AuthConfig{
-		AdminUserName: schemas.NewSecretVar("admin"),
-		AdminPassword: schemas.NewSecretVar("password"),
-		IsEnabled:     true,
-	})
-	am.ClearBootstrapToken()
-
-	if !am.CheckBootstrapToken("wrong-token") {
-		t.Error("CheckBootstrapToken should allow anything through once an admin account exists")
-	}
-}
-
-// runOSSAPIChain runs a request through the OSS /api chain (SetupLockMiddleware then
+// runOSSAPIChain runs a request through the OSS /api chain (DashboardAccessMiddleware then
 // APIMiddleware, as wired in server.go) and reports whether the handler ran.
 func runOSSAPIChain(am *AuthMiddleware, ctx *fasthttp.RequestCtx) bool {
 	nextCalled := false
 	next := func(ctx *fasthttp.RequestCtx) { nextCalled = true }
-	am.SetupLockMiddleware()(am.APIMiddleware()(next))(ctx)
+	am.DashboardAccessMiddleware()(am.APIMiddleware()(next))(ctx)
 	return nextCalled
 }
 
-func newSetupLockedAuthMiddleware(setupToken string, authConfig *configstore.AuthConfig) *AuthMiddleware {
+func newDashboardAuthMiddleware(_ string, authConfig *configstore.AuthConfig) *AuthMiddleware {
 	am := &AuthMiddleware{}
-	if setupToken != "" {
-		am.setupToken.Store(&setupToken)
-	}
 	am.UpdateAuthConfig(authConfig)
 	return am
 }
 
-// TestSetupLockMiddleware_LocksAPIWhileAuthInactive pins the OSS lockout: with no admin
-// account, or an admin account with auth disabled, every non-public /api call needs the
-// setup token (401 when missing, 403 when wrong or when none is configured).
-func TestSetupLockMiddleware_LocksAPIWhileAuthInactive(t *testing.T) {
+func TestNetworkProvisioningCannotAuthorizeManagement(t *testing.T) {
 	SetLogger(&mockLogger{})
-	disabled := &configstore.AuthConfig{
-		AdminUserName: schemas.NewSecretVar("admin"),
-		AdminPassword: schemas.NewSecretVar("password"),
-		IsEnabled:     false,
-	}
-	states := map[string]*configstore.AuthConfig{"no admin": nil, "auth disabled": disabled}
-	for name, authConfig := range states {
-		t.Run(name, func(t *testing.T) {
-			cases := []struct {
-				name       string
-				setupToken string
-				header     string
-				wantNext   bool
-				wantStatus int
-			}{
-				{name: "missing header", setupToken: "s3cret", wantStatus: fasthttp.StatusUnauthorized},
-				{name: "wrong header", setupToken: "s3cret", header: "nope", wantStatus: fasthttp.StatusForbidden},
-				{name: "no token configured", header: "s3cret", wantStatus: fasthttp.StatusForbidden},
-				{name: "correct header", setupToken: "s3cret", header: "s3cret", wantNext: true, wantStatus: fasthttp.StatusOK},
-			}
-			for _, tc := range cases {
-				t.Run(tc.name, func(t *testing.T) {
-					am := newSetupLockedAuthMiddleware(tc.setupToken, authConfig)
-					ctx := &fasthttp.RequestCtx{}
-					ctx.Request.SetRequestURI("/api/providers")
-					if tc.header != "" {
-						ctx.Request.Header.Set(SetupTokenHeader, tc.header)
-					}
-					if got := runOSSAPIChain(am, ctx); got != tc.wantNext {
-						t.Fatalf("next called = %v, want %v (status %d, body %s)", got, tc.wantNext, ctx.Response.StatusCode(), ctx.Response.Body())
-					}
-					if ctx.Response.StatusCode() != tc.wantStatus {
-						t.Errorf("status = %d, want %d (body %s)", ctx.Response.StatusCode(), tc.wantStatus, ctx.Response.Body())
-					}
-					if tc.wantNext {
-						if authed, _ := ctx.UserValue(schemas.BifrostContextKeySetupTokenAuthenticated).(bool); !authed {
-							t.Error("setup-token request should be marked BifrostContextKeySetupTokenAuthenticated")
-						}
-						if admin, _ := ctx.UserValue(schemas.IsLocalAdminContextKey).(bool); !admin {
-							t.Error("setup-token request should run as the local admin")
-						}
-						if bypassed, _ := ctx.UserValue(schemas.BifrostContextKeyAuthBypassed).(bool); bypassed {
-							t.Error("setup-token request passed a credential check and must not be marked as an auth bypass")
-						}
-					}
-				})
+	for _, path := range []string{"/api/config", "/api/providers", "/api/governance/users"} {
+		t.Run(path, func(t *testing.T) {
+			am := newDashboardAuthMiddleware("old-operator-secret", nil)
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Request.SetRequestURI(path)
+			ctx.Request.Header.Set("X-Bifrost-Setup-Token", "old-operator-secret")
+			if runOSSAPIChain(am, ctx) {
+				t.Fatal("a network bootstrap credential authorized management; administrators must be created locally")
 			}
 		})
 	}
 }
 
-// TestSetupLockMiddleware_PublicRoutesStayOpen pins that the setup screen can bootstrap:
-// health, version and is-auth-enabled answer without the setup token while locked.
-func TestSetupLockMiddleware_PublicRoutesStayOpen(t *testing.T) {
+func TestDashboardAccessObservesLocalProvisioningBeforeAuthorizing(t *testing.T) {
 	SetLogger(&mockLogger{})
-	for _, path := range []string{"/health", "/api/version", "/api/session/is-auth-enabled"} {
-		am := newSetupLockedAuthMiddleware("s3cret", nil)
+	store := newRealOAuth2Store(t)
+	am, err := InitAuthMiddleware(store, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(path string, token string) *fasthttp.RequestCtx {
 		ctx := &fasthttp.RequestCtx{}
+		ctx.Init(&fasthttp.Request{}, nil, nil)
 		ctx.Request.SetRequestURI(path)
-		if !runOSSAPIChain(am, ctx) {
-			t.Errorf("%s should stay public while locked, got %d", path, ctx.Response.StatusCode())
+		if token != "" {
+			ctx.Request.Header.Set("Authorization", "Bearer "+token)
+		}
+		return ctx
+	}
+	before := request("/api/providers", "")
+	if runOSSAPIChain(am, before) || before.Response.StatusCode() != 403 {
+		t.Fatalf("fresh installation opened management: %d", before.Response.StatusCode())
+	}
+	hash, err := identity.NewPasswordService().Hash("Local-Admin-Password1!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	email := "terminal-admin@example.test"
+	_, err = store.(*configstore.RDBConfigStore).CreateLocalSuperAdmin(t.Context(), &tables.TableUser{Email: &email}, &tables.TableCredential{Kind: tables.CredentialKindPassword, IsActive: true, SecretHash: hash}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymous := request("/api/providers", "")
+	if runOSSAPIChain(am, anonymous) || anonymous.Response.StatusCode() != 401 {
+		t.Fatalf("CLI provisioning must require login: %d %s", anonymous.Response.StatusCode(), anonymous.Response.Body())
+	}
+	if !am.identityInitialized.Load() || !am.IsDashboardAuthActive() {
+		t.Fatal("durable login policy was not published before provisioning completed")
+	}
+	login := putConfigCtx(`{"email":"terminal-admin@example.test","password":"Local-Admin-Password1!"}`)
+	login.Request.Header.SetMethod(fasthttp.MethodPost)
+	NewSessionHandler(store, nil).login(login)
+	if login.Response.StatusCode() != 200 {
+		t.Fatalf("CLI-created user could not log in: %d %s", login.Response.StatusCode(), login.Response.Body())
+	}
+	var cookie fasthttp.Cookie
+	cookie.SetKey("token")
+	if !login.Response.Header.Cookie(&cookie) || len(cookie.Value()) == 0 {
+		t.Fatal("login did not issue a session cookie")
+	}
+	if !runOSSAPIChain(am, request("/api/providers", string(cookie.Value()))) {
+		t.Fatal("canonical session was rejected after CLI provisioning")
+	}
+}
+
+func TestDashboardAccessPolicyReadFailureNeverUnlocks(t *testing.T) {
+	SetLogger(&mockLogger{})
+	store := &provisioningPolicyStoreStub{policyErr: errors.New("database unavailable")}
+	am := &AuthMiddleware{store: store}
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/providers")
+	if runOSSAPIChain(am, ctx) || ctx.Response.StatusCode() != 503 || am.identityInitialized.Load() {
+		t.Fatal("failed policy refresh unlocked management")
+	}
+	store.policyErr = nil
+	store.policy = &configstore.AuthConfig{IsEnabled: true}
+	ctx.Response.Reset()
+	called := false
+	am.DashboardAccessMiddleware()(func(*fasthttp.RequestCtx) { called = true })(ctx)
+	if !called || !am.identityInitialized.Load() || !am.IsDashboardAuthActive() {
+		t.Fatal("provisioning did not recover after the policy became available")
+	}
+}
+
+type provisioningPolicyStoreStub struct {
+	configstore.ConfigStore
+	policy    *configstore.AuthConfig
+	policyErr error
+}
+
+func TestDashboardAccessPolicyRefreshCannotOverwriteConcurrentUpdate(t *testing.T) {
+	SetLogger(&mockLogger{})
+	oldPolicy := &configstore.AuthConfig{IsEnabled: true, LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true, IdleTimeoutSeconds: 3600}}
+	newPolicy := &configstore.AuthConfig{IsEnabled: true, LocalLogin: &configstore.LocalLoginConfig{IsEnabled: true, IdleTimeoutSeconds: 60}}
+	store := &blockingProvisioningPolicyStore{
+		provisioningPolicyStoreStub: provisioningPolicyStoreStub{policy: oldPolicy},
+		readStarted:                 make(chan struct{}), releaseRead: make(chan struct{}),
+	}
+	am := &AuthMiddleware{store: store}
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/providers")
+	requestDone := make(chan struct{})
+	go func() {
+		am.DashboardAccessMiddleware()(func(*fasthttp.RequestCtx) {})(ctx)
+		close(requestDone)
+	}()
+	<-store.readStarted
+	updateStarted, updateDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(updateStarted)
+		am.UpdateAuthConfig(newPolicy)
+		close(updateDone)
+	}()
+	<-updateStarted
+	updatedBeforeRefresh := false
+	select {
+	case <-updateDone:
+		updatedBeforeRefresh = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(store.releaseRead)
+	for _, done := range []<-chan struct{}{requestDone, updateDone} {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("policy refresh or concurrent update did not complete")
 		}
 	}
-}
-
-// TestSetupLockMiddleware_IgnoredOnceAuthEnabled pins that the setup token stops working
-// the moment dashboard auth is enabled; normal session auth applies.
-func TestSetupLockMiddleware_IgnoredOnceAuthEnabled(t *testing.T) {
-	SetLogger(&mockLogger{})
-	am := newSetupLockedAuthMiddleware("s3cret", &configstore.AuthConfig{
-		AdminUserName: schemas.NewSecretVar("admin"),
-		AdminPassword: schemas.NewSecretVar("hashedpassword"),
-		IsEnabled:     true,
-	})
-	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.SetRequestURI("/api/providers")
-	ctx.Request.Header.Set(SetupTokenHeader, "s3cret")
-	if runOSSAPIChain(am, ctx) {
-		t.Fatal("setup token must not authenticate once dashboard auth is enabled")
+	if updatedBeforeRefresh {
+		t.Error("policy update was not serialized with the in-flight initial refresh")
 	}
-	if ctx.Response.StatusCode() != fasthttp.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", ctx.Response.StatusCode())
+	if am.authConfig.Load() != newPolicy || !am.identityInitialized.Load() {
+		t.Fatal("initial refresh overwrote the newly saved login policy")
 	}
 }
 
-// TestSetupLockMiddleware_LiftsWhenAdminEnabled pins that saving an enabled admin unlocks
-// the API without a restart (UpdateAuthConfig swaps the pointer the gate reads).
-func TestSetupLockMiddleware_LiftsWhenAdminEnabled(t *testing.T) {
-	SetLogger(&mockLogger{})
-	am := newSetupLockedAuthMiddleware("s3cret", nil)
-	handler := am.SetupLockMiddleware()(func(ctx *fasthttp.RequestCtx) {})
-	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.SetRequestURI("/api/providers")
-	handler(ctx)
-	if ctx.Response.StatusCode() != fasthttp.StatusUnauthorized {
-		t.Fatalf("locked status = %d, want 401", ctx.Response.StatusCode())
-	}
-	am.UpdateAuthConfig(&configstore.AuthConfig{
-		AdminUserName: schemas.NewSecretVar("admin"),
-		AdminPassword: schemas.NewSecretVar("hashedpassword"),
-		IsEnabled:     true,
-	})
-	nextCalled := false
-	ctx2 := &fasthttp.RequestCtx{}
-	ctx2.Request.SetRequestURI("/api/providers")
-	am.SetupLockMiddleware()(func(ctx *fasthttp.RequestCtx) { nextCalled = true })(ctx2)
-	if !nextCalled {
-		t.Error("gate should hand off to APIMiddleware once dashboard auth is enabled")
-	}
+type blockingProvisioningPolicyStore struct {
+	provisioningPolicyStoreStub
+	readStarted chan struct{}
+	releaseRead chan struct{}
 }
 
-// TestSetupLockMiddleware_SetupSessionCookie pins the dashboard path: the HttpOnly cookie
-// from POST /api/session/setup stands in for the header (WebSocket upgrades included), and a
-// tampered, expired, or other-token cookie is refused.
-func TestSetupLockMiddleware_SetupSessionCookie(t *testing.T) {
-	SetLogger(&mockLogger{})
-	am := newSetupLockedAuthMiddleware("s3cret", nil)
-	now := time.Now()
-	valid, expires, err := am.IssueSetupSession(now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := expires.Sub(now); got != SetupSessionTTL {
-		t.Errorf("expiry = %v, want %v", got, SetupSessionTTL)
-	}
-	if strings.Contains(valid, "s3cret") {
-		t.Fatal("setup session cookie must not carry the setup token")
-	}
-	other := newSetupLockedAuthMiddleware("another-token", nil)
-	otherCookie, _, err := other.IssueSetupSession(now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	expired, _, err := am.IssueSetupSession(now.Add(-SetupSessionTTL - time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tampered := valid[:len(valid)-2] + "xx"
-	for _, tc := range []struct {
-		name, cookie, header string
-		websocket            bool
-		wantNext             bool
-		wantStatus           int
-	}{
-		{name: "valid cookie", cookie: valid, wantNext: true, wantStatus: fasthttp.StatusOK},
-		{name: "valid cookie on websocket upgrade", cookie: valid, websocket: true, wantNext: true, wantStatus: fasthttp.StatusOK},
-		{name: "tampered cookie", cookie: tampered, wantStatus: fasthttp.StatusUnauthorized},
-		{name: "expired cookie", cookie: expired, wantStatus: fasthttp.StatusUnauthorized},
-		{name: "cookie signed under another token", cookie: otherCookie, wantStatus: fasthttp.StatusUnauthorized},
-		{name: "garbage cookie", cookie: "v1.notanumber.zz.zz", wantStatus: fasthttp.StatusUnauthorized},
-		{name: "wrong header beats a valid cookie", cookie: valid, header: "nope", wantStatus: fasthttp.StatusForbidden},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := &fasthttp.RequestCtx{}
-			ctx.Request.SetRequestURI("/api/providers")
-			ctx.Request.Header.SetCookie(SetupSessionCookie, tc.cookie)
-			if tc.header != "" {
-				ctx.Request.Header.Set(SetupTokenHeader, tc.header)
-			}
-			if tc.websocket {
-				ctx.Request.Header.Set("Upgrade", "websocket")
-			}
-			if got := runOSSAPIChain(am, ctx); got != tc.wantNext {
-				t.Fatalf("next called = %v, want %v (status %d, body %s)", got, tc.wantNext, ctx.Response.StatusCode(), ctx.Response.Body())
-			}
-			if ctx.Response.StatusCode() != tc.wantStatus {
-				t.Errorf("status = %d, want %d", ctx.Response.StatusCode(), tc.wantStatus)
-			}
-			if tc.wantNext {
-				if bypassed, _ := ctx.UserValue(schemas.BifrostContextKeyAuthBypassed).(bool); bypassed {
-					t.Error("cookie-authenticated request must not be marked as an auth bypass")
-				}
-			}
-		})
-	}
-
-	// Once dashboard auth is on, the cookie is no credential: APIMiddleware wants a session.
-	am.UpdateAuthConfig(&configstore.AuthConfig{
-		AdminUserName: schemas.NewSecretVar("admin"),
-		AdminPassword: schemas.NewSecretVar("hashedpassword"),
-		IsEnabled:     true,
-	})
-	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.SetRequestURI("/api/providers")
-	ctx.Request.Header.SetCookie(SetupSessionCookie, valid)
-	if runOSSAPIChain(am, ctx) || ctx.Response.StatusCode() != fasthttp.StatusUnauthorized {
-		t.Errorf("setup session cookie must not authenticate once dashboard auth is enabled, got %d", ctx.Response.StatusCode())
-	}
+func (s *blockingProvisioningPolicyStore) GetAuthConfig(context.Context) (*configstore.AuthConfig, error) {
+	policy := s.policy
+	close(s.readStarted)
+	<-s.releaseRead
+	return policy, nil
 }
 
-// TestSetupLockMiddleware_InferenceUnaffected pins that the gate is API-only: inference
+func (*provisioningPolicyStoreStub) GetDashboardIdentityState(context.Context) (configstore.DashboardIdentityState, error) {
+	return configstore.DashboardIdentityState{Initialized: true}, nil
+}
+
+func (s *provisioningPolicyStoreStub) GetAuthConfig(context.Context) (*configstore.AuthConfig, error) {
+	return s.policy, s.policyErr
+}
+
+// TestDashboardAccessMiddleware_InferenceUnaffected pins that the gate is API-only: inference
 // keeps delegating to governance (enforce_auth_on_inference) while dashboard auth is off.
-func TestSetupLockMiddleware_InferenceUnaffected(t *testing.T) {
+func TestDashboardAccessMiddleware_InferenceUnaffected(t *testing.T) {
 	SetLogger(&mockLogger{})
-	am := newSetupLockedAuthMiddleware("s3cret", nil)
+	am := newDashboardAuthMiddleware("s3cret", nil)
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/v1/chat/completions")
 	nextCalled := false
@@ -2326,7 +2198,7 @@ func TestCorsMiddleware_DefaultHeaders(t *testing.T) {
 	handler(ctx)
 
 	// Check default headers are set
-	expectedHeaders := "Content-Type, Authorization, X-Requested-With, X-Stainless-Timeout, X-Api-Key, X-OpenAI-Agents-SDK, X-Operation-ID, X-Bifrost-View-As, X-Bifrost-Setup-Token, MCP-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID"
+	expectedHeaders := "Content-Type, Authorization, X-Requested-With, X-Stainless-Timeout, X-Api-Key, X-OpenAI-Agents-SDK, X-Operation-ID, X-Bifrost-View-As, MCP-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name, Last-Event-ID"
 	actualHeaders := string(ctx.Response.Header.Peek("Access-Control-Allow-Headers"))
 	if actualHeaders != expectedHeaders {
 		t.Errorf("Expected Access-Control-Allow-Headers to be %s, got %s", expectedHeaders, actualHeaders)
@@ -5069,52 +4941,6 @@ func TestTracingMiddleware_RootSpanDropsQueryAndNormalizes(t *testing.T) {
 	})
 }
 
-// TestAuthMiddleware_ConfiguredSetupToken_OutlivesFirstAdmin pins the second use of the
-// operator-configured setup token: proving control when auth_config is changed while
-// dashboard auth is disabled. Unlike the first-admin bootstrap gate it must keep matching
-// only the exact configured value after an admin account exists and after
-// ClearBootstrapToken, and it must never match when no token is configured.
-func TestAuthMiddleware_ConfiguredSetupToken_OutlivesFirstAdmin(t *testing.T) {
-	SetLogger(&mockLogger{})
-	const token = "test-setup-token"
-	am, err := InitAuthMiddleware(newRealOAuth2Store(t), nil, nil, token)
-	if err != nil {
-		t.Fatalf("InitAuthMiddleware: %v", err)
-	}
-
-	if !am.CheckConfiguredSetupToken(token) {
-		t.Error("the configured token must match before any admin exists")
-	}
-	if am.CheckConfiguredSetupToken("wrong") || am.CheckConfiguredSetupToken("") {
-		t.Error("a wrong or empty token must not match")
-	}
-
-	am.UpdateAuthConfig(&configstore.AuthConfig{
-		AdminUserName: schemas.NewSecretVar("admin"),
-		AdminPassword: schemas.NewSecretVar("password"),
-		IsEnabled:     true,
-	})
-	am.ClearBootstrapToken()
-
-	if !am.CheckBootstrapToken("anything") {
-		t.Error("the first-admin gate must still open once an admin account exists")
-	}
-	if !am.CheckConfiguredSetupToken(token) {
-		t.Error("the configured token must keep matching after the first admin is created")
-	}
-	if am.CheckConfiguredSetupToken("anything") {
-		t.Error("an admin account must not make every token match the configured one")
-	}
-
-	none, err := InitAuthMiddleware(newRealOAuth2Store(t), nil, nil, "")
-	if err != nil {
-		t.Fatalf("InitAuthMiddleware: %v", err)
-	}
-	if none.CheckConfiguredSetupToken("") || none.CheckConfiguredSetupToken("anything") {
-		t.Error("with no token configured nothing may match")
-	}
-}
-
 // zstdWindow512MiBFrame is a complete zstd frame (magic, frame header with a
 // Window_Descriptor only, one empty raw last block) whose header declares a
 // 512 MiB back-reference window: nine bytes on the wire, no decoded output.
@@ -5581,7 +5407,7 @@ func (s *setupHealthStoreStub) GetDashboardIdentityState(context.Context) (confi
 
 func (s *setupHealthStoreStub) Ping(context.Context) error { return s.pingErr }
 
-func TestSetupLockMiddleware_CanonicalHealth(t *testing.T) {
+func TestDashboardAccessMiddleware_CanonicalHealth(t *testing.T) {
 	SetLogger(&mockLogger{})
 	for _, tc := range []struct {
 		name        string
@@ -5597,13 +5423,13 @@ func TestSetupLockMiddleware_CanonicalHealth(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &setupHealthStoreStub{initialized: tc.initialized, stateErr: tc.stateErr, pingErr: tc.pingErr}
-			am := newSetupLockedAuthMiddleware("", nil)
+			am := newDashboardAuthMiddleware("", nil)
 			am.store = store
 			health := NewHealthHandler(&lib.Config{ConfigStore: store, ClientConfig: &configstore.ClientConfig{}})
 			ctx := &fasthttp.RequestCtx{}
 			ctx.Request.Header.SetMethod(fasthttp.MethodGet)
 			ctx.Request.SetRequestURI("/health")
-			am.SetupLockMiddleware()(am.APIMiddleware()(NewIdentityAuthorizationMiddleware(nil)(health.getHealth)))(ctx)
+			am.DashboardAccessMiddleware()(am.APIMiddleware()(NewIdentityAuthorizationMiddleware(nil)(health.getHealth)))(ctx)
 			assert.Equal(t, tc.wantStatus, ctx.Response.StatusCode(), "body: %s", ctx.Response.Body())
 			if tc.wantStatus == fasthttp.StatusOK {
 				assert.Contains(t, string(ctx.Response.Body()), `"status":"ok"`)
@@ -5612,11 +5438,11 @@ func TestSetupLockMiddleware_CanonicalHealth(t *testing.T) {
 	}
 }
 
-func TestSetupLockMiddleware_CanonicalHealthDoesNotUnlockAPI(t *testing.T) {
+func TestDashboardAccessMiddleware_CanonicalHealthDoesNotUnlockAPI(t *testing.T) {
 	SetLogger(&mockLogger{})
 	for _, path := range []string{"/api/providers", "/api/auth/settings", "/api/session/setup-admin", "/health/admin", "/health/../api/providers", "/health%2F..%2Fapi%2Fproviders"} {
 		t.Run(path, func(t *testing.T) {
-			am := newSetupLockedAuthMiddleware("", nil)
+			am := newDashboardAuthMiddleware("", nil)
 			am.store = &setupHealthStoreStub{}
 			ctx := &fasthttp.RequestCtx{}
 			ctx.Request.SetRequestURI(path)
@@ -5626,11 +5452,11 @@ func TestSetupLockMiddleware_CanonicalHealthDoesNotUnlockAPI(t *testing.T) {
 	}
 }
 
-func BenchmarkSetupLockMiddleware(b *testing.B) {
+func BenchmarkDashboardAccessMiddleware(b *testing.B) {
 	SetLogger(&mockLogger{})
 	for _, name := range []string{"canonical_initialized", "canonical_health", "legacy_initialized"} {
 		b.Run(name, func(b *testing.B) {
-			am := newSetupLockedAuthMiddleware("", &configstore.AuthConfig{IsEnabled: true})
+			am := newDashboardAuthMiddleware("", &configstore.AuthConfig{IsEnabled: true})
 			path := "/api/providers"
 			if name != "legacy_initialized" {
 				am.store = &setupHealthStoreStub{initialized: true}
@@ -5641,7 +5467,7 @@ func BenchmarkSetupLockMiddleware(b *testing.B) {
 				am.identityInitialized.Store(false)
 				am.store = &setupHealthStoreStub{}
 			}
-			handler := am.SetupLockMiddleware()(func(*fasthttp.RequestCtx) {})
+			handler := am.DashboardAccessMiddleware()(func(*fasthttp.RequestCtx) {})
 			ctx := &fasthttp.RequestCtx{}
 			ctx.Request.SetRequestURI(path)
 			b.ReportAllocs()
