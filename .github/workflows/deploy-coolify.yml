@@ -1,0 +1,143 @@
+name: Deploy to Coolify
+
+# Coolify builds transports/Dockerfile.local from the dev branch itself; this
+# workflow only triggers that build and fails when the deployment or the
+# post-deploy health check fails. Disable Coolify's own auto-deploy webhook for
+# the application so a push to dev deploys exactly once.
+#
+# Repository settings:
+#   secrets.COOLIFY_API_KEY  - Coolify API token with the `deploy` and `read` permissions
+#   secrets.COOLIFY_APP_ID   - UUID of the Coolify application
+#   vars.COOLIFY_URL         - Coolify base URL, e.g. https://coolify.example.com
+on:
+  push:
+    branches: ["dev"]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild without the Docker build cache"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never run two deployments of the same application at once; a newer push
+# waits for the running deployment instead of cancelling it mid-migration.
+concurrency:
+  group: deploy-coolify
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy dev to Coolify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: dev
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        with:
+          # The Coolify host comes from a repository variable, so it cannot be
+          # listed in a static allowlist.
+          egress-policy: audit
+
+      - name: Trigger and await deployment
+        env:
+          COOLIFY_URL: ${{ vars.COOLIFY_URL }}
+          COOLIFY_API_KEY: ${{ secrets.COOLIFY_API_KEY }}
+          COOLIFY_APP_ID: ${{ secrets.COOLIFY_APP_ID }}
+          FORCE: ${{ inputs.force && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          for name in COOLIFY_URL COOLIFY_API_KEY COOLIFY_APP_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is not configured"
+              exit 1
+            fi
+          done
+          api="${COOLIFY_URL%/}/api/v1"
+
+          # Writes the response body to $body_file and prints the HTTP status.
+          body_file="$(mktemp)"
+          call() {
+            curl -sS -o "$body_file" -w '%{http_code}' -X "$1" \
+              -H "Authorization: Bearer ${COOLIFY_API_KEY}" \
+              -H "Accept: application/json" \
+              "$2"
+          }
+
+          # Newer Coolify releases expect POST /deploy; older ones only accept GET.
+          deploy_url="${api}/deploy?uuid=${COOLIFY_APP_ID}&force=${FORCE}"
+          deployment_uuid=""
+          for attempt in 1 2 3 4 5; do
+            status="$(call POST "$deploy_url")"
+            if [ "$status" = "405" ]; then
+              status="$(call GET "$deploy_url")"
+            fi
+            if [ "$status" = "429" ]; then
+              echo "Coolify deployment queue is busy, retrying (${attempt}/5)"
+              sleep 15
+              continue
+            fi
+            if [ "$status" != "200" ]; then
+              echo "::error::Coolify deploy request failed with HTTP ${status}: $(cat "$body_file")"
+              exit 1
+            fi
+            deployment_uuid="$(jq -r '.deployments[0].deployment_uuid // empty' "$body_file")"
+            break
+          done
+          if [ -z "$deployment_uuid" ]; then
+            echo "::error::Coolify did not queue a deployment: $(cat "$body_file")"
+            exit 1
+          fi
+          echo "Queued Coolify deployment ${deployment_uuid}"
+
+          # Building the UI and the static Go binary takes several minutes.
+          deadline=$(( $(date +%s) + 40 * 60 ))
+          while :; do
+            status="$(call GET "${api}/deployments/${deployment_uuid}")"
+            if [ "$status" != "200" ]; then
+              echo "::warning::Could not read deployment status (HTTP ${status}), retrying"
+            else
+              state="$(jq -r '.status // empty' "$body_file")"
+              case "$state" in
+                finished)
+                  echo "Deployment finished"
+                  break
+                  ;;
+                failed|cancelled*)
+                  echo "::error::Coolify deployment ${deployment_uuid} ended with status '${state}'. See the deployment log in Coolify."
+                  exit 1
+                  ;;
+                *)
+                  echo "Deployment status: ${state:-unknown}"
+                  ;;
+              esac
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for Coolify deployment ${deployment_uuid}"
+              exit 1
+            fi
+            sleep 20
+          done
+
+          # Verify the new container answers on its public domain.
+          status="$(call GET "${api}/applications/${COOLIFY_APP_ID}")"
+          fqdn=""
+          if [ "$status" = "200" ]; then
+            fqdn="$(jq -r '.fqdn // empty' "$body_file" | cut -d, -f1)"
+          fi
+          if [ -z "$fqdn" ]; then
+            echo "::warning::No domain is configured for the application; skipping the health check"
+            exit 0
+          fi
+          for attempt in $(seq 1 30); do
+            if curl -fsS -o /dev/null --max-time 10 "${fqdn%/}/health"; then
+              echo "Health check passed at ${fqdn%/}/health"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::${fqdn%/}/health did not become healthy after deployment"
+          exit 1
